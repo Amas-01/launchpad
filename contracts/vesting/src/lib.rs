@@ -163,6 +163,15 @@ impl VestingContract {
             .publish((symbol_short!("create"), recipient), total_amount);
     }
 
+    /// Create multiple vesting schedules in a single transaction.
+    ///
+    /// Atomically transfers the sum of all `total_amount` values from the admin
+    /// to this contract (Phase 2), then writes each schedule (Phase 3). If any
+    /// step panics the entire transaction rolls back, including the token transfer.
+    ///
+    /// **Maximum batch size: 50 recipients.** Larger batches risk exceeding
+    /// Soroban's per-transaction compute budget and will be rejected up front
+    /// with a clear error rather than an opaque resource failure.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         let admin: Address = env
             .storage()
@@ -172,6 +181,7 @@ impl VestingContract {
         admin.require_auth();
 
         assert!(schedules.len() > 0, "schedules cannot be empty");
+        assert!(schedules.len() <= 50, "batch size exceeds maximum of 50");
 
         // Get the token contract address
         let token_addr: Address = env
@@ -608,7 +618,7 @@ impl VestingContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger, Env};
 
     fn latest_index() -> Option<u32> {
         None
@@ -1044,15 +1054,15 @@ mod test {
         assert_eq!(schedule.end_ledger, 200); // unchanged
 
         // Verify event emission contains (old_cliff, new_cliff)
+        use soroban_sdk::xdr::ToXdr;
         use soroban_sdk::IntoVal;
-        assert_eq!(
-            env.events().all().last(),
-            Some((
-                contract_id,
-                (symbol_short!("clf_ext"), recipient).into_val(&env),
-                (100u32, 150u32).into_val(&env)
-            ))
-        );
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let expected_topics: soroban_sdk::Val = (symbol_short!("clf_ext"), recipient).into_val(&env);
+        let expected_data: soroban_sdk::Val = (100u32, 150u32).into_val(&env);
+        assert_eq!(last.0, contract_id);
+        assert_eq!(last.1.to_xdr(&env), expected_topics.to_xdr(&env));
+        assert_eq!(last.2.to_xdr(&env), expected_data.to_xdr(&env));
     }
 
     #[test]

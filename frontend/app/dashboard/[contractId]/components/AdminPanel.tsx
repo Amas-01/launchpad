@@ -226,6 +226,15 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const handleBatchMint = async (entries: BatchMintEntry[]) => {
         if (!publicKey) return;
 
+        if (entries.length > 50) {
+            toast.show({
+                title: "Batch too large",
+                message: `Maximum batch size is 50 recipients. You have ${entries.length}.`,
+                variant: "error",
+            });
+            return;
+        }
+
         setLoading("batch-mint");
         setSuccess(null);
         setLastTxHash(null);
