@@ -407,14 +407,14 @@ impl VestingContract {
     pub fn pause(env: Env) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::IsPaused, &true);
-        env.events().publish((symbol_short!("pause"),), true);
+        env.events().publish((symbol_short!("pause"),), ());
     }
 
     /// Unpause the vesting contract. Admin only.
     pub fn unpause(env: Env) {
         Self::_require_admin(&env);
         env.storage().instance().remove(&DataKey::IsPaused);
-        env.events().publish((symbol_short!("pause"),), false);
+        env.events().publish((symbol_short!("unpause"),), ());
     }
 
     /// Return the number of schedules stored for a recipient.
@@ -426,6 +426,22 @@ impl VestingContract {
     pub fn get_schedule(env: Env, recipient: Address, index: Option<u32>) -> VestingSchedule {
         let (_, schedule) = Self::_load_schedule(&env, &recipient, index);
         schedule
+    }
+
+    /// Returns the admin address of this vesting contract.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized")
+    }
+
+    /// Returns the token contract address managed by this vesting contract.
+    pub fn get_token_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenContract)
+            .expect("not initialized")
     }
 
     /// Return all recipients who have vesting schedules.
@@ -448,15 +464,12 @@ impl VestingContract {
             .unwrap_or(Vec::new(&env));
 
         let total = all_recipients.len();
-        let end = if start + limit > total {
-            total
-        } else {
-            start + limit
-        };
 
         if start >= total {
             return Vec::new(&env);
         }
+
+        let end = start.saturating_add(limit).min(total);
 
         let mut paginated = Vec::new(&env);
         let mut i = start;
