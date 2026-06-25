@@ -110,7 +110,8 @@ type TransferAdminData = z.infer<typeof transferAdminSchema>;
 type VestingData = z.infer<typeof vestingSchema>;
 type MetadataUriData = z.infer<typeof metadataUriSchema>;
 
-type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData;
+type AcceptAdminData = Record<string, never>;
+type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData | AcceptAdminData;
 
 /* ── AdminPanel Component ───────────────────────────────────────── */
 
@@ -1024,7 +1025,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
             <Button
               type="button"
               className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
-              onClick={() => handleAction("accept-admin", {} as any)}
+              onClick={() => handleAction("accept-admin", {} as AcceptAdminData)}
               isLoading={loading === "accept-admin"}
               disabled={adminDisabled && loading !== "accept-admin"}
             >
