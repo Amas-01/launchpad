@@ -96,7 +96,7 @@ export const StepReview = ({ control, estimatedFee, feeEstimationLoading, feeEst
                       <span className="text-sm text-gray-400">XLM</span>
                     </div>
                   ) : (
-                    <span className="text-sm text-gray-500">Run "Check" to estimate</span>
+                    <span className="text-sm text-gray-500">Run &quot;Check&quot; to estimate</span>
                   )}
                 </div>
               </div>
