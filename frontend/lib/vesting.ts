@@ -87,15 +87,55 @@ async function simulateCall(
   return result.retval;
 }
 
+function toU32ScVal(value: number): StellarSdk.xdr.ScVal {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error("Invalid u32 value");
+  }
+  return StellarSdk.nativeToScVal(BigInt(value), { type: "u32" });
+}
+
+export async function fetchScheduleCount(
+  contractId: string,
+  recipientAddress: string,
+): Promise<number> {
+  const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+  const result = await simulateCall(contractId, "get_schedule_count", [
+    addressVal,
+  ]);
+  return decodeU32(result);
+}
+
+async function resolveScheduleIndex(
+  contractId: string,
+  recipientAddress: string,
+  scheduleIndex?: number,
+): Promise<number> {
+  if (scheduleIndex !== undefined) return scheduleIndex;
+  const count = await fetchScheduleCount(contractId, recipientAddress);
+  if (count <= 0) {
+    throw new Error("no schedule found");
+  }
+  return count - 1;
+}
+
 /* ── Public API ────────────────────────────────────────────────────── */
 
 /** Fetch the full vesting schedule for a recipient from the contract. */
 export async function fetchVestingSchedule(
   contractId: string,
   recipientAddress: string,
+  scheduleIndex?: number,
 ): Promise<VestingSchedule> {
   const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
-  const result = await simulateCall(contractId, "get_schedule", [addressVal]);
+  const resolvedIndex = await resolveScheduleIndex(
+    contractId,
+    recipientAddress,
+    scheduleIndex,
+  );
+  const result = await simulateCall(contractId, "get_schedule", [
+    addressVal,
+    toU32ScVal(resolvedIndex),
+  ]);
 
   const fields = result.map();
   if (!fields) throw new Error("Unexpected result type from get_schedule");
@@ -120,9 +160,18 @@ export async function fetchVestingSchedule(
 export async function fetchVestedAmount(
   contractId: string,
   recipientAddress: string,
+  scheduleIndex?: number,
 ): Promise<bigint> {
   const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
-  const result = await simulateCall(contractId, "vested_amount", [addressVal]);
+  const resolvedIndex = await resolveScheduleIndex(
+    contractId,
+    recipientAddress,
+    scheduleIndex,
+  );
+  const result = await simulateCall(contractId, "vested_amount", [
+    addressVal,
+    toU32ScVal(resolvedIndex),
+  ]);
   return decodeI128(result);
 }
 
@@ -130,10 +179,17 @@ export async function fetchVestedAmount(
 export async function fetchReleasedAmount(
   contractId: string,
   recipientAddress: string,
+  scheduleIndex?: number,
 ): Promise<bigint> {
   const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+  const resolvedIndex = await resolveScheduleIndex(
+    contractId,
+    recipientAddress,
+    scheduleIndex,
+  );
   const result = await simulateCall(contractId, "released_amount", [
     addressVal,
+    toU32ScVal(resolvedIndex),
   ]);
   return decodeI128(result);
 }
@@ -142,10 +198,16 @@ export async function fetchReleasedAmount(
 export async function fetchVestingInfo(
   contractId: string,
   recipientAddress: string,
+  scheduleIndex?: number,
 ): Promise<VestingInfo> {
+  const resolvedIndex = await resolveScheduleIndex(
+    contractId,
+    recipientAddress,
+    scheduleIndex,
+  );
   const [schedule, vestedAmount] = await Promise.all([
-    fetchVestingSchedule(contractId, recipientAddress),
-    fetchVestedAmount(contractId, recipientAddress),
+    fetchVestingSchedule(contractId, recipientAddress, resolvedIndex),
+    fetchVestedAmount(contractId, recipientAddress, resolvedIndex),
   ]);
 
   const releasableAmount = vestedAmount - schedule.released;
@@ -167,16 +229,22 @@ export async function buildReleaseTx(
   contractId: string,
   recipientAddress: string,
   signerAddress: string,
+  scheduleIndex?: number,
 ): Promise<string> {
   const account = await server.getAccount(signerAddress);
   const contract = new StellarSdk.Contract(contractId);
   const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+  const resolvedIndex = await resolveScheduleIndex(
+    contractId,
+    recipientAddress,
+    scheduleIndex,
+  );
 
   const tx = new StellarSdk.TransactionBuilder(account, {
     fee: "100",
     networkPassphrase: NETWORK_PASSPHRASE,
   })
-    .addOperation(contract.call("release", addressVal))
+    .addOperation(contract.call("release", addressVal, toU32ScVal(resolvedIndex)))
     .setTimeout(300)
     .build();
 

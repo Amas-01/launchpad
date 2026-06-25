@@ -16,6 +16,7 @@ import {
   type TokenHolder,
 } from "@/lib/stellar";
 import { useSoroban } from "@/hooks/useSoroban";
+import { useNetwork } from "@/app/providers/NetworkProvider";
 import InvalidTokenContract from "../../components/InvalidTokenContract";
 
 // ---------------------------------------------------------------------------
@@ -318,6 +319,7 @@ export default function PublicTokenPage({
   contractId: string;
 }) {
   const { fetchTokenInfo, fetchTopHolders, validateTokenContract } = useSoroban();
+  const { networkConfig } = useNetwork();
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
   const [holders, setHolders] = useState<TokenHolder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -399,7 +401,7 @@ export default function PublicTokenPage({
               </span>
               <CopyButton text={contractId} />
               <a
-                href={`https://stellar.expert/explorer/testnet/contract/${contractId}`}
+                href={`https://stellar.expert/explorer/${networkConfig.network}/contract/${contractId}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-stellar-400 hover:text-stellar-300 transition-colors"

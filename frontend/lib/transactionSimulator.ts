@@ -234,8 +234,12 @@ export async function simulateVestingRelease(
   vestingContractId: string,
   recipientAddress: string,
   config: NetworkConfig,
+  scheduleIndex?: number,
 ): Promise<PreflightCheckResult> {
   const args = [new StellarSdk.Address(recipientAddress).toScVal()];
+  if (scheduleIndex !== undefined) {
+    args.push(StellarSdk.nativeToScVal(BigInt(scheduleIndex), { type: "u32" }));
+  }
 
   return simulateTransaction(vestingContractId, "release", args, config);
 }
@@ -248,8 +252,12 @@ export async function simulateVestingRevoke(
   recipientAddress: string,
   adminAddress: string,
   config: NetworkConfig,
+  scheduleIndex?: number,
 ): Promise<PreflightCheckResult> {
   const args = [new StellarSdk.Address(recipientAddress).toScVal()];
+  if (scheduleIndex !== undefined) {
+    args.push(StellarSdk.nativeToScVal(BigInt(scheduleIndex), { type: "u32" }));
+  }
 
   return simulateTransaction(vestingContractId, "revoke", args, config, adminAddress);
 }
@@ -392,7 +400,7 @@ export async function simulateTokenDeployment(
 
     let estimatedFee = "0.01";
     let simulationCost = "0.01";
-    let simulationFootprint = "";
+    const simulationFootprint = "";
     
     if (StellarSdk.rpc.Api.isSimulationSuccess(sim)) {
       try {

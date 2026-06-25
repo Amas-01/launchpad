@@ -18,6 +18,7 @@ const STORAGE_KEY = "soropad_notifications";
 export function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationEntry[]>([]);
+  const [now, setNow] = useState(0);
 
   // Load notifications from localStorage on mount
   useEffect(() => {
@@ -32,6 +33,12 @@ export function NotificationCenter() {
     }
   }, []);
 
+  useEffect(() => {
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Save notifications to localStorage whenever they change
   useEffect(() => {
     try {
@@ -43,19 +50,18 @@ export function NotificationCenter() {
 
   // Listen for custom notification events from toast provider
   useEffect(() => {
-    const handleNotification = (event: CustomEvent<NotificationEntry>) => {
+    const handleNotification = (event: Event) => {
+      const custom = event as CustomEvent<NotificationEntry>;
       setNotifications((prev) => {
-        const updated = [event.detail, ...prev].slice(0, MAX_NOTIFICATIONS);
+        const updated = [custom.detail, ...prev].slice(0, MAX_NOTIFICATIONS);
         return updated;
       });
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    window.addEventListener("soropad:notification" as any, handleNotification);
+    window.addEventListener("soropad:notification", handleNotification);
     return () => {
       window.removeEventListener(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        "soropad:notification" as any,
+        "soropad:notification",
         handleNotification,
       );
     };
@@ -89,8 +95,12 @@ export function NotificationCenter() {
   };
 
   const formatTime = (timestamp: number) => {
+<<<<<<< HEAD
     // eslint-disable-next-line react-hooks/purity
     const seconds = Math.floor((Date.now() - timestamp) / 1000);
+=======
+    const seconds = Math.floor(((now || timestamp) - timestamp) / 1000);
+>>>>>>> origin/master
     if (seconds < 60) return "just now";
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;

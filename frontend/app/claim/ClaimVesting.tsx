@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import toast, { Toaster } from "react-hot-toast";
 import { Button } from "@/components/ui/Button";
+import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
   fetchVestingInfo,
@@ -18,6 +18,7 @@ const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
 
 export function ClaimVesting() {
   const { connected, publicKey, connect, signTransaction } = useWallet();
+  const toast = useToast();
 
   const [contractId, setContractId] = useState("");
   const [info, setInfo] = useState<VestingInfo | null>(null);
@@ -28,7 +29,11 @@ export function ClaimVesting() {
   /* ── Fetch vesting schedule ────────────────────────────────────────── */
   const handleLookup = useCallback(async () => {
     if (!connected || !publicKey) {
-      toast.error("Connect your wallet first.");
+      toast.show({
+        title: "Wallet Not Connected",
+        message: "Connect your wallet first.",
+        variant: "error",
+      });
       return;
     }
 
@@ -63,7 +68,11 @@ export function ClaimVesting() {
     if (!connected || !publicKey || !info) return;
 
     if (info.releasableAmount <= 0n) {
-      toast.error("No tokens available to release right now.");
+      toast.show({
+        title: "No Tokens Available",
+        message: "No tokens available to release right now.",
+        variant: "error",
+      });
       return;
     }
 
@@ -72,7 +81,11 @@ export function ClaimVesting() {
       const xdr = await buildReleaseTx(contractId.trim(), publicKey, publicKey);
       const signedXdr = await signTransaction(xdr);
       await submitTx(signedXdr);
-      toast.success("Tokens released successfully!");
+      toast.show({
+        title: "Success",
+        message: "Tokens released successfully!",
+        variant: "success",
+      });
 
       // Refresh data
       const updated = await fetchVestingInfo(contractId.trim(), publicKey);
@@ -80,7 +93,11 @@ export function ClaimVesting() {
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : "Release transaction failed";
-      toast.error(msg);
+      toast.show({
+        title: "Release Failed",
+        message: msg,
+        variant: "error",
+      });
     } finally {
       setReleasing(false);
     }
@@ -96,17 +113,6 @@ export function ClaimVesting() {
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
     <>
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          style: {
-            background: "#1a2035",
-            color: "#e2e8f0",
-            border: "1px solid rgba(45,125,255,0.2)",
-          },
-        }}
-      />
-
       {/* ── Wallet gate ──────────────────────────────────────────────── */}
       {!connected && (
         <div className="glass-card p-8 text-center">

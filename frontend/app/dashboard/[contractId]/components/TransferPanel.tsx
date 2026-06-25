@@ -96,72 +96,70 @@ export function TransferPanel({
     resolver: zodResolver(transferSchema),
   });
 
-  // Fetch user's token balance
-  useEffect(() => {
-    async function fetchBalance() {
-      if (!publicKey || !connected) {
-        setUserBalance(null);
-        return;
-      }
-
-      setCheckingBalance(true);
-      try {
-        const rpc = new (await import("@stellar/stellar-sdk")).rpc.Server(
-          networkConfig.rpcUrl,
-        );
-        const contract = new Contract(contractId);
-        const account = new (await import("@stellar/stellar-sdk")).Account(
-          "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-          "0",
-        );
-
-        const tx = new TransactionBuilder(account, {
-          fee: "100",
-          networkPassphrase: networkConfig.passphrase,
-        })
-          .addOperation(contract.call("balance", addressToScVal(publicKey)))
-          .setTimeout(30)
-          .build();
-
-        const sim = await rpc.simulateTransaction(tx);
-
-        if (
-          (await import("@stellar/stellar-sdk")).rpc.Api.isSimulationSuccess(
-            sim,
-          ) &&
-          sim.result
-        ) {
-          const balanceScVal = sim.result.retval;
-          const parts = balanceScVal.i128();
-          const hi = BigInt(parts.hi().toString());
-          const lo = BigInt(parts.lo().toString());
-          const rawBalance = (hi << BigInt(64)) + lo;
-
-          // Format balance with decimals
-          const divisor = BigInt(10) ** BigInt(tokenDecimals);
-          const whole = rawBalance / divisor;
-          const frac = rawBalance % divisor;
-
-          if (frac === BigInt(0)) {
-            setUserBalance(whole.toString());
-          } else {
-            const fracStr = frac
-              .toString()
-              .padStart(tokenDecimals, "0")
-              .replace(/0+$/, "");
-            setUserBalance(`${whole}.${fracStr}`);
-          }
-        } else {
-          setUserBalance("0");
-        }
-      } catch (err) {
-        console.error("Failed to fetch balance:", err);
-        setUserBalance(null);
-      } finally {
-        setCheckingBalance(false);
-      }
+  const fetchBalance = async () => {
+    if (!publicKey || !connected) {
+      setUserBalance(null);
+      return;
     }
 
+    setCheckingBalance(true);
+    try {
+      const rpc = new (await import("@stellar/stellar-sdk")).rpc.Server(
+        networkConfig.rpcUrl,
+      );
+      const contract = new Contract(contractId);
+      const account = new (await import("@stellar/stellar-sdk")).Account(
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "0",
+      );
+
+      const tx = new TransactionBuilder(account, {
+        fee: "100",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("balance", addressToScVal(publicKey)))
+        .setTimeout(30)
+        .build();
+
+      const sim = await rpc.simulateTransaction(tx);
+
+      if (
+        (await import("@stellar/stellar-sdk")).rpc.Api.isSimulationSuccess(
+          sim,
+        ) &&
+        sim.result
+      ) {
+        const balanceScVal = sim.result.retval;
+        const parts = balanceScVal.i128();
+        const hi = BigInt(parts.hi().toString());
+        const lo = BigInt(parts.lo().toString());
+        const rawBalance = (hi << BigInt(64)) + lo;
+
+        const divisor = BigInt(10) ** BigInt(tokenDecimals);
+        const whole = rawBalance / divisor;
+        const frac = rawBalance % divisor;
+
+        if (frac === BigInt(0)) {
+          setUserBalance(whole.toString());
+        } else {
+          const fracStr = frac
+            .toString()
+            .padStart(tokenDecimals, "0")
+            .replace(/0+$/, "");
+          setUserBalance(`${whole}.${fracStr}`);
+        }
+      } else {
+        setUserBalance("0");
+      }
+    } catch (err) {
+      console.error("Failed to fetch balance:", err);
+      setUserBalance(null);
+    } finally {
+      setCheckingBalance(false);
+    }
+  };
+
+  useEffect(() => {
     fetchBalance();
   }, [publicKey, connected, contractId, tokenDecimals, networkConfig]);
 
@@ -271,10 +269,7 @@ export function TransferPanel({
       setSuccess(true);
       form.reset();
 
-      // Refresh balance after successful transfer
-      setTimeout(() => {
-        window.location.reload();
-      }, 2000);
+      await fetchBalance();
     } catch (err) {
       console.error("Transfer failed:", err);
       const errorMessage =

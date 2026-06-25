@@ -28,6 +28,8 @@ export interface TokenInfo {
   admin: string;
   contractId: string;
   maxSupply?: string | null;
+  contractUri?: string;
+  complianceNode?: string | null;
 }
 
 export interface TokenHolder {
@@ -43,6 +45,8 @@ export interface VestingScheduleInfo {
   endLedger: number;
   released: string;
   revoked: boolean;
+  scheduleIndex?: number;
+  scheduleCount?: number;
 }
 
 export interface TransactionItem {
@@ -355,6 +359,13 @@ export function decodeAddress(val: StellarSdk.xdr.ScVal): string {
   return StellarSdk.Address.fromScVal(val).toString();
 }
 
+function toU32ScVal(value: number): StellarSdk.xdr.ScVal {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error("Invalid u32 value");
+  }
+  return StellarSdk.nativeToScVal(BigInt(value), { type: "u32" });
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -495,6 +506,24 @@ async function _fetchTokenInfo(
     // max_supply not implemented or not accessible
   }
 
+  let contractUri: string | undefined;
+  try {
+    const uriVal = await simulateCall(contractId, "contract_uri", config);
+    contractUri = decodeString(uriVal);
+  } catch {
+    // contract_uri not set or not accessible
+  }
+
+  let complianceNode: string | null = null;
+  try {
+    const nodeVal = await simulateCall(contractId, "compliance_node", config);
+    if (nodeVal && nodeVal.switch() !== StellarSdk.xdr.ScValType.scvVoid()) {
+      complianceNode = decodeAddress(nodeVal);
+    }
+  } catch {
+    // compliance_node may not be implemented or accessible; ignore.
+  }
+
   return {
     name: decodeString(nameVal),
     symbol: decodeString(symbolVal),
@@ -504,6 +533,8 @@ async function _fetchTokenInfo(
     admin: adminVal ? decodeAddress(adminVal) : "N/A",
     contractId,
     maxSupply,
+    contractUri,
+    complianceNode,
   };
 }
 
@@ -624,7 +655,7 @@ export async function fetchTopHolders(
 
     return parsed.map(({ address, rawBalance }) => ({
       address,
-      balance: (Number(rawBalance) / 10 ** decimals).toFixed(decimals),
+      balance: formatTokenAmount(rawBalance.toString(), decimals),
       sharePercent:
         totalSupplyRaw > BigInt(0)
           ? Number((rawBalance * BigInt(10000)) / totalSupplyRaw) / 100
@@ -664,6 +695,54 @@ export async function fetchCurrentLedger(
   );
 }
 
+export async function fetchVestingScheduleCount(
+  vestingContractId: string,
+  recipient: string,
+  config: NetworkConfig,
+): Promise<number> {
+  const recipientScVal = new StellarSdk.Address(recipient).toScVal();
+  const result = await simulateCall(
+    vestingContractId,
+    "get_schedule_count",
+    config,
+    [recipientScVal],
+  );
+  return decodeU32(result);
+}
+
+async function resolveVestingScheduleIndex(params: {
+  vestingContractId: string;
+  recipient: string;
+  config: NetworkConfig;
+  scheduleIndex?: number;
+}): Promise<{ scheduleIndex: number; scheduleCount: number }> {
+  const { vestingContractId, recipient, config, scheduleIndex } = params;
+  if (scheduleIndex !== undefined) {
+    const scheduleCount = await fetchVestingScheduleCount(
+      vestingContractId,
+      recipient,
+      config,
+    );
+    if (scheduleCount <= 0) {
+      throw new Error("no schedule found");
+    }
+    if (scheduleIndex < 0 || scheduleIndex >= scheduleCount) {
+      throw new Error("schedule index out of bounds");
+    }
+    return { scheduleIndex, scheduleCount };
+  }
+
+  const scheduleCount = await fetchVestingScheduleCount(
+    vestingContractId,
+    recipient,
+    config,
+  );
+  if (scheduleCount <= 0) {
+    throw new Error("no schedule found");
+  }
+  return { scheduleIndex: scheduleCount - 1, scheduleCount };
+}
+
 /**
  * Fetch a vesting schedule.
  */
@@ -671,10 +750,18 @@ export async function fetchVestingSchedule(
   vestingContractId: string,
   recipient: string,
   config: NetworkConfig,
+  scheduleIndex?: number,
 ): Promise<VestingScheduleInfo> {
+  const resolved = await resolveVestingScheduleIndex({
+    vestingContractId,
+    recipient,
+    config,
+    scheduleIndex,
+  });
   const recipientScVal = new StellarSdk.Address(recipient).toScVal();
   const result = await simulateCall(vestingContractId, "get_schedule", config, [
     recipientScVal,
+    toU32ScVal(resolved.scheduleIndex),
   ]);
 
   const fields = result.map()!;
@@ -685,6 +772,8 @@ export async function fetchVestingSchedule(
     endLedger: decodeU32(getStructField(fields, "end_ledger")),
     released: decodeI128(getStructField(fields, "released")),
     revoked: getStructField(fields, "revoked").b(),
+    scheduleIndex: resolved.scheduleIndex,
+    scheduleCount: resolved.scheduleCount,
   };
 }
 
@@ -1189,9 +1278,17 @@ export async function buildRevokeTransaction(
   recipientAddress: string,
   sourcePublicKey: string,
   config: NetworkConfig,
+  scheduleIndex?: number,
 ): Promise<string> {
   const contract = new StellarSdk.Contract(vestingContractId);
+  const resolved = await resolveVestingScheduleIndex({
+    vestingContractId,
+    recipient: recipientAddress,
+    config,
+    scheduleIndex,
+  });
   const recipientScVal = new StellarSdk.Address(recipientAddress).toScVal();
+  const indexScVal = toU32ScVal(resolved.scheduleIndex);
 
   // Get source account
   const horizon = new StellarSdk.Horizon.Server(config.horizonUrl);
@@ -1202,7 +1299,7 @@ export async function buildRevokeTransaction(
     fee: StellarSdk.BASE_FEE,
     networkPassphrase: config.passphrase,
   })
-    .addOperation(contract.call("revoke", recipientScVal))
+    .addOperation(contract.call("revoke", recipientScVal, indexScVal))
     .setTimeout(30)
     .build();
 

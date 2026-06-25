@@ -6,9 +6,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { useWallet } from "@/app/hooks/useWallet";
-import { useNetwork } from "@/app/providers/NetworkProvider";
-import { useToast } from "@/app/providers/ToastProvider";
+import { useWallet } from "../../../hooks/useWallet";
+import { useNetwork } from "../../../providers/NetworkProvider";
+import { useToast } from "../../../providers/ToastProvider";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import {
   addressToScVal,
@@ -97,424 +97,377 @@ const vestingSchema = z.object({
     ),
 });
 
+const metadataUriSchema = z.object({
+  uri: z
+    .string()
+    .url("Must be a valid URL")
+    .min(1, "URI is required"),
+});
+
 type MintData = z.infer<typeof mintSchema>;
 type BurnData = z.infer<typeof burnSchema>;
 type TransferAdminData = z.infer<typeof transferAdminSchema>;
 type VestingData = z.infer<typeof vestingSchema>;
+type MetadataUriData = z.infer<typeof metadataUriSchema>;
 
-type AdminActionData = MintData | BurnData | TransferAdminData | VestingData;
+type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData;
 
 /* ── AdminPanel Component ───────────────────────────────────────── */
 
 interface AdminPanelProps {
-  contractId: string;
-  maxSupply?: string | null;
-  totalSupply?: string;
-  decimals: number;
+    contractId: string;
+    maxSupply?: string | null;
+    totalSupply?: string;
+    decimals: number;
 }
 
-export function AdminPanel({
-  contractId,
-  maxSupply,
-  totalSupply,
-  decimals,
-}: AdminPanelProps) {
-  const { signTransaction, publicKey } = useWallet();
-  const { networkConfig } = useNetwork();
-  const toast = useToast();
-  const [loading, setLoading] = useState<string | null>(null);
-  const [lastTxHash, setLastTxHash] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-  const [announcement, setAnnouncement] = useState("");
-  const [showTransferConfirm, setShowTransferConfirm] = useState(false);
-  const [locked, setLocked] = useState(false);
-  const [showRevokeConfirm, setShowRevokeConfirm] = useState(false);
-  const [revokePhrase, setRevokePhrase] = useState("");
+export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: AdminPanelProps) {
+    const { signTransaction, publicKey } = useWallet();
+    const { networkConfig } = useNetwork();
+    const toast = useToast();
+    const [loading, setLoading] = useState<string | null>(null);
+    const [lastTxHash, setLastTxHash] = useState<string | null>(null);
+    const [success, setSuccess] = useState<string | null>(null);
+    const [announcement, setAnnouncement] = useState("");
+    const [showTransferConfirm, setShowTransferConfirm] = useState(false);
+    const [locked, setLocked] = useState(false);
+    const [showRevokeConfirm, setShowRevokeConfirm] = useState(false);
+    const [revokePhrase, setRevokePhrase] = useState("");
 
-  const [mintMode, setMintMode] = useState<"single" | "batch">("single");
-  const [batchData, setBatchData] = useState("");
-  const [batchErrors, setBatchErrors] = useState<string[]>([]);
-  const [parsedEntries, setParsedEntries] = useState<BatchMintEntry[]>([]);
+    const [mintMode, setMintMode] = useState<"single" | "batch">("single");
+    const [batchData, setBatchData] = useState("");
+    const [batchErrors, setBatchErrors] = useState<string[]>([]);
+    const [parsedEntries, setParsedEntries] = useState<BatchMintEntry[]>([]);
 
-  // Preflight simulation results
-  const [mintPreflight, setMintPreflight] =
-    useState<PreflightCheckResult | null>(null);
-  const [burnPreflight, setBurnPreflight] =
-    useState<PreflightCheckResult | null>(null);
-  const [transferPreflight, setTransferPreflight] =
-    useState<PreflightCheckResult | null>(null);
-  const [vestingPreflight, setVestingPreflight] =
-    useState<PreflightCheckResult | null>(null);
-  const simulator = useTransactionSimulator();
+    // Forms
+    const mintForm = useForm<MintData>({ resolver: zodResolver(mintSchema) });
+    const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
+    const transferForm = useForm<TransferAdminData>({ resolver: zodResolver(transferAdminSchema) });
+    const vestingForm = useForm<VestingData>({ resolver: zodResolver(vestingSchema) });
+    const metadataUriForm = useForm<MetadataUriData>({ resolver: zodResolver(metadataUriSchema) });
 
-  // Forms
-  const mintForm = useForm<MintData>({ resolver: zodResolver(mintSchema) });
-  const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
-  const transferForm = useForm<TransferAdminData>({
-    resolver: zodResolver(transferAdminSchema),
-  });
-  const vestingForm = useForm<VestingData>({
-    resolver: zodResolver(vestingSchema),
-  });
+    // Live values for the vesting curve preview chart.
+    const [watchedCliff, watchedDuration] = vestingForm.watch(["cliffDays", "durationDays"]);
+    const chartCliffDays = Math.max(0, Number(watchedCliff) || 0);
+    const chartDurationDays = Math.max(0, Number(watchedDuration) || 0);
 
-  // Live values for the vesting curve preview chart.
-  const [watchedCliff, watchedDuration] = vestingForm.watch([
-    "cliffDays",
-    "durationDays",
-  ]);
-  const chartCliffDays = Math.max(0, Number(watchedCliff) || 0);
-  const chartDurationDays = Math.max(0, Number(watchedDuration) || 0);
+    /* ── Lock state: simulate is_locked() so we can disable admin ops. ── */
+    const refreshLocked = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    // Use a deterministic dummy account for read-only simulation.
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("is_locked"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        // Older deployments without is_locked just stay unlocked.
+                        return false;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return false;
+                    return Boolean(sim.result.retval.b());
+                },
+                { operation: "Check lock state", silent: true },
+            );
+            setLocked(value);
+        } catch {
+            // Best effort — if it fails we leave the panel enabled.
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
-  /* ── Lock state: simulate is_locked() so we can disable admin ops. ── */
-  const refreshLocked = useCallback(async () => {
-    try {
-      const value = await wrapRpcCall(
-        async () => {
-          const server = new rpc.Server(networkConfig.rpcUrl);
-          const contract = new Contract(contractId);
-          // Use a deterministic dummy account for read-only simulation.
-          const dummy =
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-          const account = new (await import("@stellar/stellar-sdk")).Account(
-            dummy,
-            "0",
-          );
-          const tx = new TransactionBuilder(account, {
-            fee: "100",
-            networkPassphrase: networkConfig.passphrase,
-          })
-            .addOperation(contract.call("is_locked"))
-            .setTimeout(30)
-            .build();
-          const sim = await server.simulateTransaction(tx);
-          if (rpc.Api.isSimulationError(sim)) {
-            // Older deployments without is_locked just stay unlocked.
-            return false;
-          }
-          if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return false;
-          return Boolean(sim.result.retval.b());
+    useEffect(() => {
+        refreshLocked();
+    }, [refreshLocked]);
+
+    const submitSignedTransaction = useCallback(
+        async (signedXdr: string) => {
+            const server = new rpc.Server(networkConfig.rpcUrl);
+            const signedTx = TransactionBuilder.fromXDR(
+                signedXdr,
+                networkConfig.passphrase,
+            );
+            const send = await server.sendTransaction(
+                signedTx as Parameters<typeof server.sendTransaction>[0],
+            );
+            if (send.status === "ERROR") {
+                throw new Error(
+                    `Submit failed: ${send.errorResult?.toXDR("base64") ?? "unknown"}`,
+                );
+            }
+
+            let response = await server.getTransaction(send.hash);
+            let attempts = 0;
+            while (response.status === "NOT_FOUND" && attempts < 30) {
+                await new Promise((r) => setTimeout(r, 1000));
+                response = await server.getTransaction(send.hash);
+                attempts += 1;
+            }
+
+            if (response.status === "FAILED") {
+                throw new Error("Transaction failed on-chain");
+            }
+
+            return send.hash;
         },
-        { operation: "Check lock state", silent: true },
-      );
-      setLocked(value);
-    } catch {
-      // Best effort — if it fails we leave the panel enabled.
-    }
-  }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+        [networkConfig.passphrase, networkConfig.rpcUrl],
+    );
 
-  useEffect(() => {
-    refreshLocked();
-  }, [refreshLocked]);
+    const handleBatchMint = async (entries: BatchMintEntry[]) => {
+        if (!publicKey) return;
 
-  const submitSignedTransaction = useCallback(
-    async (signedXdr: string) => {
-      const server = new rpc.Server(networkConfig.rpcUrl);
-      const signedTx = TransactionBuilder.fromXDR(
-        signedXdr,
-        networkConfig.passphrase,
-      );
-      const send = await server.sendTransaction(
-        signedTx as Parameters<typeof server.sendTransaction>[0],
-      );
-      if (send.status === "ERROR") {
-        throw new Error(
-          `Submit failed: ${send.errorResult?.toXDR("base64") ?? "unknown"}`,
-        );
-      }
+        setLoading("batch-mint");
+        setSuccess(null);
+        setLastTxHash(null);
+        const statusLabel = "Batch mint";
 
-      let response = await server.getTransaction(send.hash);
-      let attempts = 0;
-      while (response.status === "NOT_FOUND" && attempts < 30) {
-        await new Promise((r) => setTimeout(r, 1000));
-        response = await server.getTransaction(send.hash);
-        attempts += 1;
-      }
+        try {
+            const server = new rpc.Server(networkConfig.rpcUrl);
+            const account = await server.getAccount(publicKey);
+            const contract = new Contract(contractId);
 
-      if (response.status === "FAILED") {
-        throw new Error("Transaction failed on-chain");
-      }
+            // Prepare ScVals for the new mint_batch function
+            const addressesScVal = nativeToScVal(entries.map(e => new Address(e.address)), { type: "vec" });
+            const amountsScVal = nativeToScVal(entries.map(e => BigInt(e.amount) * BigInt(10) ** BigInt(decimals)), { type: "vec" });
 
-      return send.hash;
-    },
-    [networkConfig.passphrase, networkConfig.rpcUrl],
-  );
+            const tx = new TransactionBuilder(account, {
+                fee: "1000",
+                networkPassphrase: networkConfig.passphrase
+            })
+                .addOperation(contract.call("mint_batch", addressesScVal, amountsScVal))
+                .setTimeout(30)
+                .build();
 
-  const handleBatchMint = async (entries: BatchMintEntry[]) => {
-    if (!publicKey) return;
+            const xdrEncoded = tx.toXDR();
+            console.log(`Signing batch mint tx for ${contractId} with ${entries.length} recipients`);
 
-    setLoading("batch-mint");
-    setSuccess(null);
-    setLastTxHash(null);
-    const statusLabel = "Batch mint";
+            let signedXdr: string;
+            try {
+                signedXdr = await signTransaction(xdrEncoded, { networkPassphrase: networkConfig.passphrase });
+            } catch (signError) {
+                setAnnouncement(`${statusLabel} signing failed.`);
+                throw signError;
+            }
 
-    try {
-      const server = new rpc.Server(networkConfig.rpcUrl);
-      const account = await server.getAccount(publicKey);
-      const contract = new Contract(contractId);
+            const txHash = await submitSignedTransaction(signedXdr);
+            setLastTxHash(txHash);
+            setSuccess("batch-mint");
+            setAnnouncement(`${statusLabel} transaction submitted successfully. Transaction hash ${txHash}.`);
 
-      // Prepare ScVals for the new mint_batch function
-      const addressesScVal = nativeToScVal(
-        entries.map((e) => new Address(e.address)),
-        { type: "vec" },
-      );
-      const amountsScVal = nativeToScVal(
-        entries.map((e) => BigInt(Math.round(parseFloat(e.amount) * 10 ** decimals))),
-        { type: "vec" },
-      );
-
-      const tx = new TransactionBuilder(account, {
-        fee: "1000",
-        networkPassphrase: networkConfig.passphrase,
-      })
-        .addOperation(contract.call("mint_batch", addressesScVal, amountsScVal))
-        .setTimeout(30)
-        .build();
-
-      const xdrEncoded = tx.toXDR();
-      console.log(
-        `Signing batch mint tx for ${contractId} with ${entries.length} recipients`,
-      );
-
-      let signedXdr: string;
-      try {
-        signedXdr = await signTransaction(xdrEncoded, {
-          networkPassphrase: networkConfig.passphrase,
-        });
-      } catch (signError) {
-        setAnnouncement(`${statusLabel} signing failed.`);
-        throw signError;
-      }
-
-      const txHash = await submitSignedTransaction(signedXdr);
-      setLastTxHash(txHash);
-      setSuccess("batch-mint");
-      setAnnouncement(
-        `${statusLabel} transaction submitted successfully. Transaction hash ${txHash}.`,
-      );
-    } catch (err) {
-      const error = err as Error;
-      console.error(`batch-mint failed:`, error);
-      setAnnouncement(`${statusLabel} transaction failed.`);
-      toast.show({
-        title: `${statusLabel} failed`,
-        message: error.message,
-        variant: "error",
-      });
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const handleAction = async (action: string, data: AdminActionData) => {
-    if (!publicKey) return;
-
-    setLoading(action);
-    setSuccess(null);
-    setLastTxHash(null);
-    const statusLabel =
-      action === "mint"
-        ? "Mint"
-        : action === "clawback"
-          ? "Clawback"
-          : action === "transfer"
-            ? "Transfer admin"
-            : "Vesting";
-
-    try {
-      const server = new rpc.Server(networkConfig.rpcUrl);
-
-      // 1. Prepare Arguments and run simulation
-      let method = "";
-      let args: xdr.ScVal[] = [];
-      let simulationResult: PreflightCheckResult | null = null;
-
-      if (action === "mint") {
-        const mintData = data as MintData;
-        method = "mint";
-        const rawAmount = BigInt(Math.round(parseFloat(mintData.amount) * 10 ** decimals));
-        args = [
-          addressToScVal(mintData.to),
-          i128ToScVal(rawAmount),
-        ];
-
-        // Run simulation
-        simulationResult = await simulator.checkMint(
-          contractId,
-          mintData.to,
-          rawAmount,
-          publicKey,
-        );
-        setMintPreflight(simulationResult);
-
-        if (simulationResult && simulationResult.errors && simulationResult.errors.length > 0) {
-          toast.show({
-            title: `${statusLabel} simulation failed`,
-            message: simulationResult.errors[0],
-            variant: "error",
-          });
-          return;
+        } catch (err) {
+            const error = err as Error;
+            console.error(`batch-mint failed:`, error);
+            setAnnouncement(`${statusLabel} transaction failed.`);
+            toast.show({
+                title: `${statusLabel} failed`,
+                message: error.message,
+                variant: "error",
+            });
+        } finally {
+            setLoading(null);
         }
-      } else if (action === "clawback") {
-        const burnData = data as BurnData;
-        method = "clawback";
-        const rawAmount = BigInt(Math.round(parseFloat(burnData.amount) * 10 ** decimals));
-        args = [
-          addressToScVal(burnData.from),
-          i128ToScVal(rawAmount),
-        ];
+    };
 
-        // Run simulation
-        simulationResult = await simulator.checkBurn(
-          contractId,
-          burnData.from,
-          rawAmount,
-          publicKey,
-        );
-        setBurnPreflight(simulationResult);
+    const simulator = useTransactionSimulator();
+    const [mintPreflight, setMintPreflight] = useState<PreflightCheckResult | null>(null);
+    const [burnPreflight, setBurnPreflight] = useState<PreflightCheckResult | null>(null);
+    const [transferPreflight, setTransferPreflight] = useState<PreflightCheckResult | null>(null);
+    const [vestingPreflight, setVestingPreflight] = useState<PreflightCheckResult | null>(null);
 
-        if (simulationResult && simulationResult.errors && simulationResult.errors.length > 0) {
-          toast.show({
-            title: `${statusLabel} simulation failed`,
-            message: simulationResult.errors[0],
-            variant: "error",
-          });
-          return;
+    const handleAction = async (action: string, data: AdminActionData) => {
+        if (!publicKey) return;
+
+        setLoading(action);
+        setSuccess(null);
+        setLastTxHash(null);
+
+        const statusLabel =
+            action === "mint"
+                ? "Mint"
+                : action === "clawback"
+                  ? "Clawback"
+                  : action === "transfer"
+                    ? "Transfer admin"
+                    : action === "metadata-uri"
+                      ? "Update metadata URI"
+                      : "Vesting";
+
+        try {
+            const server = new rpc.Server(networkConfig.rpcUrl);
+
+            let method = "";
+            let args: xdr.ScVal[] = [];
+            let targetContractId = contractId;
+            let simulationResult: PreflightCheckResult | null = null;
+
+            if (action === "mint") {
+                const mintData = data as MintData;
+                method = "mint";
+                const scaledAmount =
+                    BigInt(mintData.amount) * BigInt(10) ** BigInt(decimals);
+                args = [addressToScVal(mintData.to), i128ToScVal(scaledAmount)];
+
+                simulationResult = await simulator.checkMint(
+                    contractId,
+                    mintData.to,
+                    scaledAmount,
+                    publicKey,
+                );
+                setMintPreflight(simulationResult);
+            } else if (action === "clawback") {
+                const burnData = data as BurnData;
+                method = "clawback";
+                const scaledAmount =
+                    BigInt(burnData.amount) * BigInt(10) ** BigInt(decimals);
+                args = [addressToScVal(burnData.from), i128ToScVal(scaledAmount)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setBurnPreflight(simulationResult);
+            } else if (action === "transfer") {
+                const transferData = data as TransferAdminData;
+                method = "propose_admin";
+                args = [addressToScVal(transferData.newAdmin)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setTransferPreflight(simulationResult);
+            } else if (action === "vesting") {
+                const vestingData = data as VestingData;
+                method = "create_schedule";
+                targetContractId = vestingData.vestingContract;
+
+                const currentLedgerRes = await server.getLatestLedger();
+                const currentLedger = currentLedgerRes.sequence;
+
+                const cliffLedgers = Math.round(Number(vestingData.cliffDays) * 17280);
+                const durationLedgers = Math.round(Number(vestingData.durationDays) * 17280);
+
+                const cliffLedger = currentLedger + cliffLedgers;
+                const endLedger = cliffLedger + durationLedgers;
+
+                const scaledAmount =
+                    BigInt(vestingData.amount) * BigInt(10) ** BigInt(decimals);
+
+                args = [
+                    addressToScVal(vestingData.recipient),
+                    i128ToScVal(scaledAmount),
+                    nativeToScVal(cliffLedger, { type: "u32" }),
+                    nativeToScVal(endLedger, { type: "u32" }),
+                ];
+
+                simulationResult = await simulator.checkCreateSchedule(
+                    vestingData.vestingContract,
+                    vestingData.recipient,
+                    scaledAmount,
+                    cliffLedger,
+                    endLedger,
+                    publicKey,
+                );
+                setVestingPreflight(simulationResult);
+            } else if (action === "metadata-uri") {
+                const metadataData = data as MetadataUriData;
+                method = "update_contract_uri";
+                args = [nativeToScVal(metadataData.uri, { type: "string" })];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else {
+                throw new Error("Unsupported action");
+            }
+
+            if (simulationResult?.errors?.length) {
+                toast.show({
+                    title: `${statusLabel} simulation failed`,
+                    message: simulationResult.errors[0],
+                    variant: "error",
+                });
+                return;
+            }
+
+            const account = await server.getAccount(publicKey);
+            const contract = new Contract(targetContractId);
+
+            const tx = new TransactionBuilder(account, {
+                fee: "1000",
+                networkPassphrase: networkConfig.passphrase,
+            })
+                .addOperation(contract.call(method, ...args))
+                .setTimeout(30)
+                .build();
+
+            const sim = await server.simulateTransaction(tx);
+            if (rpc.Api.isSimulationError(sim)) {
+                throw new Error(`Simulation failed: ${sim.error}`);
+            }
+            const prepared = rpc.assembleTransaction(tx, sim).build();
+
+            const signedXdr = await signTransaction(prepared.toXDR(), {
+                networkPassphrase: networkConfig.passphrase,
+            });
+
+            const txHash = await submitSignedTransaction(signedXdr);
+            setLastTxHash(txHash);
+            setSuccess(action);
+            setAnnouncement(
+                `${statusLabel} transaction submitted successfully. Transaction hash ${txHash}.`,
+            );
+
+            if (action === "mint") {
+                mintForm.reset();
+                setMintPreflight(null);
+            }
+            if (action === "clawback") {
+                burnForm.reset();
+                setBurnPreflight(null);
+            }
+            if (action === "transfer") {
+                transferForm.reset();
+                setShowTransferConfirm(false);
+                setTransferPreflight(null);
+            }
+            if (action === "metadata-uri") {
+                metadataUriForm.reset();
+            }
+            if (action === "vesting") {
+                vestingForm.reset();
+                setVestingPreflight(null);
+            }
+        } catch (err) {
+            const error = err as Error;
+            console.error(`${action} failed:`, error);
+            setAnnouncement(`${statusLabel} transaction failed.`);
+            toast.show({
+                title: `${statusLabel} failed`,
+                message: error.message,
+                variant: "error",
+            });
+        } finally {
+            setLoading(null);
         }
-      } else if (action === "transfer") {
-        const transferData = data as TransferAdminData;
-        method = "set_admin";
-        args = [addressToScVal(transferData.newAdmin)];
-
-        // Run simulation for set_admin
-        simulationResult = await simulator.simulateContract(
-          contractId,
-          "set_admin",
-          args,
-          publicKey,
-        );
-        setTransferPreflight(simulationResult);
-
-        if (simulationResult && simulationResult.errors && simulationResult.errors.length > 0) {
-          toast.show({
-            title: `${statusLabel} simulation failed`,
-            message: simulationResult.errors[0],
-            variant: "error",
-          });
-          return;
-        }
-      } else if (action === "vesting") {
-        const vestingData = data as VestingData;
-        method = "create_schedule";
-
-        // Ledger logic: 1 day ≈ 17,280 ledgers
-        const currentLedgerRes = await server.getLatestLedger();
-        const currentLedger = currentLedgerRes.sequence;
-
-        const cliffLedgers = Math.round(Number(vestingData.cliffDays) * 17280);
-        const durationLedgers = Math.round(
-          Number(vestingData.durationDays) * 17280,
-        );
-
-        const cliffLedger = currentLedger + cliffLedgers;
-        const endLedger = cliffLedger + durationLedgers;
-
-        const rawAmount = BigInt(Math.round(parseFloat(vestingData.amount) * 10 ** decimals));
-        args = [
-          addressToScVal(vestingData.recipient),
-          i128ToScVal(rawAmount),
-          nativeToScVal(cliffLedger, { type: "u32" }),
-          nativeToScVal(endLedger, { type: "u32" }),
-        ];
-
-        // Run simulation
-        simulationResult = await simulator.checkCreateSchedule(
-          vestingData.vestingContract,
-          vestingData.recipient,
-          rawAmount,
-          cliffLedger,
-          endLedger,
-          publicKey,
-        );
-        setVestingPreflight(simulationResult);
-
-        if (simulationResult && simulationResult.errors && simulationResult.errors.length > 0) {
-          toast.show({
-            title: `${statusLabel} simulation failed`,
-            message: simulationResult.errors[0],
-            variant: "error",
-          });
-          return;
-        }
-      }
-
-      // 2. Build Transaction using Contract class
-      const targetContractId =
-        action === "vesting"
-          ? (data as VestingData).vestingContract
-          : contractId;
-      const account = await server.getAccount(publicKey);
-      const contract = new Contract(targetContractId);
-
-      const tx = new TransactionBuilder(account, {
-        fee: "1000", // Standard fee
-        networkPassphrase: networkConfig.passphrase,
-      })
-        .addOperation(contract.call(method, ...args))
-        .setTimeout(30)
-        .build();
-
-      // 3. Sign and Submit
-      const xdrEncoded = tx.toXDR();
-      console.log(`Signing ${action} tx for ${contractId}`);
-
-      // Note: signTransaction's first argument is the XDR string
-      let signedXdr: string;
-      try {
-        signedXdr = await signTransaction(xdrEncoded, {
-          networkPassphrase: networkConfig.passphrase,
-        });
-      } catch (signError) {
-        setAnnouncement(`${statusLabel} signing failed.`);
-        throw signError;
-      }
-
-      const txHash = await submitSignedTransaction(signedXdr);
-      setLastTxHash(txHash);
-      setSuccess(action);
-      setAnnouncement(
-        `${statusLabel} transaction submitted successfully. Transaction hash ${txHash}.`,
-      );
-
-      if (action === "mint") {
-        mintForm.reset();
-        setMintPreflight(null);
-      }
-      if (action === "clawback") {
-        burnForm.reset();
-        setBurnPreflight(null);
-      }
-      if (action === "transfer") {
-        transferForm.reset();
-        setShowTransferConfirm(false);
-        setTransferPreflight(null);
-      }
-      if (action === "vesting") {
-        vestingForm.reset();
-        setVestingPreflight(null);
-      }
-    } catch (err) {
-      const error = err as Error;
-      console.error(`${action} failed:`, error);
-      setAnnouncement(`${statusLabel} transaction failed.`);
-      toast.show({
-        title: `${statusLabel} failed`,
-        message: error.message,
-        variant: "error",
-      });
-    } finally {
-      setLoading(null);
-    }
-  };
+    };
 
   /* ── Revoke admin / lock token ─────────────────────────────────── */
   const handleRevokeAdmin = async () => {
@@ -1141,6 +1094,45 @@ export function AdminPanel({
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Update Metadata URI ──────────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-stellar-500/30 transition-all duration-300 group">
+          <div className="flex items-center gap-2 mb-6 text-stellar-300">
+            <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <ExternalLink className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg">Metadata URI</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Set or update the URI pointing to off-chain token metadata (logo, description, etc.)
+              </p>
+            </div>
+          </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleAction("metadata-uri", metadataUriForm.getValues());
+            }}
+            className="flex flex-col gap-4"
+          >
+            <Input
+              {...metadataUriForm.register("uri")}
+              type="url"
+              placeholder="https://example.com/token-metadata.json"
+              error={metadataUriForm.formState.errors.uri?.message}
+              disabled={adminDisabled}
+            />
+            <Button
+              type="submit"
+              className="w-full bg-white/5 border-white/10 hover:bg-white/10 text-white"
+              disabled={adminDisabled || loading === "metadata-uri"}
+              isLoading={loading === "metadata-uri"}
+            >
+              Update URI
+            </Button>
+          </form>
         </div>
       </div>
     </section>
