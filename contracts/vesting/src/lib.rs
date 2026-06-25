@@ -351,6 +351,7 @@ impl VestingContract {
     ///   already passed there is nothing left to delay).
     /// - `new_cliff` must remain strictly less than `end_ledger`.
     pub fn extend_cliff(env: Env, recipient: Address, new_cliff: u32, index: Option<u32>) {
+        Self::_check_paused(&env);
         Self::_require_admin(&env);
 
         let (key, mut schedule) = Self::_load_schedule(&env, &recipient, index);
@@ -1108,6 +1109,21 @@ mod test {
         // Clear auths so the next call fails
         env.set_auths(&[]);
         client.extend_cliff(&recipient, &150u32, &latest_index());
+    }
+
+    #[test]
+    #[should_panic(expected = "vesting contract is paused")]
+    fn test_extend_cliff_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.pause();
+        // Must panic: "vesting contract is paused"
+        extend_cliff_latest(&client, &recipient, 150u32);
     }
 
     #[test]
