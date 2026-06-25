@@ -164,6 +164,7 @@ impl VestingContract {
     }
 
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
+        Self::_check_paused(&env);
         let admin: Address = env
             .storage()
             .instance()
