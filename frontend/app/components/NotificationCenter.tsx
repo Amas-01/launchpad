@@ -95,12 +95,7 @@ export function NotificationCenter() {
   };
 
   const formatTime = (timestamp: number) => {
-<<<<<<< HEAD
-    // eslint-disable-next-line react-hooks/purity
-    const seconds = Math.floor((Date.now() - timestamp) / 1000);
-=======
     const seconds = Math.floor(((now || timestamp) - timestamp) / 1000);
->>>>>>> origin/master
     if (seconds < 60) return "just now";
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
