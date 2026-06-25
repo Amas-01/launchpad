@@ -297,10 +297,12 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 : action === "clawback"
                   ? "Clawback"
                   : action === "transfer"
-                    ? "Transfer admin"
-                    : action === "metadata-uri"
-                      ? "Update metadata URI"
-                      : "Vesting";
+                    ? "Propose admin"
+                    : action === "accept-admin"
+                      ? "Accept admin"
+                      : action === "metadata-uri"
+                        ? "Update metadata URI"
+                        : "Vesting";
 
         try {
             const server = new rpc.Server(networkConfig.rpcUrl);
@@ -350,6 +352,15 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                     publicKey,
                 );
                 setTransferPreflight(simulationResult);
+            } else if (action === "accept-admin") {
+                method = "accept_admin";
+                args = [];
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
             } else if (action === "vesting") {
                 const vestingData = data as VestingData;
                 method = "create_schedule";
@@ -975,13 +986,12 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 Transfer Control
               </Button>
             ) : (
-              <div className="space-y-3 pt-2 animate-in fade-in slide-in-from-top-2 duration-300 bg-red-950/20 p-4 rounded-xl border border-red-500/20">
-                <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">
-                  Final Warning
+              <div className="space-y-3 pt-2 animate-in fade-in slide-in-from-top-2 duration-300 bg-stellar-950/20 p-4 rounded-xl border border-stellar-500/20">
+                <p className="text-[10px] text-stellar-400 font-bold uppercase tracking-widest text-center">
+                  Confirm Proposal
                 </p>
                 <p className="text-xs text-stellar-200 text-center leading-relaxed">
-                  You will permanently lose all administrative rights to this
-                  token contract.
+                  You are proposing a new admin. They must accept to complete the transfer.
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -995,18 +1005,32 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                   </Button>
                   <Button
                     type="button"
-                    className="flex-1 text-xs py-2 h-9 bg-red-600 hover:bg-red-700 border-none shadow-lg shadow-red-600/20"
+                    className="flex-1 text-xs py-2 h-9 bg-stellar-500 hover:bg-stellar-600 border-none shadow-lg shadow-stellar-500/20"
                     onClick={() =>
                       handleAction("transfer", transferForm.getValues())
                     }
                     isLoading={loading === "transfer"}
                   >
-                    I Understand
+                    Propose Admin
                   </Button>
                 </div>
               </div>
             )}
           </form>
+          <div className="mt-6 pt-4 border-t border-white/10">
+            <p className="text-xs text-gray-400 mb-3 text-center">
+              Are you the pending admin? Click below to accept the role.
+            </p>
+            <Button
+              type="button"
+              className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
+              onClick={() => handleAction("accept-admin", {} as any)}
+              isLoading={loading === "accept-admin"}
+              disabled={adminDisabled && loading !== "accept-admin"}
+            >
+              Accept Admin Role
+            </Button>
+          </div>
         </div>
 
         {/* ── Revoke Admin / Lock Token ────────────────────────── */}
