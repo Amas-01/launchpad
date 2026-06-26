@@ -199,8 +199,8 @@ export default function DeployForm() {
         name: data.name,
         symbol: data.symbol,
         decimals: data.decimals,
-        initialSupply: data.initialSupply,
-        maxSupply: data.maxSupply,
+        initialSupply: String(data.initialSupply),
+        maxSupply: data.maxSupply != null ? String(data.maxSupply) : undefined,
         adminAddress: data.adminAddress,
       });
 
