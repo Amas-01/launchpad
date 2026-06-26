@@ -36,8 +36,8 @@ export interface DeployTokenParams {
   name: string;
   symbol: string;
   decimals: number;
-  initialSupply: number;
-  maxSupply?: number;
+  initialSupply: string;
+  maxSupply?: string;
   adminAddress: string;
 }
 
@@ -74,7 +74,7 @@ export interface DeployTokenError {
  *       name: "My Token",
  *       symbol: "MTK",
  *       decimals: 7,
- *       initialSupply: 1000000,
+ *       initialSupply: "1000000",
  *       adminAddress: "GABC..."
  *     });
  *     console.log("Deployed:", result.contractId);
@@ -332,9 +332,9 @@ async function initializeContract(
   const decimalScVal = StellarSdk.nativeToScVal(params.decimals, { type: "u32" });
   const nameScVal = StellarSdk.nativeToScVal(params.name, { type: "string" });
   const symbolScVal = StellarSdk.nativeToScVal(params.symbol, { type: "string" });
-  const initialSupplyScVal = StellarSdk.nativeToScVal(params.initialSupply, { type: "i128" });
+  const initialSupplyScVal = StellarSdk.nativeToScVal(BigInt(params.initialSupply), { type: "i128" });
   const maxSupplyScVal = params.maxSupply
-    ? StellarSdk.nativeToScVal(params.maxSupply, { type: "i128" })
+    ? StellarSdk.nativeToScVal(BigInt(params.maxSupply), { type: "i128" })
     : StellarSdk.xdr.ScVal.scvVoid();
 
   const initTx = new StellarSdk.TransactionBuilder(sourceAccount, {
