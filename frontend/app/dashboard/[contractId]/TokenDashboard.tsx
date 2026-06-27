@@ -42,7 +42,6 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
   const { publicKey } = useWallet();
   const { fetchTokenInfo, fetchTopHolders, fetchSupplyBreakdown } =
     useSoroban();
-  console.log(tokenInfo);
 
   const loadData = useCallback(async () => {
     setLoading(true);
