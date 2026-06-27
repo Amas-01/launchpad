@@ -248,7 +248,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
 
             // Prepare ScVals for the new mint_batch function
             const addressesScVal = nativeToScVal(entries.map(e => new Address(e.address)), { type: "vec" });
-            const amountsScVal = nativeToScVal(entries.map(e => BigInt(e.amount) * BigInt(10) ** BigInt(decimals)), { type: "vec" });
+            const amountsScVal = nativeToScVal(entries.map(e => BigInt(Math.round(parseFloat(e.amount) * 10 ** decimals))), { type: "vec" });
 
             const tx = new TransactionBuilder(account, {
                 fee: "1000",
@@ -259,7 +259,6 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 .build();
 
             const xdrEncoded = tx.toXDR();
-            console.log(`Signing batch mint tx for ${contractId} with ${entries.length} recipients`);
 
             let signedXdr: string;
             try {
@@ -326,7 +325,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 const mintData = data as MintData;
                 method = "mint";
                 const scaledAmount =
-                    BigInt(mintData.amount) * BigInt(10) ** BigInt(decimals);
+                    BigInt(Math.round(parseFloat(mintData.amount) * 10 ** decimals));
                 args = [addressToScVal(mintData.to), i128ToScVal(scaledAmount)];
 
                 simulationResult = await simulator.checkMint(
@@ -340,7 +339,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 const burnData = data as BurnData;
                 method = "clawback";
                 const scaledAmount =
-                    BigInt(burnData.amount) * BigInt(10) ** BigInt(decimals);
+                    BigInt(Math.round(parseFloat(burnData.amount) * 10 ** decimals));
                 args = [addressToScVal(burnData.from), i128ToScVal(scaledAmount)];
 
                 simulationResult = await simulator.simulateContract(
@@ -386,7 +385,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 const endLedger = cliffLedger + durationLedgers;
 
                 const scaledAmount =
-                    BigInt(vestingData.amount) * BigInt(10) ** BigInt(decimals);
+                    BigInt(Math.round(parseFloat(vestingData.amount) * 10 ** decimals));
 
                 args = [
                     addressToScVal(vestingData.recipient),
