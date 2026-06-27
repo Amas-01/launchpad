@@ -31,8 +31,8 @@ export interface DeployTokenParams {
   name: string;
   symbol: string;
   decimals: number;
-  initialSupply: number;
-  maxSupply?: number;
+  initialSupply: string;
+  maxSupply?: string;
   adminAddress: string;
   authorizationRequired?: boolean;
   authorizationRevocable?: boolean;
@@ -333,9 +333,9 @@ async function initializeContract(
   const decimalScVal = StellarSdk.nativeToScVal(params.decimals, { type: "u32" });
   const nameScVal = StellarSdk.nativeToScVal(params.name, { type: "string" });
   const symbolScVal = StellarSdk.nativeToScVal(params.symbol, { type: "string" });
-  const initialSupplyScVal = StellarSdk.nativeToScVal(params.initialSupply, { type: "i128" });
+  const initialSupplyScVal = StellarSdk.nativeToScVal(BigInt(params.initialSupply), { type: "i128" });
   const maxSupplyScVal = params.maxSupply
-    ? StellarSdk.nativeToScVal(params.maxSupply, { type: "i128" })
+    ? StellarSdk.nativeToScVal(BigInt(params.maxSupply), { type: "i128" })
     : StellarSdk.xdr.ScVal.scvVoid();
   const authorizationRequiredScVal = StellarSdk.nativeToScVal(
     params.authorizationRequired ?? false,
