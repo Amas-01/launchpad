@@ -587,6 +587,11 @@ impl TokenContract {
 
     /// Set, update, or remove the optional compliance node address.
     /// Admin only. Pass `None` to remove the compliance node.
+    ///
+    /// When setting a compliance node, the provided address must implement
+    /// the `ComplianceNodeInterface` trait with a `can_trade` function.
+    /// No validation is performed on-chain, so ensure the address points to
+    /// a valid compliance contract before setting it.
     pub fn set_compliance_node(env: Env, node: Option<Address>) {
         Self::_require_admin(&env);
 
