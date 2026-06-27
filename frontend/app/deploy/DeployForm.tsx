@@ -202,6 +202,9 @@ export default function DeployForm() {
         initialSupply: data.initialSupply,
         maxSupply: data.maxSupply,
         adminAddress: data.adminAddress,
+        authorizationRequired: data.authorizationRequired ?? false,
+        authorizationRevocable: data.authorizationRevocable ?? false,
+        complianceNodeAddress: data.complianceNodeAddress || undefined,
       });
 
       setPreflightResult({

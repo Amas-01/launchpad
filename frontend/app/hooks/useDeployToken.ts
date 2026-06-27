@@ -39,6 +39,9 @@ export interface DeployTokenParams {
   initialSupply: number;
   maxSupply?: number;
   adminAddress: string;
+  authorizationRequired?: boolean;
+  authorizationRevocable?: boolean;
+  complianceNodeAddress?: string;
 }
 
 export interface DeployTokenResult {
@@ -336,6 +339,19 @@ async function initializeContract(
   const maxSupplyScVal = params.maxSupply
     ? StellarSdk.nativeToScVal(params.maxSupply, { type: "i128" })
     : StellarSdk.xdr.ScVal.scvVoid();
+  const authorizationRequiredScVal = StellarSdk.nativeToScVal(
+    params.authorizationRequired ?? false,
+    { type: "bool" },
+  );
+  const authorizationRevocableScVal = StellarSdk.nativeToScVal(
+    params.authorizationRevocable ?? false,
+    { type: "bool" },
+  );
+  const complianceNodeScVal =
+    params.complianceNodeAddress &&
+    params.complianceNodeAddress.trim().length > 0
+      ? new StellarSdk.Address(params.complianceNodeAddress.trim()).toScVal()
+      : StellarSdk.xdr.ScVal.scvVoid();
 
   const initTx = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
@@ -349,7 +365,10 @@ async function initializeContract(
         nameScVal,
         symbolScVal,
         initialSupplyScVal,
-        maxSupplyScVal
+        maxSupplyScVal,
+        authorizationRequiredScVal,
+        authorizationRevocableScVal,
+        complianceNodeScVal,
       )
     )
     .setTimeout(30)
