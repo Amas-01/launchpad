@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import TokenDashboard from "./TokenDashboard";
 
 interface PageProps {
@@ -36,9 +37,9 @@ export default async function TokenDashboardPage({ params }: PageProps) {
           The contract ID provided is not valid.
         </p>
 
-        <a href="/dashboard" className="mt-4 text-blue-500 underline">
+        <Link href="/dashboard" className="mt-4 text-blue-500 underline">
           Back to search
-        </a>
+        </Link>
       </div>
     );
   }

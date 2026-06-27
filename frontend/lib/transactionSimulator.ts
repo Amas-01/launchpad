@@ -400,7 +400,7 @@ export async function simulateTokenDeployment(
 
     let estimatedFee = "0.01";
     let simulationCost = "0.01";
-    let simulationFootprint = "";
+    const simulationFootprint = "";
     
     if (StellarSdk.rpc.Api.isSimulationSuccess(sim)) {
       try {

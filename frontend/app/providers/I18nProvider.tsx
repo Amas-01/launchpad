@@ -12,7 +12,11 @@ export function I18nProvider({ children }: I18nProviderProps) {
   const { locale, messages: contextMessages } = useLocale();
 
   return (
-    <NextIntlClientProvider locale={locale} messages={contextMessages}>
+    <NextIntlClientProvider
+      locale={locale}
+      messages={contextMessages}
+      timeZone="UTC"
+    >
       {children}
     </NextIntlClientProvider>
   );

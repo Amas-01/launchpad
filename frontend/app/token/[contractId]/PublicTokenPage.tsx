@@ -16,7 +16,7 @@ import {
   type TokenHolder,
 } from "@/lib/stellar";
 import { useSoroban } from "@/hooks/useSoroban";
-import { useNetwork } from "@/providers/NetworkProvider";
+import { useNetwork } from "@/app/providers/NetworkProvider";
 import InvalidTokenContract from "../../components/InvalidTokenContract";
 
 // ---------------------------------------------------------------------------

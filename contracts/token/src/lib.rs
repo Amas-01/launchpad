@@ -580,13 +580,14 @@ impl TokenContract {
         Self::_require_admin(&env);
 
         if let Some(addr) = node.clone() {
-            env.storage().instance().set(&DataKey::ComplianceNode, &addr);
+            env.storage()
+                .instance()
+                .set(&DataKey::ComplianceNode, &addr);
         } else {
             env.storage().instance().remove(&DataKey::ComplianceNode);
         }
 
-        env.events()
-            .publish((symbol_short!("set_compliance_node"),), node);
+        env.events().publish((symbol_short!("set_cnode"),), node);
     }
 
     /// Returns `true` if the contract is currently paused.
@@ -821,7 +822,7 @@ impl TokenContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, IntoVal};
+    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env, IntoVal};
 
     fn setup() -> (Env, TokenContractClient<'static>, Address, Address) {
         let env = Env::default();
@@ -1776,30 +1777,36 @@ mod test {
 
         client.freeze_account(&user);
         let events = env.events().all();
-        let last_event = events.get(events.len() - 1).unwrap();
-        
+        let last_event = events.slice(events.len() - 1..);
+
         // Verify freeze event
         assert_eq!(
             last_event,
-            (
-                client.address.clone(),
-                (symbol_short!("freeze"), user.clone()).into_val(&env),
-                ().into_val(&env)
-            )
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (symbol_short!("freeze"), user.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
         );
 
         client.unfreeze_account(&user);
         let events = env.events().all();
-        let last_event = events.get(events.len() - 1).unwrap();
-        
+        let last_event = events.slice(events.len() - 1..);
+
         // Verify unfreeze event
         assert_eq!(
             last_event,
-            (
-                client.address.clone(),
-                (symbol_short!("unfreeze"), user.clone()).into_val(&env),
-                ().into_val(&env)
-            )
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (symbol_short!("unfreeze"), user.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
         );
     }
 }
