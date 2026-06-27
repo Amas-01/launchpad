@@ -7,7 +7,6 @@ import * as z from "zod";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useWallet } from "../../../hooks/useWallet";
-import { useSoroban } from "@/hooks/useSoroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import {
   ArrowRight,
@@ -82,8 +81,6 @@ export function TransferPanel({
 }: TransferPanelProps) {
   const { signTransaction, publicKey, connected } = useWallet();
   const { networkConfig } = useNetwork();
-  const { fetchTokenInfo } = useSoroban();
-  console.log(fetchTokenInfo);
 
   const [loading, setLoading] = useState(false);
   const [checkingBalance, setCheckingBalance] = useState(false);
