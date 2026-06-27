@@ -163,6 +163,15 @@ impl VestingContract {
             .publish((symbol_short!("create"), recipient), total_amount);
     }
 
+    /// Create multiple vesting schedules in a single transaction.
+    ///
+    /// Atomically transfers the sum of all `total_amount` values from the admin
+    /// to this contract (Phase 2), then writes each schedule (Phase 3). If any
+    /// step panics the entire transaction rolls back, including the token transfer.
+    ///
+    /// **Maximum batch size: 50 recipients.** Larger batches risk exceeding
+    /// Soroban's per-transaction compute budget and will be rejected up front
+    /// with a clear error rather than an opaque resource failure.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         let admin: Address = env
             .storage()
@@ -172,6 +181,7 @@ impl VestingContract {
         admin.require_auth();
 
         assert!(schedules.len() > 0, "schedules cannot be empty");
+        assert!(schedules.len() <= 50, "batch size exceeds maximum of 50");
 
         // Get the token contract address
         let token_addr: Address = env
@@ -1042,6 +1052,7 @@ mod test {
         assert_eq!(schedule.end_ledger, 200); // unchanged
 
         // Verify event emission contains (old_cliff, new_cliff)
+        use soroban_sdk::xdr::ToXdr;
         use soroban_sdk::IntoVal;
         let events = env.events().all();
         let last_event = events.slice(events.len() - 1..);
