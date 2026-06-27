@@ -142,8 +142,8 @@ impl TokenContract {
     }
 
     /// Burn `amount` tokens from `from`. Owner only (standard burn).
-    /// Refuses to run when the account is frozen so a holder cannot dodge a freeze
-    /// by destroying tokens.
+    /// Refuses to run when the account is frozen so a holder cannot
+    /// dodge a freeze by destroying tokens.
     pub fn burn(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         from.require_auth();
