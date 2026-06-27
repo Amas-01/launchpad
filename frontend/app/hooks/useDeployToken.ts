@@ -3,6 +3,7 @@
 import { useCallback } from "react";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { useWallet } from "./useWallet";
+import { useNetwork } from "../providers/NetworkProvider";
 
 // Generate random bytes for salt
 function randomBytes(length: number): Buffer {
@@ -21,12 +22,6 @@ function randomBytes(length: number): Buffer {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const SOROBAN_RPC_URL =
-  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ??
-  "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ??
-  StellarSdk.Networks.TESTNET;
 const TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH;
 
 // ---------------------------------------------------------------------------
@@ -89,6 +84,7 @@ export interface DeployTokenError {
  */
 export function useDeployToken() {
   const { connected, publicKey, signTransaction } = useWallet();
+  const { networkConfig } = useNetwork();
 
   const deployToken = useCallback(
     async (params: DeployTokenParams): Promise<DeployTokenResult> => {
@@ -108,7 +104,7 @@ export function useDeployToken() {
         } as DeployTokenError;
       }
 
-      const rpc = new StellarSdk.rpc.Server(SOROBAN_RPC_URL);
+      const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
 
       // ── Step 1: Build Transaction ─────────────────────────────────────
       // Load the source account to get the current sequence number
@@ -126,7 +122,7 @@ export function useDeployToken() {
 
       const deployTx = new StellarSdk.TransactionBuilder(sourceAccount, {
         fee: StellarSdk.BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
+        networkPassphrase: networkConfig.passphrase,
       })
         .addOperation(deployOp)
         .setTimeout(30)
@@ -167,7 +163,7 @@ export function useDeployToken() {
       let signedDeployXdr: string;
       try {
         signedDeployXdr = await signTransaction(assembledDeployTx.toXDR(), {
-          networkPassphrase: NETWORK_PASSPHRASE,
+          networkPassphrase: networkConfig.passphrase,
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -190,7 +186,7 @@ export function useDeployToken() {
 
       const signedDeployTx = StellarSdk.TransactionBuilder.fromXDR(
         signedDeployXdr,
-        NETWORK_PASSPHRASE
+        networkConfig.passphrase
       ) as StellarSdk.Transaction;
 
       // ── Step 4: Broadcast and Poll ────────────────────────────────────
@@ -244,7 +240,8 @@ export function useDeployToken() {
             contractId,
             publicKey,
             params,
-            signTransaction
+            signTransaction,
+            networkConfig.passphrase
           );
 
           return {
@@ -269,7 +266,7 @@ export function useDeployToken() {
         type: "timeout",
       } as DeployTokenError;
     },
-    [connected, publicKey, signTransaction]
+    [connected, publicKey, signTransaction, networkConfig.rpcUrl, networkConfig.passphrase]
   );
 
   return { deployToken };
@@ -322,7 +319,8 @@ async function initializeContract(
   contractId: string,
   sourcePublicKey: string,
   params: DeployTokenParams,
-  signTransaction: (xdr: string, opts?: { networkPassphrase?: string }) => Promise<string>
+  signTransaction: (xdr: string, opts?: { networkPassphrase?: string }) => Promise<string>,
+  passphrase: string
 ): Promise<void> {
   // Load source account
   const sourceAccount = await rpc.getAccount(sourcePublicKey);
@@ -355,7 +353,7 @@ async function initializeContract(
 
   const initTx = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: StellarSdk.BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
+    networkPassphrase: passphrase,
   })
     .addOperation(
       contract.call(
@@ -396,12 +394,12 @@ async function initializeContract(
 
   // Sign
   const signedInitXdr = await signTransaction(assembledInitTx.toXDR(), {
-    networkPassphrase: NETWORK_PASSPHRASE,
+    networkPassphrase: passphrase,
   });
 
   const signedInitTx = StellarSdk.TransactionBuilder.fromXDR(
     signedInitXdr,
-    NETWORK_PASSPHRASE
+    passphrase
   ) as StellarSdk.Transaction;
 
   // Broadcast

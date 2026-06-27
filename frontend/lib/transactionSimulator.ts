@@ -400,7 +400,7 @@ export async function simulateTokenDeployment(
 
     let estimatedFee = "0.01";
     let simulationCost = "0.01";
-    const simulationFootprint = "";
+    let simulationFootprint = "";
     
     if (StellarSdk.rpc.Api.isSimulationSuccess(sim)) {
       try {
@@ -409,6 +409,9 @@ export async function simulateTokenDeployment(
         const totalFee = (minResourceFee + baseFee) / 10_000_000;
         estimatedFee = totalFee >= 1 ? totalFee.toFixed(2) : totalFee.toFixed(4);
         simulationCost = estimatedFee;
+        if (sim.transactionData) {
+          simulationFootprint = sim.transactionData.getFootprint().toString();
+        }
       } catch {
         estimatedFee = "0.01";
       }
