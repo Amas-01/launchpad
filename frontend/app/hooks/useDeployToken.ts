@@ -72,7 +72,7 @@ export interface DeployTokenError {
  *       name: "My Token",
  *       symbol: "MTK",
  *       decimals: 7,
- *       initialSupply: 1000000,
+ *       initialSupply: "1000000",
  *       adminAddress: "GABC..."
  *     });
  *     console.log("Deployed:", result.contractId);
