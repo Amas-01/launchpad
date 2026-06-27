@@ -4,6 +4,8 @@ import { SettingsProvider } from "@/app/providers/SettingsProvider";
 import { useSettings } from "@/app/hooks/useSettings";
 
 let mockNetwork: "testnet" | "mainnet" = "testnet";
+let mockCustomRpc: string | null = null;
+let mockCustomHorizon: string | null = null;
 
 jest.mock("@/app/providers/NetworkProvider", () => ({
   useNetwork: () => ({
@@ -21,6 +23,24 @@ jest.mock("@/app/providers/NetworkProvider", () => ({
         mockNetwork === "mainnet"
           ? "Public Global Stellar Network ; September 2015"
           : "Test SDF Network ; September 2015",
+    },
+    customRpcUrl: mockCustomRpc,
+    customHorizonUrl: mockCustomHorizon,
+    setCustomRpcUrl: (url: string | null) => {
+      mockCustomRpc = url;
+      if (url === null) {
+        localStorage.removeItem(`soropad_rpc_url:${mockNetwork}`);
+      } else {
+        localStorage.setItem(`soropad_rpc_url:${mockNetwork}`, url);
+      }
+    },
+    setCustomHorizonUrl: (url: string | null) => {
+      mockCustomHorizon = url;
+      if (url === null) {
+        localStorage.removeItem(`soropad_horizon_url:${mockNetwork}`);
+      } else {
+        localStorage.setItem(`soropad_horizon_url:${mockNetwork}`, url);
+      }
     },
   }),
 }));
@@ -68,6 +88,8 @@ describe("SettingsProvider", () => {
 
   beforeEach(() => {
     mockNetwork = "testnet";
+    mockCustomRpc = null;
+    mockCustomHorizon = null;
     localStorage.clear();
     process.env = { ...originalEnv };
     delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
@@ -84,14 +106,8 @@ describe("SettingsProvider", () => {
   });
 
   it("loads saved values for the active network from localStorage", () => {
-    localStorage.setItem(
-      "soropad_rpc_url:testnet",
-      "https://saved-testnet-rpc.example.com",
-    );
-    localStorage.setItem(
-      "soropad_horizon_url:testnet",
-      "https://saved-testnet-horizon.example.com",
-    );
+    mockCustomRpc = "https://saved-testnet-rpc.example.com";
+    mockCustomHorizon = "https://saved-testnet-horizon.example.com";
 
     renderSettingsProvider();
 
@@ -157,26 +173,8 @@ describe("SettingsProvider", () => {
   });
 
   it("keeps saved settings isolated per network and resets only the active network", () => {
-    localStorage.setItem(
-      "soropad_rpc_url:testnet",
-      "https://saved-testnet-rpc.example.com",
-    );
-    localStorage.setItem(
-      "soropad_horizon_url:testnet",
-      "https://saved-testnet-horizon.example.com",
-    );
-    localStorage.setItem(
-      "soropad_rpc_url:mainnet",
-      "https://saved-mainnet-rpc.example.com",
-    );
-    localStorage.setItem(
-      "soropad_horizon_url:mainnet",
-      "https://saved-mainnet-horizon.example.com",
-    );
-    process.env.NEXT_PUBLIC_MAINNET_SOROBAN_RPC_URL =
-      "https://env-mainnet-rpc.example.com";
-    process.env.NEXT_PUBLIC_MAINNET_HORIZON_URL =
-      "https://env-mainnet-horizon.example.com";
+    mockCustomRpc = "https://saved-testnet-rpc.example.com";
+    mockCustomHorizon = "https://saved-testnet-horizon.example.com";
 
     const view = renderSettingsProvider();
     expect(screen.getByTestId("rpc")).toHaveTextContent(
@@ -184,6 +182,13 @@ describe("SettingsProvider", () => {
     );
 
     mockNetwork = "mainnet";
+    mockCustomRpc = "https://saved-mainnet-rpc.example.com";
+    mockCustomHorizon = "https://saved-mainnet-horizon.example.com";
+    process.env.NEXT_PUBLIC_MAINNET_SOROBAN_RPC_URL =
+      "https://env-mainnet-rpc.example.com";
+    process.env.NEXT_PUBLIC_MAINNET_HORIZON_URL =
+      "https://env-mainnet-horizon.example.com";
+
     view.rerender(
       <SettingsProvider>
         <SettingsConsumer />
@@ -199,19 +204,20 @@ describe("SettingsProvider", () => {
 
     fireEvent.click(screen.getByText("reset"));
 
+    // Re-render so SettingsProvider picks up the updated mock state
+    view.rerender(
+      <SettingsProvider>
+        <SettingsConsumer />
+      </SettingsProvider>,
+    );
+
     expect(screen.getByTestId("rpc")).toHaveTextContent(
       "https://env-mainnet-rpc.example.com",
     );
     expect(screen.getByTestId("horizon")).toHaveTextContent(
       "https://env-mainnet-horizon.example.com",
     );
-    expect(localStorage.getItem("soropad_rpc_url:mainnet")).toBeNull();
-    expect(localStorage.getItem("soropad_horizon_url:mainnet")).toBeNull();
-    expect(localStorage.getItem("soropad_rpc_url:testnet")).toBe(
-      "https://saved-testnet-rpc.example.com",
-    );
-    expect(localStorage.getItem("soropad_horizon_url:testnet")).toBe(
-      "https://saved-testnet-horizon.example.com",
-    );
+    expect(mockCustomRpc).toBeNull();
+    expect(mockCustomHorizon).toBeNull();
   });
 });

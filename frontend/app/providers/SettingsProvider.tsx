@@ -3,9 +3,7 @@
 import {
   createContext,
   useCallback,
-  useEffect,
   useMemo,
-  useState,
   type ReactNode,
 } from "react";
 import { useNetwork } from "./NetworkProvider";
@@ -14,16 +12,6 @@ import { NETWORKS, type NetworkType } from "../../types/network";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const LS_RPC_KEY_PREFIX = "soropad_rpc_url";
-const LS_HORIZON_KEY_PREFIX = "soropad_horizon_url";
-
-function getRpcStorageKey(network: NetworkType): string {
-  return `${LS_RPC_KEY_PREFIX}:${network}`;
-}
-
-function getHorizonStorageKey(network: NetworkType): string {
-  return `${LS_HORIZON_KEY_PREFIX}:${network}`;
-}
 
 function getDefaultRpcUrl(network: NetworkType): string {
   if (network === "mainnet") {
@@ -76,7 +64,14 @@ export const SettingsContext = createContext<SettingsContextValue | undefined>(
 // Provider
 // ---------------------------------------------------------------------------
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const { networkConfig } = useNetwork();
+  const {
+    networkConfig,
+    customRpcUrl,
+    customHorizonUrl,
+    setCustomRpcUrl,
+    setCustomHorizonUrl,
+  } = useNetwork();
+
   const defaultRpcUrl = useMemo(
     () => getDefaultRpcUrl(networkConfig.network),
     [networkConfig.network],
@@ -85,53 +80,28 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     () => getDefaultHorizonUrl(networkConfig.network),
     [networkConfig.network],
   );
-  
-  const [rpcUrl, setRpcUrlState] = useState(defaultRpcUrl);
-  const [horizonUrl, setHorizonUrlState] = useState(defaultHorizonUrl);
 
-  // Update URLs when network changes
-  useEffect(() => {
-    try {
-      const storedRpc = localStorage.getItem(getRpcStorageKey(networkConfig.network));
-      const storedHorizon = localStorage.getItem(getHorizonStorageKey(networkConfig.network));
-      
-      setRpcUrlState(storedRpc ?? defaultRpcUrl);
-      setHorizonUrlState(storedHorizon ?? defaultHorizonUrl);
-    } catch {
-      setRpcUrlState(defaultRpcUrl);
-      setHorizonUrlState(defaultHorizonUrl);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [networkConfig.network]);
+  const rpcUrl = customRpcUrl ?? defaultRpcUrl;
+  const horizonUrl = customHorizonUrl ?? defaultHorizonUrl;
 
-  const setRpcUrl = useCallback((url: string) => {
-    setRpcUrlState(url);
-    try {
-      localStorage.setItem(getRpcStorageKey(networkConfig.network), url);
-    } catch {
-      // ignore
-    }
-  }, [networkConfig.network]);
+  const setRpcUrl = useCallback(
+    (url: string) => {
+      setCustomRpcUrl(url);
+    },
+    [setCustomRpcUrl],
+  );
 
-  const setHorizonUrl = useCallback((url: string) => {
-    setHorizonUrlState(url);
-    try {
-      localStorage.setItem(getHorizonStorageKey(networkConfig.network), url);
-    } catch {
-      // ignore
-    }
-  }, [networkConfig.network]);
+  const setHorizonUrl = useCallback(
+    (url: string) => {
+      setCustomHorizonUrl(url);
+    },
+    [setCustomHorizonUrl],
+  );
 
   const resetToDefaults = useCallback(() => {
-    setRpcUrlState(defaultRpcUrl);
-    setHorizonUrlState(defaultHorizonUrl);
-    try {
-      localStorage.removeItem(getRpcStorageKey(networkConfig.network));
-      localStorage.removeItem(getHorizonStorageKey(networkConfig.network));
-    } catch {
-      // ignore
-    }
-  }, [defaultHorizonUrl, defaultRpcUrl, networkConfig.network]);
+    setCustomRpcUrl(null);
+    setCustomHorizonUrl(null);
+  }, [setCustomRpcUrl, setCustomHorizonUrl]);
 
   const value = useMemo<SettingsContextValue>(
     () => ({

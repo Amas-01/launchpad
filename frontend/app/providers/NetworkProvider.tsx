@@ -20,6 +20,10 @@ interface NetworkContextValue {
   network: NetworkType;
   setNetwork: (network: NetworkType) => void;
   mounted: boolean;
+  customRpcUrl: string | null;
+  customHorizonUrl: string | null;
+  setCustomRpcUrl: (url: string | null) => void;
+  setCustomHorizonUrl: (url: string | null) => void;
 }
 
 const NetworkContext = createContext<NetworkContextValue | undefined>(
@@ -32,8 +36,8 @@ const LS_HORIZON_KEY_PREFIX = "soropad_horizon_url";
 export function NetworkProvider({ children }: { children: ReactNode }) {
   const [network, setNetworkState] = useState<NetworkType>("testnet");
   const [mounted, setMounted] = useState(false);
-  const [customRpcUrl, setCustomRpcUrl] = useState<string | null>(null);
-  const [customHorizonUrl, setCustomHorizonUrl] = useState<string | null>(null);
+  const [customRpcUrl, setCustomRpcUrlState] = useState<string | null>(null);
+  const [customHorizonUrl, setCustomHorizonUrlState] = useState<string | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("soropad:network") as NetworkType | null;
@@ -49,11 +53,11 @@ export function NetworkProvider({ children }: { children: ReactNode }) {
       try {
         const storedRpc = localStorage.getItem(`${LS_RPC_KEY_PREFIX}:${network}`);
         const storedHorizon = localStorage.getItem(`${LS_HORIZON_KEY_PREFIX}:${network}`);
-        setCustomRpcUrl(storedRpc);
-        setCustomHorizonUrl(storedHorizon);
+        setCustomRpcUrlState(storedRpc);
+        setCustomHorizonUrlState(storedHorizon);
       } catch {
-        setCustomRpcUrl(null);
-        setCustomHorizonUrl(null);
+        setCustomRpcUrlState(null);
+        setCustomHorizonUrlState(null);
       }
     };
 
@@ -76,6 +80,38 @@ export function NetworkProvider({ children }: { children: ReactNode }) {
     localStorage.setItem("soropad:network", n);
   }, []);
 
+  const setCustomRpcUrl = useCallback(
+    (url: string | null) => {
+      setCustomRpcUrlState(url);
+      try {
+        if (url === null) {
+          localStorage.removeItem(`${LS_RPC_KEY_PREFIX}:${network}`);
+        } else {
+          localStorage.setItem(`${LS_RPC_KEY_PREFIX}:${network}`, url);
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [network],
+  );
+
+  const setCustomHorizonUrl = useCallback(
+    (url: string | null) => {
+      setCustomHorizonUrlState(url);
+      try {
+        if (url === null) {
+          localStorage.removeItem(`${LS_HORIZON_KEY_PREFIX}:${network}`);
+        } else {
+          localStorage.setItem(`${LS_HORIZON_KEY_PREFIX}:${network}`, url);
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [network],
+  );
+
   const networkConfig = useMemo(() => {
     const baseConfig = NETWORKS[network];
     return {
@@ -91,8 +127,12 @@ export function NetworkProvider({ children }: { children: ReactNode }) {
       network,
       setNetwork,
       mounted,
+      customRpcUrl,
+      customHorizonUrl,
+      setCustomRpcUrl,
+      setCustomHorizonUrl,
     }),
-    [networkConfig, network, setNetwork, mounted],
+    [networkConfig, network, setNetwork, mounted, customRpcUrl, customHorizonUrl, setCustomRpcUrl, setCustomHorizonUrl],
   );
 
   return (
