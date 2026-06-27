@@ -140,10 +140,13 @@ impl TokenContract {
     }
 
     /// Burn `amount` tokens from `from`. Owner only (standard burn).
+    /// Refuses to run when the account is frozen so a holder cannot dodge a freeze
+    /// by destroying tokens.
     pub fn burn(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         from.require_auth();
         assert!(amount > 0, "amount must be positive");
+        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
         Self::_burn(&env, &from, amount);
     }
 
@@ -184,15 +187,23 @@ impl TokenContract {
     }
 
     /// Mint `amount` tokens to multiple recipients. Admin only.
+    ///
+    /// Maximum batch size is 100 to stay within Soroban's compute budget.
     pub fn mint_batch(env: Env, to: soroban_sdk::Vec<Address>, amounts: soroban_sdk::Vec<i128>) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
         assert!(to.len() == amounts.len(), "mismatching lengths");
+        assert!(to.len() <= 100, "batch size exceeds maximum of 100");
+        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
         for i in 0..to.len() {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             assert!(amount > 0, "amount must be positive");
             Self::_mint(&env, &recipient, amount);
+            let key = DataKey::Balance(recipient);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
         }
     }
 
@@ -272,14 +283,14 @@ impl TokenContract {
     pub fn pause(env: Env) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::IsPaused, &true);
-        env.events().publish((symbol_short!("pause"),), true);
+        env.events().publish((symbol_short!("pause"),), ());
     }
 
     /// Unpause the contract. Admin only.
     pub fn unpause(env: Env) {
         Self::_require_admin(&env);
         env.storage().instance().remove(&DataKey::IsPaused);
-        env.events().publish((symbol_short!("pause"),), false);
+        env.events().publish((symbol_short!("unpause"),), ());
     }
 
     /// Grant authorization to `holder`, allowing them to receive tokens when
@@ -1015,6 +1026,20 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "batch size exceeds maximum of 100")]
+    fn test_mint_batch_exceeds_max_size() {
+        let (env, client, _, _) = setup();
+        let mut to = soroban_sdk::Vec::new(&env);
+        let mut amounts = soroban_sdk::Vec::new(&env);
+        for _ in 0..101 {
+            let addr = Address::generate(&env);
+            to.push_back(addr.clone());
+            amounts.push_back(1i128);
+        }
+        client.mint_batch(&to, &amounts);
+    }
+
+    #[test]
     fn test_total_burned_starts_at_zero() {
         let (_, client, _, _) = setup();
         assert_eq!(client.total_burned(), 0i128);
@@ -1125,6 +1150,15 @@ mod test {
         client.transfer(&admin, &user, &1_000i128);
         client.freeze_account(&user);
         client.burn_self(&user, &500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_burn_blocked_when_frozen() {
+        let (_, client, admin, user) = setup();
+        client.transfer(&admin, &user, &1_000i128);
+        client.freeze_account(&user);
+        client.burn(&user, &500i128);
     }
 
     #[test]
@@ -1757,6 +1791,41 @@ mod test {
         // Supply a valid future expiration; the allowance should be stored correctly.
         client.approve(&admin, &spender, &500i128, &100u32);
         assert_eq!(client.allowance(&admin, &spender), 500i128);
+    }
+
+    #[test]
+    fn test_pause_unpause_events() {
+        let (env, client, _admin, _) = setup();
+
+        client.pause();
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (symbol_short!("pause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause();
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (symbol_short!("unpause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
     }
 
     #[test]
