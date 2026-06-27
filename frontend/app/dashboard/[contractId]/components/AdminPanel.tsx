@@ -134,6 +134,8 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [locked, setLocked] = useState(false);
     const [showRevokeConfirm, setShowRevokeConfirm] = useState(false);
     const [revokePhrase, setRevokePhrase] = useState("");
+    const [paused, setPaused] = useState(false);
+    const [showPauseConfirm, setShowPauseConfirm] = useState(false);
 
     const [mintMode, setMintMode] = useState<"single" | "batch">("single");
     const [batchData, setBatchData] = useState("");
@@ -187,9 +189,45 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
         }
     }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
+    const refreshPaused = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("is_paused"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        return false;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return false;
+                    return Boolean(sim.result.retval.b());
+                },
+                { operation: "Check pause state", silent: true },
+            );
+            setPaused(value);
+        } catch {
+            // Best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
     useEffect(() => {
         refreshLocked();
     }, [refreshLocked]);
+
+    useEffect(() => {
+        refreshPaused();
+    }, [refreshPaused]);
 
     const submitSignedTransaction = useCallback(
         async (signedXdr: string) => {
@@ -561,6 +599,61 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
       });
     } catch {
       // Toast already surfaced via wrapRpcCall.
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handlePauseToggle = async () => {
+    if (!publicKey) return;
+
+    const action = paused ? "unpause" : "pause";
+    setLoading(action);
+    setSuccess(null);
+    try {
+      const txHash = await wrapRpcCall(
+        async () => {
+          const server = new rpc.Server(networkConfig.rpcUrl);
+          const account = await server.getAccount(publicKey);
+          const contract = new Contract(contractId);
+
+          const built = new TransactionBuilder(account, {
+            fee: "1000",
+            networkPassphrase: networkConfig.passphrase,
+          })
+            .addOperation(contract.call(action))
+            .setTimeout(30)
+            .build();
+
+          const sim = await server.simulateTransaction(built);
+          if (rpc.Api.isSimulationError(sim)) {
+            throw new Error(`Simulation failed: ${sim.error}`);
+          }
+          const prepared = rpc.assembleTransaction(built, sim).build();
+
+          const signedXdr = await signTransaction(prepared.toXDR(), {
+            networkPassphrase: networkConfig.passphrase,
+          });
+
+          return await submitSignedTransaction(signedXdr);
+        },
+        { operation: paused ? "Unpause" : "Pause", toastTitle: paused ? "Unpause failed" : "Pause failed" },
+      );
+
+      setLastTxHash(txHash);
+      setSuccess(action);
+      setPaused(!paused);
+      setShowPauseConfirm(false);
+      toast.show({
+        title: paused ? "Token unpaused" : "Token paused",
+        message: paused
+          ? "All token operations have been resumed."
+          : "All token operations are now halted. Call unpause to resume.",
+        variant: "success",
+        duration: 8_000,
+      });
+    } catch {
+      // Toast already surfaced via wrapRpcCall
     } finally {
       setLoading(null);
     }
@@ -1166,6 +1259,99 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               Update URI
             </Button>
           </form>
+        </div>
+
+        {/* ── Pause / Unpause ───────────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-yellow-500/30 transition-all duration-300 group">
+          <div className="flex items-center gap-2 mb-4 text-yellow-400">
+            <div className="p-2 bg-yellow-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg">Circuit Breaker</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Pause or unpause all token operations in an emergency.
+              </p>
+            </div>
+          </div>
+
+          {paused ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3 text-sm text-yellow-200">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                Token is paused — mint, burn, transfer, and clawback are halted.
+              </div>
+              <Button
+                type="button"
+                className="w-full bg-green-600 hover:bg-green-700 border-none shadow-lg shadow-green-600/20"
+                onClick={handlePauseToggle}
+                isLoading={loading === "unpause"}
+                disabled={adminDisabled || locked}
+              >
+                {success === "unpause" ? (
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" /> Unpaused
+                  </span>
+                ) : (
+                  "Unpause Token"
+                )}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 rounded-lg border border-green-500/20 bg-green-500/5 px-4 py-3 text-sm text-green-200">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                Token is active — all operations are running normally.
+              </div>
+
+              {!showPauseConfirm ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="w-full border-yellow-500/20 text-yellow-400 hover:border-yellow-500/40"
+                  disabled={adminDisabled || locked || !!loading}
+                  onClick={() => setShowPauseConfirm(true)}
+                >
+                  Pause Token
+                </Button>
+              ) : (
+                <div className="space-y-3 pt-2 animate-in fade-in slide-in-from-top-2 duration-300 bg-yellow-950/20 p-4 rounded-xl border border-yellow-500/20">
+                  <p className="text-[10px] text-yellow-400 font-bold uppercase tracking-widest text-center">
+                    Pause token?
+                  </p>
+                  <p className="text-xs text-stellar-200 text-center leading-relaxed">
+                    This will halt all mint, burn, transfer, and clawback operations
+                    until unpaused. Only token holders can still self-burn.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="flex-1 text-xs py-2 h-9"
+                      onClick={() => setShowPauseConfirm(false)}
+                      disabled={loading === "pause"}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      className="flex-1 text-xs py-2 h-9 bg-yellow-600 hover:bg-yellow-700 border-none shadow-lg shadow-yellow-600/20"
+                      onClick={handlePauseToggle}
+                      isLoading={loading === "pause"}
+                    >
+                      {success === "pause" ? (
+                        <span className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4" /> Paused
+                        </span>
+                      ) : (
+                        "Confirm Pause"
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </section>
