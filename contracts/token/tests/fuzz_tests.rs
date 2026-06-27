@@ -439,3 +439,54 @@ fn test_mint_exceeds_max_supply_rejected() {
     // Remaining capacity is 500_0000000 — minting 1 more overflows the cap.
     client.mint(&user, &(500_0000001i128));
 }
+
+// ===========================================================================
+// Decimal range validation (issue #261)
+// ===========================================================================
+
+#[test]
+#[should_panic(expected = "decimals must be <= 18")]
+fn test_initialize_rejects_decimals_above_18() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let id = env.register_contract(None, TokenContract);
+    let client = TokenContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+
+    client.initialize(
+        &admin,
+        &19u32,
+        &String::from_str(&env, "BadToken"),
+        &String::from_str(&env, "BAD"),
+        &0i128,
+        &None,
+        &false,
+        &false,
+        &None,
+    );
+}
+
+#[test]
+fn test_initialize_accepts_decimals_at_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let id = env.register_contract(None, TokenContract);
+    let client = TokenContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+
+    client.initialize(
+        &admin,
+        &18u32,
+        &String::from_str(&env, "EdgeToken"),
+        &String::from_str(&env, "EDG"),
+        &0i128,
+        &None,
+        &false,
+        &false,
+        &None,
+    );
+
+    assert_eq!(client.decimals(), 18u32);
+}

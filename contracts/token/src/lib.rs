@@ -83,6 +83,8 @@ impl TokenContract {
             panic!("already initialized");
         }
 
+        assert!(decimal <= 18, "decimals must be <= 18");
+
         if let Some(cap) = max_supply {
             assert!(cap > 0, "max_supply must be positive");
             assert!(initial_supply <= cap, "initial_supply exceeds max_supply");
