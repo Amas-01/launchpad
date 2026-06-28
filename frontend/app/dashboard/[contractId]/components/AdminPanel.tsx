@@ -37,7 +37,10 @@ import {
   ExternalLink,
   Clock,
   Lock,
-  AlertTriangle,
+  Ban,
+  UserX,
+  ShieldOff,
+  CircleAlert,
 } from "lucide-react";
 import { VestingCurveChart } from "@/components/VestingCurveChart";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
@@ -140,6 +143,18 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [batchErrors, setBatchErrors] = useState<string[]>([]);
     const [parsedEntries, setParsedEntries] = useState<BatchMintEntry[]>([]);
 
+    // Authorization
+    const [authorizationRequired, setAuthorizationRequired] = useState(false);
+    const [authorizationRevocable, setAuthorizationRevocable] = useState(false);
+    const [authAddress, setAuthAddress] = useState("");
+    const [authResult, setAuthResult] = useState<string | null>(null);
+
+    // Security controls
+    const [isPaused, setIsPaused] = useState(false);
+    const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+    const [freezeAddress, setFreezeAddress] = useState("");
+    const [freezeResult, setFreezeResult] = useState<string | null>(null);
+
     // Forms
     const mintForm = useForm<MintData>({ resolver: zodResolver(mintSchema) });
     const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
@@ -187,9 +202,46 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
         }
     }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
+    const refreshAuthAndPause = useCallback(async () => {
+        try {
+            const server = new rpc.Server(networkConfig.rpcUrl);
+            const contract = new Contract(contractId);
+            const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+            const account = new (
+                await import("@stellar/stellar-sdk")
+            ).Account(dummy, "0");
+
+            const buildSim = async (method: string): Promise<boolean> => {
+                const tx = new TransactionBuilder(account, {
+                    fee: "100",
+                    networkPassphrase: networkConfig.passphrase,
+                })
+                    .addOperation(contract.call(method))
+                    .setTimeout(30)
+                    .build();
+                const sim = await server.simulateTransaction(tx);
+                if (rpc.Api.isSimulationError(sim)) return false;
+                if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return false;
+                return Boolean(sim.result.retval.b());
+            };
+
+            const [authReq, authRev, paused] = await Promise.all([
+                buildSim("authorization_required").catch(() => false),
+                buildSim("authorization_revocable").catch(() => false),
+                buildSim("is_paused").catch(() => false),
+            ]);
+            setAuthorizationRequired(authReq);
+            setAuthorizationRevocable(authRev);
+            setIsPaused(paused);
+        } catch {
+            // best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
     useEffect(() => {
         refreshLocked();
-    }, [refreshLocked]);
+        refreshAuthAndPause();
+    }, [refreshLocked, refreshAuthAndPause]);
 
     const submitSignedTransaction = useCallback(
         async (signedXdr: string) => {
@@ -566,6 +618,271 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     }
   };
 
+  /* ── Authorization handlers ─────────────────────────────────── */
+  const handleAuthorizeHolder = async () => {
+    if (!publicKey || !authAddress.trim()) return;
+    setLoading("authorize");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("authorize_holder", addressToScVal(authAddress.trim())))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setAuthResult("authorized");
+      toast.show({ title: "Holder authorized", message: `Address ${authAddress.slice(0, 8)}... is now authorized.`, variant: "success" });
+      setAuthAddress("");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Authorization failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleRevokeAuthorization = async () => {
+    if (!publicKey || !authAddress.trim()) return;
+    setLoading("revoke-auth");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("revoke_authorization", addressToScVal(authAddress.trim())))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setAuthResult("revoked");
+      toast.show({ title: "Authorization revoked", message: `Authorization for ${authAddress.slice(0, 8)}... has been revoked.`, variant: "success" });
+      setAuthAddress("");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Revocation failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleCheckAuthorization = async () => {
+    if (!publicKey || !authAddress.trim()) return;
+    setLoading("check-auth");
+    try {
+      const result = await wrapRpcCall(
+        async () => {
+          const server = new rpc.Server(networkConfig.rpcUrl);
+          const contract = new Contract(contractId);
+          const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+          const account = new (await import("@stellar/stellar-sdk")).Account(dummy, "0");
+          const tx = new TransactionBuilder(account, {
+            fee: "100",
+            networkPassphrase: networkConfig.passphrase,
+          })
+            .addOperation(contract.call("is_authorized", addressToScVal(authAddress.trim())))
+            .setTimeout(30)
+            .build();
+          const sim = await server.simulateTransaction(tx);
+          if (rpc.Api.isSimulationError(sim)) throw new Error(sim.error);
+          if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) throw new Error("Simulation failed");
+          return Boolean(sim.result.retval.b());
+        },
+        { operation: "Check authorization", silent: true },
+      );
+      setAuthResult(result ? "yes" : "no");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Check failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  /* ── Security control handlers ───────────────────────────────── */
+  const handlePause = async () => {
+    if (!publicKey) return;
+    setLoading("pause");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("pause"))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setIsPaused(true);
+      setShowPauseConfirm(false);
+      toast.show({ title: "Contract paused", message: "All state-changing operations are now halted.", variant: "warning", duration: 8_000 });
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Pause failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleUnpause = async () => {
+    if (!publicKey) return;
+    setLoading("unpause");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("unpause"))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setIsPaused(false);
+      toast.show({ title: "Contract unpaused", message: "All operations have been restored.", variant: "success" });
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Unpause failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleFreezeAccount = async () => {
+    if (!publicKey || !freezeAddress.trim()) return;
+    setLoading("freeze");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("freeze_account", addressToScVal(freezeAddress.trim())))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setFreezeResult("frozen");
+      toast.show({ title: "Account frozen", message: `${freezeAddress.slice(0, 8)}... can no longer send tokens.`, variant: "warning" });
+      setFreezeAddress("");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Freeze failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleUnfreezeAccount = async () => {
+    if (!publicKey || !freezeAddress.trim()) return;
+    setLoading("unfreeze");
+    try {
+      const server = new rpc.Server(networkConfig.rpcUrl);
+      const account = await server.getAccount(publicKey);
+      const contract = new Contract(contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: "1000",
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(contract.call("unfreeze_account", addressToScVal(freezeAddress.trim())))
+        .setTimeout(30)
+        .build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+      const prepared = rpc.assembleTransaction(tx, sim).build();
+      const signedXdr = await signTransaction(prepared.toXDR(), {
+        networkPassphrase: networkConfig.passphrase,
+      });
+      const txHash = await submitSignedTransaction(signedXdr);
+      setLastTxHash(txHash);
+      setFreezeResult("unfrozen");
+      toast.show({ title: "Account unfrozen", message: `${freezeAddress.slice(0, 8)}... can now send tokens.`, variant: "success" });
+      setFreezeAddress("");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Unfreeze failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleCheckFrozen = async () => {
+    if (!publicKey || !freezeAddress.trim()) return;
+    setLoading("check-frozen");
+    try {
+      const result = await wrapRpcCall(
+        async () => {
+          const server = new rpc.Server(networkConfig.rpcUrl);
+          const contract = new Contract(contractId);
+          const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+          const account = new (await import("@stellar/stellar-sdk")).Account(dummy, "0");
+          const tx = new TransactionBuilder(account, {
+            fee: "100",
+            networkPassphrase: networkConfig.passphrase,
+          })
+            .addOperation(contract.call("is_frozen", addressToScVal(freezeAddress.trim())))
+            .setTimeout(30)
+            .build();
+          const sim = await server.simulateTransaction(tx);
+          if (rpc.Api.isSimulationError(sim)) throw new Error(sim.error);
+          if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) throw new Error("Simulation failed");
+          return Boolean(sim.result.retval.b());
+        },
+        { operation: "Check frozen", silent: true },
+      );
+      setFreezeResult(result ? "frozen" : "not-frozen");
+    } catch (err) {
+      const error = err as Error;
+      toast.show({ title: "Check failed", message: error.message, variant: "error" });
+    } finally {
+      setLoading(null);
+    }
+  };
+
   const adminDisabled = !!loading || locked;
 
   return (
@@ -597,6 +914,21 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
           </a>
         )}
       </div>
+
+      {isPaused && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-orange-500/30 bg-orange-500/5 p-4">
+          <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-orange-400" />
+          <div className="text-sm">
+            <p className="font-semibold text-orange-200">
+              Contract is paused
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-orange-100/80">
+              All state-changing operations (mint, burn, transfer, clawback)
+              are halted. Only the admin can unpause the contract.
+            </p>
+          </div>
+        </div>
+      )}
 
       {locked && (
         <div className="mb-6 flex items-start gap-3 rounded-xl border border-yellow-500/30 bg-yellow-500/5 p-4">
@@ -1166,6 +1498,229 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               Update URI
             </Button>
           </form>
+        </div>
+
+        {/* ── Authorization (only shown when authorization_required is true) ── */}
+        {authorizationRequired && (
+          <div className="glass-card p-6 flex flex-col hover:border-stellar-500/30 transition-all duration-300 group">
+            <div className="flex items-center gap-2 mb-6 text-stellar-300">
+              <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg">Holder Authorization</h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Authorize addresses to hold this token.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4 flex-grow">
+              <Input
+                label="Address"
+                placeholder="G..."
+                className="bg-white/5 border-white/10"
+                value={authAddress}
+                onChange={(e) => {
+                  setAuthAddress(e.target.value);
+                  setAuthResult(null);
+                }}
+                disabled={adminDisabled}
+              />
+
+              {authResult && (
+                <div className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                  authResult === "yes"
+                    ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                    : authResult === "no"
+                      ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                      : authResult === "authorized"
+                        ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                        : authResult === "revoked"
+                          ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                          : ""
+                }`}>
+                  {authResult === "yes" && <><CheckCircle2 className="w-4 h-4" /> Authorized</>}
+                  {authResult === "no" && <><Ban className="w-4 h-4" /> Not authorized</>}
+                  {authResult === "authorized" && <><CheckCircle2 className="w-4 h-4" /> Authorized successfully</>}
+                  {authResult === "revoked" && <><Ban className="w-4 h-4" /> Authorization revoked</>}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  className="flex-1 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                  isLoading={loading === "authorize"}
+                  disabled={adminDisabled || !authAddress.trim()}
+                  onClick={handleAuthorizeHolder}
+                >
+                  Authorize
+                </Button>
+                <Button
+                  type="button"
+                  className="flex-1 bg-white/5 border border-white/10 hover:bg-white/10 text-white"
+                  isLoading={loading === "revoke-auth"}
+                  disabled={adminDisabled || !authAddress.trim() || !authorizationRevocable}
+                  title={!authorizationRevocable ? "Authorization is irrevocable for this token" : undefined}
+                  onClick={handleRevokeAuthorization}
+                >
+                  Revoke
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="flex-1 border-stellar-500/20 text-stellar-400"
+                  isLoading={loading === "check-auth"}
+                  disabled={adminDisabled || !authAddress.trim()}
+                  onClick={handleCheckAuthorization}
+                >
+                  Check
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Security Controls ────────────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-red-500/30 transition-all duration-300 group">
+          <div className="flex items-center gap-2 mb-6 text-red-400">
+            <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <ShieldOff className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg">Security Controls</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Emergency circuit breaker and per-account freeze controls.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4 flex-grow">
+            {/* Pause / Unpause toggle */}
+            <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <CircleAlert className="w-4 h-4 text-orange-400" />
+                  <span className="text-sm font-semibold text-white">Circuit Breaker</span>
+                </div>
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                  isPaused ? "bg-orange-500/20 text-orange-300" : "bg-green-500/20 text-green-300"
+                }`}>
+                  {isPaused ? "Paused" : "Active"}
+                </span>
+              </div>
+
+              {!showPauseConfirm ? (
+                <Button
+                  type="button"
+                  className={`w-full ${isPaused ? "bg-green-600 hover:bg-green-700" : "bg-orange-600 hover:bg-orange-700"} text-white`}
+                  isLoading={loading === "pause" || loading === "unpause"}
+                  disabled={adminDisabled}
+                  onClick={() => isPaused ? handleUnpause() : setShowPauseConfirm(true)}
+                >
+                  {isPaused ? "Unpause Contract" : "Pause Contract"}
+                </Button>
+              ) : (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300 bg-orange-950/20 p-4 rounded-xl border border-orange-500/20">
+                  <p className="text-[10px] text-orange-400 font-bold uppercase tracking-widest text-center">
+                    Confirm Emergency Pause
+                  </p>
+                  <p className="text-xs text-stellar-200 text-center leading-relaxed">
+                    This will immediately halt all mint, burn, transfer, and
+                    clawback operations across the entire token. Only you can
+                    unpause.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="flex-1 text-xs py-2 h-9"
+                      onClick={() => setShowPauseConfirm(false)}
+                      disabled={adminDisabled}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      className="flex-1 text-xs py-2 h-9 bg-orange-600 hover:bg-orange-700 border-none"
+                      onClick={handlePause}
+                      isLoading={loading === "pause"}
+                    >
+                      Confirm Pause
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Freeze / Unfreeze sub-form */}
+            <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+              <div className="flex items-center gap-2 mb-3">
+                <UserX className="w-4 h-4 text-red-400" />
+                <span className="text-sm font-semibold text-white">Freeze Account</span>
+              </div>
+
+              <Input
+                label="Address"
+                placeholder="G..."
+                className="bg-white/5 border-white/10 mb-3"
+                value={freezeAddress}
+                onChange={(e) => {
+                  setFreezeAddress(e.target.value);
+                  setFreezeResult(null);
+                }}
+                disabled={adminDisabled}
+              />
+
+              {freezeResult && (
+                <div className={`mb-3 p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                  freezeResult === "frozen"
+                    ? "bg-orange-500/10 text-orange-400 border border-orange-500/20"
+                    : freezeResult === "unfrozen"
+                      ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                      : freezeResult === "not-frozen"
+                        ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                        : ""
+                }`}>
+                  {freezeResult === "frozen" && <><Ban className="w-4 h-4" /> Account is frozen</>}
+                  {freezeResult === "unfrozen" && <><CheckCircle2 className="w-4 h-4" /> Account unfrozen</>}
+                  {freezeResult === "not-frozen" && <><CheckCircle2 className="w-4 h-4" /> Account is not frozen</>}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  className="flex-1 bg-orange-600 hover:bg-orange-700 text-white"
+                  isLoading={loading === "freeze"}
+                  disabled={adminDisabled || !freezeAddress.trim()}
+                  onClick={handleFreezeAccount}
+                >
+                  Freeze
+                </Button>
+                <Button
+                  type="button"
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white"
+                  isLoading={loading === "unfreeze"}
+                  disabled={adminDisabled || !freezeAddress.trim()}
+                  onClick={handleUnfreezeAccount}
+                >
+                  Unfreeze
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="flex-1 border-stellar-500/20 text-stellar-400"
+                  isLoading={loading === "check-frozen"}
+                  disabled={adminDisabled || !freezeAddress.trim()}
+                  onClick={handleCheckFrozen}
+                >
+                  Check
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
