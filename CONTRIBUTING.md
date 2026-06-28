@@ -4,6 +4,14 @@ Thanks for your interest! This project is open to contributors via the [Stellar 
 
 ---
 
+## Documentation Structure
+
+- **Feature Guides**: See `docs/` for detailed feature documentation
+- **Issue Tracking**: Active issues are tracked in the `waveN.md` files in the repo root
+- **Architecture**: Refer to `PRD.md` for project requirements and design decisions
+
+---
+
 ## Local Setup
 
 ```bash
