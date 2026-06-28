@@ -1245,6 +1245,37 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "batch size exceeds maximum of 50")]
+    fn test_create_schedules_batch_too_large() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+
+        // Ensure funding checks do not mask the batch-size assertion.
+        asset_client.mint(&admin, &100_000);
+
+        let mut schedules = Vec::new(&env);
+        for _ in 0..51 {
+            schedules.push_back(ScheduleInput {
+                recipient: Address::generate(&env),
+                total_amount: 1000,
+                cliff_ledger: 100,
+                end_ledger: 200,
+            });
+        }
+
+        client.create_schedules_batch(&schedules);
+    }
+
+    #[test]
     #[should_panic(expected = "schedules cannot be empty")]
     fn test_create_schedules_batch_empty() {
         let env = Env::default();

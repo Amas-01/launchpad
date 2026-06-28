@@ -37,6 +37,8 @@ const ERROR_MESSAGE_MAP: Record<string, string> = {
   "schedule has been revoked": "This vesting schedule has been revoked.",
   "nothing to release": "No vested tokens are available to release.",
   "schedule already revoked": "This schedule has already been revoked.",
+  "batch size exceeds maximum of 50": "Batch size exceeds the maximum of 50 schedules.",
+  "schedules cannot be empty": "At least one schedule is required.",
   "end_ledger must be after cliff_ledger": "End ledger must be after cliff ledger.",
   "total_amount must be positive": "Total amount must be greater than zero.",
   "Invalid Stellar public key": "The provided Stellar address is not valid.",
