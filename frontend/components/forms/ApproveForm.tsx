@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/Input";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { useWallet } from "@/app/hooks/useWallet";
-import { buildApproveTransaction, fetchTokenDecimals, parseTokenAmount, submitTransaction } from "@/lib/stellar";
+import { buildApproveTransaction, fetchCurrentLedger, fetchTokenDecimals, parseTokenAmount, submitTransaction } from "@/lib/stellar";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { AlertCircle, CheckCircle, Rocket, Loader2 } from "lucide-react";
 
@@ -65,6 +65,11 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
 
   const formData = watch();
 
+  const getExpirationLedger = async (days: string): Promise<number> => {
+    const currentLedger = await fetchCurrentLedger(networkConfig);
+    return currentLedger + parseInt(days || "365") * 17280;
+  };
+
   const handleCheck = async () => {
     const isValid = await trigger();
     if (!isValid) return;
@@ -72,7 +77,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
     setPreflightResult({ isLoading: true, success: false, errors: [], warnings: [] });
 
     try {
-      const ledger = 1000000 + parseInt(formData.expirationDays || "365") * 10800; // ~10.8s per ledger
+      const ledger = await getExpirationLedger(formData.expirationDays);
       const decimals = await fetchTokenDecimals(formData.tokenContractId, simulator.networkConfig);
       const rawAmount = parseTokenAmount(formData.amount, decimals);
       const result = await simulator.checkApprove(
@@ -114,8 +119,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
 
     setIsSubmitting(true);
     try {
-      const expirationLedger =
-        1000000 + parseInt(formData.expirationDays || "365") * 10800; // ~10.8s per ledger
+      const expirationLedger = await getExpirationLedger(formData.expirationDays);
       const decimals = await fetchTokenDecimals(formData.tokenContractId, simulator.networkConfig);
       const rawAmount = parseTokenAmount(formData.amount, decimals);
 
