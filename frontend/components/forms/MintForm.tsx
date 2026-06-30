@@ -10,6 +10,7 @@ import { NumericInput } from "@/components/ui/NumericInput";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { Rocket } from "lucide-react";
+import { useToast } from "@/app/providers/ToastProvider";
 
 const mintSchema = z.object({
   tokenContractId: z
@@ -35,6 +36,7 @@ interface MintFormProps {
 
 export function MintForm({ adminAddress, onSuccess }: MintFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -96,7 +98,11 @@ export function MintForm({ adminAddress, onSuccess }: MintFormProps) {
 
   const onSubmit = async (data: MintFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 
