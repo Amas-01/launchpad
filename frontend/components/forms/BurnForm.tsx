@@ -10,6 +10,7 @@ import { NumericInput } from "@/components/ui/NumericInput";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { AlertCircle, Flame } from "lucide-react";
+import { useToast } from "@/app/providers/ToastProvider";
 
 const burnSchema = z.object({
   tokenContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid token contract ID"),
@@ -28,6 +29,7 @@ interface BurnFormProps {
 
 export function BurnForm({ adminAddress, onSuccess }: BurnFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -84,7 +86,11 @@ export function BurnForm({ adminAddress, onSuccess }: BurnFormProps) {
 
   const onSubmit = async (data: BurnFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 

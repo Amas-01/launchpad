@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/Input";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { AlertCircle, Clock, Unlock } from "lucide-react";
+import { useToast } from "@/app/providers/ToastProvider";
 
 const vestingReleaseSchema = z.object({
   vestingContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid vesting contract ID"),
@@ -26,6 +27,7 @@ interface VestingReleaseFormProps {
  */
 export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -79,7 +81,11 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
 
   const onSubmit = async (data: VestingReleaseFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 
@@ -187,6 +193,7 @@ interface VestingRevokeFormProps {
  */
 export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -241,7 +248,11 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
 
   const onSubmit = async (data: VestingRevokeFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 

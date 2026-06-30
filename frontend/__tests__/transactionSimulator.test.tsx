@@ -1,6 +1,5 @@
 /**
  * Transaction Simulator Tests
- *
  * Tests for the Soroban transaction pre-flight check system.
  * These are examples of how to test the simulator and error parsing.
  */
@@ -11,10 +10,12 @@ import {
   // simulateTransaction,
 } from "@/lib/transactionSimulator";
 import {
+
   renderHook,
   //  act
 } from "@testing-library/react";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
+import { ToastProvider } from "@/app/providers/ToastProvider";
 
 // Mock useNetwork
 jest.mock("@/app/providers/NetworkProvider", () => ({
@@ -27,9 +28,7 @@ jest.mock("@/app/providers/NetworkProvider", () => ({
   }),
 }));
 
-// ───────────────────────────────────────────────────────────────────────────
 // Error Parsing Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 describe("parseSorobanError", () => {
   it("maps insufficient balance error", () => {
@@ -265,7 +264,11 @@ import { MintForm } from "@/components/forms/MintForm";
 
 describe("MintForm with Pre-flight Checks", () => {
   it("renders check button and submit button", () => {
-    render(<MintForm adminAddress="GABC123..." />);
+    render(
+      <ToastProvider>
+        <MintForm adminAddress="GABC123..." />
+      </ToastProvider>,
+    );
     expect(screen.getByText("Check Transaction")).toBeInTheDocument();
     expect(screen.getByText("Mint Tokens")).toBeInTheDocument();
   });
@@ -281,17 +284,11 @@ describe("MintForm with Pre-flight Checks", () => {
   // });
 
   it("shows pre-flight results after check", async () => {
-    render(<MintForm adminAddress="GABC123..." />);
-
-    // Fill form
-    // const inputs = screen.getAllByRole("textbox");
-    // ... fill inputs ...
-
-    // Click check
-    // const checkButton = screen.getByText("Check Transaction");
-
-    // click check...
-    // expect(screen.queryByText(/ready|error/i)).toBeInTheDocument();
+    render(
+      <ToastProvider>
+        <MintForm adminAddress="GABC123..." />
+      </ToastProvider>,
+    );
   });
 });
 
