@@ -9,10 +9,16 @@ import { Input } from "@/components/ui/Input";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { AlertCircle, Clock, Unlock } from "lucide-react";
+import { useToast } from "@/app/providers/ToastProvider";
 
 const vestingReleaseSchema = z.object({
   vestingContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid vesting contract ID"),
   recipientAddress: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid recipient address"),
+  scheduleIndex: z.coerce
+    .number()
+    .int("Must be a whole number")
+    .min(0, "Must be 0 or greater")
+    .optional(),
 });
 
 type VestingReleaseFormData = z.infer<typeof vestingReleaseSchema>;
@@ -26,6 +32,7 @@ interface VestingReleaseFormProps {
  */
 export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -58,6 +65,7 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
       const result = await simulator.checkVestingRelease(
         formData.vestingContractId,
         formData.recipientAddress,
+        formData.scheduleIndex,
       );
 
       setPreflightResult({
@@ -79,7 +87,11 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
 
   const onSubmit = async (data: VestingReleaseFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 
@@ -131,6 +143,22 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
         )}
       </div>
 
+      <div>
+        <label className="block text-sm font-medium text-gray-300 mb-2">
+          Schedule Index{" "}
+          <span className="text-gray-500 font-normal">(optional — defaults to latest)</span>
+        </label>
+        <Input
+          type="number"
+          min={0}
+          placeholder="0"
+          {...register("scheduleIndex")}
+        />
+        {errors.scheduleIndex && (
+          <p className="text-red-400 text-sm mt-1">{errors.scheduleIndex.message}</p>
+        )}
+      </div>
+
       {/* Pre-flight check status */}
       {preflightResult && (
         <div className="mt-6">
@@ -173,6 +201,11 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
 const vestingRevokeSchema = z.object({
   vestingContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid vesting contract ID"),
   recipientAddress: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid recipient address"),
+  scheduleIndex: z.coerce
+    .number()
+    .int("Must be a whole number")
+    .min(0, "Must be 0 or greater")
+    .optional(),
 });
 
 type VestingRevokeFormData = z.infer<typeof vestingRevokeSchema>;
@@ -187,6 +220,7 @@ interface VestingRevokeFormProps {
  */
 export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -220,6 +254,7 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
         formData.vestingContractId,
         formData.recipientAddress,
         adminAddress,
+        formData.scheduleIndex,
       );
 
       setPreflightResult({
@@ -241,7 +276,11 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
 
   const onSubmit = async (data: VestingRevokeFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 
@@ -290,6 +329,22 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
         />
         {errors.recipientAddress && (
           <p className="text-red-400 text-sm mt-1">{errors.recipientAddress.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-300 mb-2">
+          Schedule Index{" "}
+          <span className="text-gray-500 font-normal">(optional — defaults to latest)</span>
+        </label>
+        <Input
+          type="number"
+          min={0}
+          placeholder="0"
+          {...register("scheduleIndex")}
+        />
+        {errors.scheduleIndex && (
+          <p className="text-red-400 text-sm mt-1">{errors.scheduleIndex.message}</p>
         )}
       </div>
 

@@ -14,8 +14,10 @@ import {
   addressToScVal,
   i128ToScVal,
   nativeToScVal,
+  scValToNative,
   wrapRpcCall,
 } from "@/lib/soroban";
+import { ExplorerLink } from "@/components/ui/ExplorerLink";
 import {
   parseBatchMintData,
   parseBatchMintFile,
@@ -39,6 +41,8 @@ import {
   Lock,
   AlertTriangle,
   Upload,
+  Percent,
+  CircleAlert,
 } from "lucide-react";
 import { VestingCurveChart } from "@/components/VestingCurveChart";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
@@ -46,6 +50,16 @@ import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 
 /** String the admin must type to confirm permanent revocation. */
 const REVOKE_CONFIRM_PHRASE = "REVOKE";
+
+/**
+ * Encode an optional vesting schedule index as Soroban `Option<u32>`.
+ * Soroban represents `None` as a Void ScVal and `Some(n)` as the inner value.
+ */
+function indexToScVal(scheduleIndex: string): xdr.ScVal {
+  return scheduleIndex === ""
+    ? xdr.ScVal.scvVoid()
+    : nativeToScVal(Number(scheduleIndex), { type: "u32" });
+}
 
 /* ── Validation Schemas ────────────────────────────────────────── */
 
@@ -98,6 +112,30 @@ const vestingSchema = z.object({
     ),
 });
 
+// Manage an existing vesting schedule (extend cliff / revoke). The schedule
+// index is optional — empty means the contract's default (first) schedule.
+const manageVestingSchema = z.object({
+  vestingContract: z
+    .string()
+    .regex(/^C[A-Z2-7]{55}$/, "Invalid contract address (must start with C)"),
+  recipient: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid Stellar address"),
+  scheduleIndex: z
+    .string()
+    .refine(
+      (val) =>
+        val === "" || (Number.isInteger(Number(val)) && Number(val) >= 0),
+      "Index must be a whole number ≥ 0",
+    ),
+  // Only required for "Extend Cliff"; validated in the handler so "Revoke"
+  // can submit with this left blank.
+  newCliffDays: z
+    .string()
+    .refine(
+      (val) => val === "" || (!isNaN(Number(val)) && Number(val) > 0),
+      "Cliff extension must be positive",
+    ),
+});
+
 const metadataUriSchema = z.object({
   uri: z
     .string()
@@ -116,11 +154,44 @@ type MintData = z.infer<typeof mintSchema>;
 type BurnData = z.infer<typeof burnSchema>;
 type TransferAdminData = z.infer<typeof transferAdminSchema>;
 type VestingData = z.infer<typeof vestingSchema>;
+type ManageVestingData = z.infer<typeof manageVestingSchema>;
 type MetadataUriData = z.infer<typeof metadataUriSchema>;
 type UpgradeData = z.infer<typeof upgradeSchema>;
 
+const whaleCapSchema = z.object({
+  cap: z
+    .string()
+    .refine(
+      (val) => {
+        const num = Number(val);
+        return !isNaN(num) && Number.isInteger(num) && num >= 1 && num <= 100;
+      },
+      "Cap must be an integer between 1 and 100",
+    ),
+});
+
+const complianceNodeSchema = z.object({
+  address: z.string().regex(/^C[A-Z2-7]{55}$/, "Invalid contract address (must start with C)"),
+});
+
+type WhaleCapData = z.infer<typeof whaleCapSchema>;
+type ComplianceNodeData = z.infer<typeof complianceNodeSchema>;
+type DisableWhaleCapData = Record<string, never>;
+type ClearComplianceNodeData = Record<string, never>;
+
 type AcceptAdminData = Record<string, never>;
-type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData | AcceptAdminData;
+type AdminActionData =
+  | MintData
+  | BurnData
+  | TransferAdminData
+  | VestingData
+  | ManageVestingData
+  | MetadataUriData
+  | AcceptAdminData
+  | WhaleCapData
+  | ComplianceNodeData
+  | DisableWhaleCapData
+  | ClearComplianceNodeData;
 
 /* ── AdminPanel Component ───────────────────────────────────────── */
 
@@ -146,6 +217,14 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
     const [revokePhrase, setRevokePhrase] = useState("");
     const [paused, setPaused] = useState(false);
     const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+    const [whaleCap, setWhaleCap] = useState<number | null>(null);
+    const [complianceNode, setComplianceNode] = useState<string | null>(null);
+    const [pendingAdmin, setPendingAdmin] = useState<string | null>(null);
+
+    // Clawback card supports two admin-initiated removals that share one form:
+    //   "clawback" → confiscate tokens into the admin balance (reversible)
+    //   "burn"     → permanently destroy tokens, reducing supply (irreversible)
+    const [burnMode, setBurnMode] = useState<"clawback" | "burn">("clawback");
 
     // Upgrade state
     const [showUpgradeConfirm, setShowUpgradeConfirm] = useState(false);
@@ -160,8 +239,14 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
     const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
     const transferForm = useForm<TransferAdminData>({ resolver: zodResolver(transferAdminSchema) });
     const vestingForm = useForm<VestingData>({ resolver: zodResolver(vestingSchema) });
+    const manageVestingForm = useForm<ManageVestingData>({ resolver: zodResolver(manageVestingSchema) });
     const metadataUriForm = useForm<MetadataUriData>({ resolver: zodResolver(metadataUriSchema) });
     const upgradeForm = useForm<UpgradeData>({ resolver: zodResolver(upgradeSchema) });
+    const whaleForm = useForm<WhaleCapData>({ resolver: zodResolver(whaleCapSchema) });
+    const complianceForm = useForm<ComplianceNodeData>({ resolver: zodResolver(complianceNodeSchema) });
+
+    // Revoke is destructive, so it sits behind an explicit confirmation step.
+    const [showVestingRevokeConfirm, setShowVestingRevokeConfirm] = useState(false);
 
     // Live values for the vesting curve preview chart.
     const [watchedCliff, watchedDuration] = vestingForm.watch(["cliffDays", "durationDays"]);
@@ -235,6 +320,112 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
         }
     }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
+    /* ── Pending admin: read pending_admin() to surface two-step transfer. ── */
+    const refreshPendingAdmin = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("pending_admin"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        // Older deployments without pending_admin: treat as none.
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+                    // Option<Address> decodes to the strkey string, or null for None.
+                    const decoded = scValToNative(sim.result.retval);
+                    return typeof decoded === "string" ? decoded : null;
+                },
+                { operation: "Check pending admin", silent: true },
+            );
+            setPendingAdmin(value);
+        } catch {
+            // Best effort — leave pending state unknown on failure.
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
+    const refreshWhaleCap = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("max_balance_per_account"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+                    const native = scValToNative(sim.result.retval);
+                    return typeof native === "number" ? native : null;
+                },
+                { operation: "Check whale cap state", silent: true },
+            );
+            setWhaleCap(value);
+        } catch {
+            // Best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
+    const refreshComplianceNode = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("compliance_node"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+
+                    const native = scValToNative(sim.result.retval);
+                    if (native && typeof native === "object" && "toString" in native) {
+                        return native.toString();
+                    }
+                    return typeof native === "string" ? native : null;
+                },
+                { operation: "Check compliance node state", silent: true },
+            );
+            setComplianceNode(value);
+        } catch {
+            // Best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
     useEffect(() => {
         refreshLocked();
     }, [refreshLocked]);
@@ -242,6 +433,18 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
     useEffect(() => {
         refreshPaused();
     }, [refreshPaused]);
+
+    useEffect(() => {
+        refreshPendingAdmin();
+    }, [refreshPendingAdmin]);
+
+    useEffect(() => {
+        refreshWhaleCap();
+    }, [refreshWhaleCap]);
+
+    useEffect(() => {
+        refreshComplianceNode();
+    }, [refreshComplianceNode]);
 
     const submitSignedTransaction = useCallback(
         async (signedXdr: string) => {
@@ -344,6 +547,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
     const [burnPreflight, setBurnPreflight] = useState<PreflightCheckResult | null>(null);
     const [transferPreflight, setTransferPreflight] = useState<PreflightCheckResult | null>(null);
     const [vestingPreflight, setVestingPreflight] = useState<PreflightCheckResult | null>(null);
+    const [manageVestingPreflight, setManageVestingPreflight] = useState<PreflightCheckResult | null>(null);
 
     const handleAction = async (action: string, data: AdminActionData) => {
         if (!publicKey) return;
@@ -357,13 +561,29 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                 ? "Mint"
                 : action === "clawback"
                   ? "Clawback"
+                  : action === "burn-admin"
+                  ? "Burn (admin)"
                   : action === "transfer"
                     ? "Propose admin"
-                    : action === "accept-admin"
+                    : action === "cancel-admin"
+                      ? "Cancel admin transfer"
+                      : action === "accept-admin"
                       ? "Accept admin"
                       : action === "metadata-uri"
                         ? "Update metadata URI"
-                        : "Vesting";
+                        : action === "extend-cliff"
+                          ? "Extend cliff"
+                          : action === "vesting-revoke"
+                            ? "Revoke schedule"
+                            : action === "set-whale-cap"
+                              ? "Set whale protection cap"
+                              : action === "disable-whale-cap"
+                                ? "Disable whale protection"
+                                : action === "set-compliance-node"
+                                  ? "Set compliance node"
+                                  : action === "clear-compliance-node"
+                                    ? "Clear compliance node"
+                                    : "Vesting";
 
         try {
             const server = new rpc.Server(networkConfig.rpcUrl);
@@ -401,6 +621,20 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                     publicKey,
                 );
                 setBurnPreflight(simulationResult);
+            } else if (action === "burn-admin") {
+                const burnData = data as BurnData;
+                method = "burn_admin";
+                const scaledAmount =
+                    BigInt(Math.round(parseFloat(burnData.amount) * 10 ** decimals));
+                args = [addressToScVal(burnData.from), i128ToScVal(scaledAmount)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setBurnPreflight(simulationResult);
             } else if (action === "transfer") {
                 const transferData = data as TransferAdminData;
                 method = "propose_admin";
@@ -413,6 +647,19 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                     publicKey,
                 );
                 setTransferPreflight(simulationResult);
+            } else if (action === "cancel-admin") {
+                // No dedicated cancel exists on-chain, so overwrite the pending
+                // proposal with the current admin's own address. This neutralizes
+                // the transfer — the previously proposed admin can no longer accept.
+                method = "propose_admin";
+                args = [addressToScVal(publicKey)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
             } else if (action === "accept-admin") {
                 method = "accept_admin";
                 args = [];
@@ -466,6 +713,90 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                     args,
                     publicKey,
                 );
+            } else if (action === "extend-cliff") {
+                const manageData = data as ManageVestingData;
+                method = "extend_cliff";
+                targetContractId = manageData.vestingContract;
+
+                // Same ledger math as create_schedule: the new cliff is an
+                // absolute ledger computed as "now + N days".
+                const currentLedgerRes = await server.getLatestLedger();
+                const currentLedger = currentLedgerRes.sequence;
+                const newCliffLedger =
+                    currentLedger + Math.round(Number(manageData.newCliffDays) * 17280);
+
+                args = [
+                    addressToScVal(manageData.recipient),
+                    nativeToScVal(newCliffLedger, { type: "u32" }),
+                    indexToScVal(manageData.scheduleIndex),
+                ];
+
+                simulationResult = await simulator.simulateContract(
+                    targetContractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setManageVestingPreflight(simulationResult);
+            } else if (action === "vesting-revoke") {
+                const manageData = data as ManageVestingData;
+                method = "revoke";
+                targetContractId = manageData.vestingContract;
+
+                args = [
+                    addressToScVal(manageData.recipient),
+                    indexToScVal(manageData.scheduleIndex),
+                ];
+
+                simulationResult = await simulator.simulateContract(
+                    targetContractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setManageVestingPreflight(simulationResult);
+            } else if (action === "set-whale-cap") {
+                const whaleData = data as WhaleCapData;
+                method = "set_max_balance_per_account";
+                args = [nativeToScVal(Number(whaleData.cap), { type: "u32" })];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "disable-whale-cap") {
+                method = "set_max_balance_per_account";
+                args = [xdr.ScVal.scvVoid()];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "set-compliance-node") {
+                const nodeData = data as ComplianceNodeData;
+                method = "set_compliance_node";
+                args = [addressToScVal(nodeData.address)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "clear-compliance-node") {
+                method = "set_compliance_node";
+                args = [xdr.ScVal.scvVoid()];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
             } else {
                 throw new Error("Unsupported action");
             }
@@ -511,7 +842,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                 mintForm.reset();
                 setMintPreflight(null);
             }
-            if (action === "clawback") {
+            if (action === "clawback" || action === "burn-admin") {
                 burnForm.reset();
                 setBurnPreflight(null);
             }
@@ -520,12 +851,40 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                 setShowTransferConfirm(false);
                 setTransferPreflight(null);
             }
+            // Any change to the two-step transfer state needs a re-read so the
+            // banner / Accept gating reflects on-chain reality.
+            if (
+                action === "transfer" ||
+                action === "cancel-admin" ||
+                action === "accept-admin"
+            ) {
+                refreshPendingAdmin();
+            }
             if (action === "metadata-uri") {
                 metadataUriForm.reset();
             }
             if (action === "vesting") {
                 vestingForm.reset();
                 setVestingPreflight(null);
+            }
+            if (action === "extend-cliff") {
+                // Keep the contract / recipient / index so further edits are easy;
+                // just clear the one-off cliff input and the preflight banner.
+                manageVestingForm.resetField("newCliffDays");
+                setManageVestingPreflight(null);
+            }
+            if (action === "vesting-revoke") {
+                manageVestingForm.reset();
+                setManageVestingPreflight(null);
+                setShowVestingRevokeConfirm(false);
+            }
+            if (action === "set-whale-cap" || action === "disable-whale-cap") {
+                whaleForm.reset();
+                await refreshWhaleCap();
+            }
+            if (action === "set-compliance-node" || action === "clear-compliance-node") {
+                complianceForm.reset();
+                await refreshComplianceNode();
             }
         } catch (err) {
             const error = err as Error;
@@ -741,6 +1100,11 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
 
   const adminDisabled = !!loading || locked;
 
+  // Two-step transfer helpers: the connected wallet can only accept when it is
+  // the named pending admin; the outgoing admin sees a cancel/overwrite path.
+  const isConnectedPendingAdmin =
+    !!pendingAdmin && !!publicKey && pendingAdmin === publicKey;
+
   return (
     <section className="mt-12 w-full max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-700">
       <p
@@ -759,7 +1123,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           </h2>
         </div>
         {lastTxHash && (
-          <a
+          
             href={`https://stellar.expert/explorer/${networkConfig.network}/tx/${lastTxHash}`}
             target="_blank"
             rel="noopener noreferrer"
@@ -770,6 +1134,21 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           </a>
         )}
       </div>
+
+      {paused && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-orange-500/30 bg-orange-500/5 p-4">
+          <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-orange-400" />
+          <div className="text-sm">
+            <p className="font-semibold text-orange-200">
+              Contract is paused
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-orange-100/80">
+              All state-changing operations (mint, burn, transfer, clawback)
+              are halted. Only the admin can unpause the contract.
+            </p>
+          </div>
+        </div>
+      )}
 
       {locked && (
         <div className="mb-6 flex items-start gap-3 rounded-xl border border-yellow-500/30 bg-yellow-500/5 p-4">
@@ -787,13 +1166,35 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
         </div>
       )}
 
+      {/* ── Pending admin transfer banner ──────────────── */}
+      {!locked && pendingAdmin && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-stellar-500/30 bg-stellar-500/5 p-4">
+          <UserPlus className="mt-0.5 h-5 w-5 shrink-0 text-stellar-400" />
+          <div className="text-sm">
+            <p className="font-semibold text-stellar-200">
+              Admin transfer pending
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-stellar-100/80">
+              A two-step admin transfer is in progress. Pending admin →{" "}
+              <span className="font-mono text-stellar-300">
+                {pendingAdmin.slice(0, 6)}…{pendingAdmin.slice(-6)}
+              </span>
+              .{" "}
+              {isConnectedPendingAdmin
+                ? "Your connected wallet is the pending admin — accept the role below to finalize."
+                : "It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."}
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-12">
         {/* ── Mint Form ─────────────────────────────────────── */}
         {(!maxSupply ||
           maxSupply === "N/A" ||
           (totalSupply &&
             totalSupply !== "N/A" &&
-            parseFloat(totalSupply.replace(/,/g, "")) <
+            parseFloat(totalSupply.replace(/,/g, "")) 
               parseFloat(maxSupply.replace(/,/g, "")))) && (
           <div className="glass-card p-6 flex flex-col hover:border-stellar-500/30 transition-all duration-300 group">
             <div className="flex items-center justify-between mb-6">
@@ -973,17 +1374,63 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           </div>
         )}
 
-        {/* ── Burn Form ─────────────────────────────────────── */}
+        {/* ── Clawback / Burn Form ───────────────────────────── */}
         <div className="glass-card p-6 flex flex-col hover:border-red-500/30 transition-all duration-300 group">
-          <div className="flex items-center gap-2 mb-6 text-red-400">
-            <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
-              <Flame className="w-5 h-5" />
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-2 text-red-400">
+              <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
+                <Flame className="w-5 h-5" />
+              </div>
+              <h3 className="font-bold text-lg">Remove Assets</h3>
             </div>
-            <h3 className="font-bold text-lg">Clawback Assets</h3>
+            <div className="flex bg-white/5 p-1 rounded-lg border border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setBurnMode("clawback");
+                  setBurnPreflight(null);
+                }}
+                className={`px-3 py-1 text-xs rounded-md transition-all ${burnMode === "clawback" ? "bg-red-500 text-white shadow-lg" : "text-gray-400 hover:text-white"}`}
+              >
+                Confiscate
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBurnMode("burn");
+                  setBurnPreflight(null);
+                }}
+                className={`px-3 py-1 text-xs rounded-md transition-all ${burnMode === "burn" ? "bg-red-500 text-white shadow-lg" : "text-gray-400 hover:text-white"}`}
+              >
+                Destroy
+              </button>
+            </div>
           </div>
+
+          {/* Differentiate the two admin-initiated removals for the operator. */}
+          <p className="text-xs text-gray-400 mb-4 leading-relaxed">
+            {burnMode === "clawback" ? (
+              <>
+                <span className="font-semibold text-red-300">
+                  Confiscate to admin (clawback):
+                </span>{" "}
+                forcibly moves tokens into the admin balance. Reversible — you
+                can transfer them back later.
+              </>
+            ) : (
+              <>
+                <span className="font-semibold text-red-300">
+                  Permanently destroy (burn admin):
+                </span>{" "}
+                burns tokens out of existence, reducing total supply. This
+                cannot be undone.
+              </>
+            )}
+          </p>
+
           <form
             onSubmit={burnForm.handleSubmit((data) =>
-              handleAction("clawback", data),
+              handleAction(burnMode === "burn" ? "burn-admin" : "clawback", data),
             )}
             className="space-y-4 flex-grow"
           >
@@ -1010,7 +1457,9 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
                 successMessage={
                   !burnPreflight.errors?.length &&
                   !burnPreflight.warnings?.length
-                    ? "Clawback transaction is ready"
+                    ? burnMode === "burn"
+                      ? "Burn transaction is ready"
+                      : "Clawback transaction is ready"
                     : undefined
                 }
               />
@@ -1019,15 +1468,17 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
               type="submit"
               variant="secondary"
               className="w-full mt-4 border-red-500/20 hover:border-red-500/40 text-red-400"
-              isLoading={loading === "clawback"}
+              isLoading={loading === "clawback" || loading === "burn-admin"}
               disabled={adminDisabled}
             >
-              {success === "clawback" ? (
+              {success === "clawback" || success === "burn-admin" ? (
                 <span className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" /> Success
                 </span>
+              ) : burnMode === "burn" ? (
+                "Permanently Burn"
               ) : (
-                "Clawback Tokens"
+                "Confiscate to Admin"
               )}
             </Button>
           </form>
@@ -1123,6 +1574,170 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           </form>
         </div>
 
+        {/* ── Manage Vesting ─────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-stellar-400/30 transition-all duration-300 group">
+          <div className="flex items-center gap-2 mb-4 text-stellar-300">
+            <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg">Manage Vesting</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Extend the cliff of, or revoke, an existing schedule.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4 flex-grow">
+            <Input
+              label="Vesting Contract"
+              placeholder="C..."
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("vestingContract")}
+              error={manageVestingForm.formState.errors.vestingContract?.message}
+            />
+            <Input
+              label="Recipient Address"
+              placeholder="G..."
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("recipient")}
+              error={manageVestingForm.formState.errors.recipient?.message}
+            />
+            <Input
+              label="Schedule Index (optional)"
+              type="number"
+              placeholder="0"
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("scheduleIndex")}
+              error={manageVestingForm.formState.errors.scheduleIndex?.message}
+            />
+
+            {manageVestingPreflight && (
+              <PreflightCheckDisplay
+                isLoading={simulator.isLoading}
+                errors={manageVestingPreflight.errors}
+                warnings={manageVestingPreflight.warnings}
+                successMessage={
+                  !manageVestingPreflight.errors?.length &&
+                  !manageVestingPreflight.warnings?.length
+                    ? "Vesting transaction is ready"
+                    : undefined
+                }
+              />
+            )}
+
+            {/* ── Extend cliff ── */}
+            <div className="pt-2 border-t border-white/10">
+              <p className="text-[10px] uppercase tracking-widest text-stellar-400 font-bold mb-2">
+                Extend Cliff
+              </p>
+              <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+                Push the cliff back by the number of days from now. Only works
+                while the current cliff is still in the future.
+              </p>
+              <Input
+                label="New Cliff (Days from now)"
+                type="number"
+                placeholder="30"
+                className="bg-white/5 border-white/10"
+                {...manageVestingForm.register("newCliffDays")}
+                error={manageVestingForm.formState.errors.newCliffDays?.message}
+              />
+              <Button
+                type="button"
+                className="w-full mt-3 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                isLoading={loading === "extend-cliff"}
+                disabled={adminDisabled}
+                onClick={manageVestingForm.handleSubmit((data) => {
+                  // newCliffDays is optional in the schema (Revoke ignores it),
+                  // so enforce it here for the Extend path.
+                  if (!data.newCliffDays) {
+                    manageVestingForm.setError("newCliffDays", {
+                      message: "Cliff extension must be positive",
+                    });
+                    return;
+                  }
+                  handleAction("extend-cliff", data);
+                })}
+              >
+                {success === "extend-cliff" ? (
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" /> Cliff Extended
+                  </span>
+                ) : (
+                  "Extend Cliff"
+                )}
+              </Button>
+            </div>
+
+            {/* ── Revoke ── */}
+            <div className="pt-2 border-t border-white/10">
+              <p className="text-[10px] uppercase tracking-widest text-red-400 font-bold mb-2">
+                Revoke Schedule
+              </p>
+              {!showVestingRevokeConfirm ? (
+                <>
+                  <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+                    Cancels the schedule. Vested tokens are released to the
+                    recipient and all unvested tokens return to the admin.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full border-red-500/20 text-red-400 hover:border-red-500/40"
+                    disabled={adminDisabled}
+                    onClick={manageVestingForm.handleSubmit(() =>
+                      setShowVestingRevokeConfirm(true),
+                    )}
+                  >
+                    Revoke Schedule
+                  </Button>
+                </>
+              ) : (
+                <div className="space-y-3 pt-1 animate-in fade-in slide-in-from-top-2 duration-300 bg-red-950/20 p-4 rounded-xl border border-red-500/20">
+                  <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">
+                    Confirm Revocation
+                  </p>
+                  <p className="text-xs text-stellar-200 text-center leading-relaxed">
+                    Unvested tokens will be returned to the admin and the
+                    schedule will be permanently revoked. This cannot be undone.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="flex-1 text-xs py-2 h-9"
+                      onClick={() => setShowVestingRevokeConfirm(false)}
+                      disabled={loading === "vesting-revoke"}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      className="flex-1 text-xs py-2 h-9 bg-red-600 hover:bg-red-700 border-none shadow-lg shadow-red-600/20"
+                      isLoading={loading === "vesting-revoke"}
+                      onClick={() =>
+                        handleAction(
+                          "vesting-revoke",
+                          manageVestingForm.getValues(),
+                        )
+                      }
+                    >
+                      {success === "vesting-revoke" ? (
+                        <span className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4" /> Revoked
+                        </span>
+                      ) : (
+                        "Confirm Revoke"
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* ── Transfer Admin ────────────────────────────────── */}
         <div className="glass-card p-6 flex flex-col hover:border-stellar-400/30 transition-all duration-300 group">
           <div className="flex items-center gap-2 mb-6 text-stellar-400">
@@ -1200,18 +1815,49 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
             )}
           </form>
           <div className="mt-6 pt-4 border-t border-white/10">
-            <p className="text-xs text-gray-400 mb-3 text-center">
-              Are you the pending admin? Click below to accept the role.
-            </p>
-            <Button
-              type="button"
-              className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
-              onClick={() => handleAction("accept-admin", {} as AcceptAdminData)}
-              isLoading={loading === "accept-admin"}
-              disabled={adminDisabled && loading !== "accept-admin"}
-            >
-              Accept Admin Role
-            </Button>
+            {!pendingAdmin ? (
+              // No two-step transfer in progress — nothing to accept or cancel.
+              <p className="text-xs text-gray-500 text-center">
+                No admin transfer is currently pending.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-gray-400 text-center">
+                  Pending admin →{" "}
+                  <span className="font-mono text-stellar-300">
+                    {pendingAdmin.slice(0, 6)}…{pendingAdmin.slice(-6)}
+                  </span>
+                </p>
+                {isConnectedPendingAdmin ? (
+                  // Only the named pending admin can finalize the transfer.
+                  <Button
+                    type="button"
+                    className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
+                    onClick={() =>
+                      handleAction("accept-admin", {} as AcceptAdminData)
+                    }
+                    isLoading={loading === "accept-admin"}
+                    disabled={locked || (!!loading && loading !== "accept-admin")}
+                  >
+                    Accept Admin Role
+                  </Button>
+                ) : (
+                  // Outgoing admin can cancel by overwriting the proposal with self.
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full border-red-500/20 text-red-400 hover:border-red-500/40"
+                    onClick={() =>
+                      handleAction("cancel-admin", {} as AcceptAdminData)
+                    }
+                    isLoading={loading === "cancel-admin"}
+                    disabled={adminDisabled && loading !== "cancel-admin"}
+                  >
+                    Cancel Pending Transfer
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1300,6 +1946,140 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Transfer Policy ────────────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-stellar-400/30 transition-all duration-300 group md:col-span-2">
+          <div className="flex items-center gap-2 mb-6 text-stellar-300">
+            <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <Percent className="w-5 h-5" />
+            </div>
+            <h3 className="font-bold text-lg">Transfer Policy</h3>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 flex-grow">
+            {/* Whale Protection */}
+            <form
+              onSubmit={whaleForm.handleSubmit((data) =>
+                handleAction("set-whale-cap", data)
+              )}
+              className="space-y-4 flex flex-col justify-between"
+            >
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Whale Protection</h4>
+                  <p className="text-xs text-gray-400">
+                    Limits the maximum balance any non-admin account can hold, as a percentage of the total supply.
+                  </p>
+                </div>
+                <div className="text-xs text-stellar-200 bg-white/5 px-3 py-2 rounded-lg border border-white/10 flex items-center justify-between">
+                  <span>Current Max Balance Cap:</span>
+                  <span className="font-semibold text-stellar-400">
+                    {whaleCap !== null ? `${whaleCap}% of total supply` : "None"}
+                  </span>
+                </div>
+                <Input
+                  label="Percentage Cap (1-100)"
+                  type="number"
+                  placeholder="1-100"
+                  className="bg-white/5 border-white/10"
+                  {...whaleForm.register("cap")}
+                  error={whaleForm.formState.errors.cap?.message}
+                  disabled={adminDisabled}
+                />
+              </div>
+              <div className="flex gap-2 mt-4">
+                <Button
+                  type="submit"
+                  className="flex-1 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                  isLoading={loading === "set-whale-cap"}
+                  disabled={adminDisabled}
+                >
+                  Set Cap
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="border-red-500/20 text-red-400 hover:border-red-500/40"
+                  isLoading={loading === "disable-whale-cap"}
+                  disabled={adminDisabled || whaleCap === null}
+                  onClick={() => handleAction("disable-whale-cap", {})}
+                >
+                  Disable
+                </Button>
+              </div>
+            </form>
+
+            {/* Compliance Node */}
+            <form
+              onSubmit={complianceForm.handleSubmit((data) =>
+                handleAction("set-compliance-node", data)
+              )}
+              className="space-y-4 flex flex-col justify-between border-t md:border-t-0 md:border-l border-white/10 pt-6 md:pt-0 md:pl-8"
+            >
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Compliance Node</h4>
+                  <p className="text-xs text-gray-400">
+                    Set a compliance gating contract to inspect and authorize transfers.
+                  </p>
+                </div>
+                <div className="text-xs text-stellar-200 bg-white/5 px-3 py-2 rounded-lg border border-white/10 flex flex-col gap-1">
+                  <span className="text-gray-400">Current Node Address:</span>
+                  <span className="font-semibold text-stellar-400 break-all min-h-[1.5rem] flex items-center">
+                    {complianceNode ? (
+                      <ExplorerLink
+                        type="contract"
+                        identifier={complianceNode}
+                        truncate={true}
+                        truncateChars={12}
+                        showCopy={true}
+                      />
+                    ) : (
+                      "None"
+                    )}
+                  </span>
+                </div>
+                <Input
+                  label="Contract ID"
+                  placeholder="C..."
+                  className="bg-white/5 border-white/10"
+                  {...complianceForm.register("address")}
+                  error={complianceForm.formState.errors.address?.message}
+                  disabled={adminDisabled}
+                />
+              </div>
+              <div className="space-y-3 mt-4">
+                <div className="flex gap-2">
+                  <Button
+                    type="submit"
+                    className="flex-1 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                    isLoading={loading === "set-compliance-node"}
+                    disabled={adminDisabled}
+                  >
+                    Set Node
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="border-red-500/20 text-red-400 hover:border-red-500/40"
+                    isLoading={loading === "clear-compliance-node"}
+                    disabled={adminDisabled || !complianceNode}
+                    onClick={() => handleAction("clear-compliance-node", {})}
+                  >
+                    Clear
+                  </Button>
+                </div>
+
+                <div className="flex items-start gap-2 text-[10px] leading-relaxed text-yellow-400 bg-yellow-500/5 p-2.5 rounded-lg border border-yellow-500/10">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    A compliance node contract must implement the <code>can_trade</code> function. Setting an invalid node or one without this method will block all transfers.
+                  </span>
+                </div>
+              </div>
+            </form>
+          </div>
         </div>
 
         {/* ── Update Metadata URI ──────────────────────────────── */}

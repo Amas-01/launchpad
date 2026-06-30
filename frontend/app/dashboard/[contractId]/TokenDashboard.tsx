@@ -132,6 +132,18 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
               isAddress={true}
             />
           )}
+          {tokenInfo.authorizationRequired !== undefined && (
+            <InfoCard
+              label="Auth Required"
+              value={tokenInfo.authorizationRequired ? "Yes" : "No"}
+            />
+          )}
+          {tokenInfo.authorizationRevocable !== undefined && (
+            <InfoCard
+              label="Auth Revocable"
+              value={tokenInfo.authorizationRevocable ? "Yes" : "No"}
+            />
+          )}
         </div>
       </section>
 

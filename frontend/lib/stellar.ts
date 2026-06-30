@@ -30,6 +30,8 @@ export interface TokenInfo {
   maxSupply?: string | null;
   contractUri?: string;
   complianceNode?: string | null;
+  authorizationRequired?: boolean;
+  authorizationRevocable?: boolean;
 }
 
 export interface TokenHolder {
@@ -524,17 +526,36 @@ async function _fetchTokenInfo(
     // compliance_node may not be implemented or accessible; ignore.
   }
 
+  let authorizationRequired = false;
+  let authorizationRevocable = false;
+  try {
+    const reqVal = await simulateCall(contractId, "authorization_required", config);
+    if (reqVal) authorizationRequired = Boolean(reqVal.b());
+    const revVal = await simulateCall(contractId, "authorization_revocable", config);
+    if (revVal) authorizationRevocable = Boolean(revVal.b());
+  } catch {
+    // authorization checks not implemented or accessible; ignore.
+  }
+
   return {
     name: decodeString(nameVal),
     symbol: decodeString(symbolVal),
     decimals,
     totalSupply,
     circulatingSupply,
-    admin: adminVal ? decodeAddress(adminVal) : "N/A",
+    admin:
+      adminVal &&
+      typeof (adminVal as StellarSdk.xdr.ScVal).switch === "function" &&
+      (adminVal as StellarSdk.xdr.ScVal).switch() !==
+        StellarSdk.xdr.ScValType.scvVoid()
+        ? decodeAddress(adminVal as StellarSdk.xdr.ScVal)
+        : "N/A",
     contractId,
     maxSupply,
     contractUri,
     complianceNode,
+    authorizationRequired,
+    authorizationRevocable,
   };
 }
 

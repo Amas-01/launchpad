@@ -54,6 +54,13 @@ export function VestingCard({
             Contract: {truncateAddress(contractId, 6)}
           </span>
           <CopyButton value={contractId} label="Copy contract ID" />
+          {schedule.scheduleCount !== undefined &&
+            schedule.scheduleCount > 1 && (
+              <span className="rounded-full border border-stellar-400/20 bg-stellar-400/10 px-2 py-0.5 text-xs text-stellar-400">
+                Schedule {(schedule.scheduleIndex ?? 0) + 1} of{" "}
+                {schedule.scheduleCount}
+              </span>
+            )}
         </div>
         <span
           className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusColor}`}
