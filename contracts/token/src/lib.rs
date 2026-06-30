@@ -497,6 +497,15 @@ impl TokenContract {
             .expect("not initialized")
     }
 
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no two-step transfer is in
+    /// progress. The entry is written by `propose_admin` and cleared by
+    /// `accept_admin` / `revoke_admin`, so this getter lets both the
+    /// outgoing admin and the proposed admin observe the pending state.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
     /// Returns `true` once `revoke_admin` has been called. Once locked, no
     /// admin operation can ever succeed again.
     pub fn is_locked(env: Env) -> bool {
@@ -1240,6 +1249,19 @@ mod test {
         client.propose_admin(&other);
         client.accept_admin();
         assert_eq!(client.admin(), other);
+    }
+
+    #[test]
+    fn test_pending_admin_getter_reflects_two_step_transfer() {
+        let (_, client, _, user) = setup();
+        // No transfer in progress yet.
+        assert_eq!(client.pending_admin(), None);
+        // After proposing, the getter surfaces the pending address.
+        client.propose_admin(&user);
+        assert_eq!(client.pending_admin(), Some(user.clone()));
+        // Accepting clears the pending entry.
+        client.accept_admin();
+        assert_eq!(client.pending_admin(), None);
     }
 
     #[test]

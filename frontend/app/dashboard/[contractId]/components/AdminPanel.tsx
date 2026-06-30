@@ -14,6 +14,7 @@ import {
   addressToScVal,
   i128ToScVal,
   nativeToScVal,
+  scValToNative,
   wrapRpcCall,
 } from "@/lib/soroban";
 import {
@@ -226,6 +227,43 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
         }
     }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
+    /* ── Pending admin: read pending_admin() to surface two-step transfer. ── */
+    const [pendingAdmin, setPendingAdmin] = useState<string | null>(null);
+    const refreshPendingAdmin = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("pending_admin"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        // Older deployments without pending_admin: treat as none.
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+                    // Option<Address> decodes to the strkey string, or null for None.
+                    const decoded = scValToNative(sim.result.retval);
+                    return typeof decoded === "string" ? decoded : null;
+                },
+                { operation: "Check pending admin", silent: true },
+            );
+            setPendingAdmin(value);
+        } catch {
+            // Best effort — leave pending state unknown on failure.
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
     useEffect(() => {
         refreshLocked();
     }, [refreshLocked]);
@@ -233,6 +271,10 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     useEffect(() => {
         refreshPaused();
     }, [refreshPaused]);
+
+    useEffect(() => {
+        refreshPendingAdmin();
+    }, [refreshPendingAdmin]);
 
     const submitSignedTransaction = useCallback(
         async (signedXdr: string) => {
@@ -352,7 +394,9 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                   ? "Burn (admin)"
                   : action === "transfer"
                     ? "Propose admin"
-                    : action === "accept-admin"
+                    : action === "cancel-admin"
+                      ? "Cancel admin transfer"
+                      : action === "accept-admin"
                       ? "Accept admin"
                       : action === "metadata-uri"
                         ? "Update metadata URI"
@@ -420,6 +464,19 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                     publicKey,
                 );
                 setTransferPreflight(simulationResult);
+            } else if (action === "cancel-admin") {
+                // No dedicated cancel exists on-chain, so overwrite the pending
+                // proposal with the current admin's own address. This neutralizes
+                // the transfer — the previously proposed admin can no longer accept.
+                method = "propose_admin";
+                args = [addressToScVal(publicKey)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
             } else if (action === "accept-admin") {
                 method = "accept_admin";
                 args = [];
@@ -526,6 +583,15 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 transferForm.reset();
                 setShowTransferConfirm(false);
                 setTransferPreflight(null);
+            }
+            // Any change to the two-step transfer state needs a re-read so the
+            // banner / Accept gating reflects on-chain reality.
+            if (
+                action === "transfer" ||
+                action === "cancel-admin" ||
+                action === "accept-admin"
+            ) {
+                refreshPendingAdmin();
             }
             if (action === "metadata-uri") {
                 metadataUriForm.reset();
@@ -682,6 +748,11 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
 
   const adminDisabled = !!loading || locked;
 
+  // Two-step transfer helpers: the connected wallet can only accept when it is
+  // the named pending admin; the outgoing admin sees a cancel/overwrite path.
+  const isConnectedPendingAdmin =
+    !!pendingAdmin && !!publicKey && pendingAdmin === publicKey;
+
   return (
     <section className="mt-12 w-full max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-700">
       <p
@@ -723,6 +794,28 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               This token contract is now immutable. Mint, burn, freeze, and
               admin-transfer operations are permanently disabled. Holders can
               still transfer and self-burn their tokens.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Pending admin transfer banner (#301) ──────────────── */}
+      {!locked && pendingAdmin && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-stellar-500/30 bg-stellar-500/5 p-4">
+          <UserPlus className="mt-0.5 h-5 w-5 shrink-0 text-stellar-400" />
+          <div className="text-sm">
+            <p className="font-semibold text-stellar-200">
+              Admin transfer pending
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-stellar-100/80">
+              A two-step admin transfer is in progress. Pending admin →{" "}
+              <span className="font-mono text-stellar-300">
+                {pendingAdmin.slice(0, 6)}…{pendingAdmin.slice(-6)}
+              </span>
+              .{" "}
+              {isConnectedPendingAdmin
+                ? "Your connected wallet is the pending admin — accept the role below to finalize."
+                : "It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."}
             </p>
           </div>
         </div>
@@ -1191,18 +1284,49 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
             )}
           </form>
           <div className="mt-6 pt-4 border-t border-white/10">
-            <p className="text-xs text-gray-400 mb-3 text-center">
-              Are you the pending admin? Click below to accept the role.
-            </p>
-            <Button
-              type="button"
-              className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
-              onClick={() => handleAction("accept-admin", {} as AcceptAdminData)}
-              isLoading={loading === "accept-admin"}
-              disabled={adminDisabled && loading !== "accept-admin"}
-            >
-              Accept Admin Role
-            </Button>
+            {!pendingAdmin ? (
+              // No two-step transfer in progress — nothing to accept or cancel.
+              <p className="text-xs text-gray-500 text-center">
+                No admin transfer is currently pending.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-gray-400 text-center">
+                  Pending admin →{" "}
+                  <span className="font-mono text-stellar-300">
+                    {pendingAdmin.slice(0, 6)}…{pendingAdmin.slice(-6)}
+                  </span>
+                </p>
+                {isConnectedPendingAdmin ? (
+                  // Only the named pending admin can finalize the transfer.
+                  <Button
+                    type="button"
+                    className="w-full bg-stellar-600 hover:bg-stellar-700 text-white shadow-lg shadow-stellar-600/20"
+                    onClick={() =>
+                      handleAction("accept-admin", {} as AcceptAdminData)
+                    }
+                    isLoading={loading === "accept-admin"}
+                    disabled={locked || (!!loading && loading !== "accept-admin")}
+                  >
+                    Accept Admin Role
+                  </Button>
+                ) : (
+                  // Outgoing admin can cancel by overwriting the proposal with self.
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full border-red-500/20 text-red-400 hover:border-red-500/40"
+                    onClick={() =>
+                      handleAction("cancel-admin", {} as AcceptAdminData)
+                    }
+                    isLoading={loading === "cancel-admin"}
+                    disabled={adminDisabled && loading !== "cancel-admin"}
+                  >
+                    Cancel Pending Transfer
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
