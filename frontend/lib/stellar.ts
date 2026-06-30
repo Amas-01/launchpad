@@ -802,19 +802,134 @@ export async function fetchVestingSchedule(
  * Fetch transaction history (events) for a token contract via the Mercury indexer.
  * Uses cursor-based pagination to walk past the Soroban RPC retention window.
  */
+/** All event topic names the indexer and live-poll hooks subscribe to. */
+const TRACKED_EVENT_TOPICS = [
+  "transfer",
+  "mint",
+  "burn",
+  "clawback",
+  "freeze",
+  "unfreeze",
+  "pause",
+  "unpause",
+  "authorize",
+  "unauthorize",
+  "set_admin",
+  "revoke_admin",
+  "upgrade",
+] as const;
+
+type TrackedTopic = (typeof TRACKED_EVENT_TOPICS)[number];
+
+function isTrackedTopic(s: string): s is TrackedTopic {
+  return (TRACKED_EVENT_TOPICS as readonly string[]).includes(s);
+}
+
+/**
+ * Decode a single raw event into a partial TokenActivityInfo.
+ * Returns null for topics we don't recognise.
+ */
+function decodeActivityEvent(
+  topicStrings: string[],
+  value: string | undefined,
+  meta: { id: string; txHash: string; ledger: number; timestamp: string },
+): TokenActivityInfo | null {
+  if (topicStrings.length === 0) return null;
+  const topic0 = toScVal(topicStrings[0]);
+  if (!topic0) return null;
+  const typePath = decodeString(topic0);
+
+  const base: TokenActivityInfo = {
+    id: meta.id,
+    pagingToken: meta.id,
+    type: "other",
+    amount: "-",
+    from: "-",
+    to: "-",
+    txHash: meta.txHash,
+    timestamp: meta.timestamp,
+  };
+
+  if (isTrackedTopic(typePath)) {
+    base.type = typePath;
+  } else {
+    // Gracefully label unknowns instead of dropping them
+    base.type = "other";
+  }
+
+  const data = toScVal(value);
+
+  switch (typePath) {
+    case "mint": {
+      if (data) base.amount = decodeI128(data);
+      if (topicStrings.length > 1) {
+        const toVal = toScVal(topicStrings[1]);
+        if (toVal) base.to = decodeAddress(toVal);
+      }
+      break;
+    }
+    case "burn":
+    case "clawback": {
+      if (data) base.amount = decodeI128(data);
+      if (topicStrings.length > 1) {
+        const fromVal = toScVal(topicStrings[1]);
+        if (fromVal) base.from = decodeAddress(fromVal);
+      }
+      break;
+    }
+    case "transfer": {
+      if (data) base.amount = decodeI128(data);
+      if (topicStrings.length > 2) {
+        const fromVal = toScVal(topicStrings[1]);
+        const toVal = toScVal(topicStrings[2]);
+        if (fromVal) base.from = decodeAddress(fromVal);
+        if (toVal) base.to = decodeAddress(toVal);
+      }
+      break;
+    }
+    case "freeze":
+    case "unfreeze":
+    case "authorize":
+    case "unauthorize": {
+      // topic[1] = account address being acted on
+      if (topicStrings.length > 1) {
+        const addrVal = toScVal(topicStrings[1]);
+        if (addrVal) base.subject = decodeAddress(addrVal);
+      }
+      break;
+    }
+    case "set_admin":
+    case "revoke_admin": {
+      // topic[1] = new/old admin address
+      if (topicStrings.length > 1) {
+        const addrVal = toScVal(topicStrings[1]);
+        if (addrVal) base.subject = decodeAddress(addrVal);
+      }
+      break;
+    }
+    case "pause":
+    case "unpause":
+    case "upgrade":
+      // No address payload; the event itself is the signal
+      break;
+    default:
+      break;
+  }
+
+  return base;
+}
+
 export async function fetchTransactionHistory(
   contractId: string,
   config: NetworkConfig,
   options: { cursor?: string; limit?: number } = {},
 ): Promise<{ items: TransactionItem[]; nextCursor: string | null }> {
   const { cursor, limit = 200 } = options;
-  const topicTransfer = encodeTopicSymbol("transfer");
-  const topicMint = encodeTopicSymbol("mint");
-  const topicBurn = encodeTopicSymbol("burn");
-  const topicClawback = encodeTopicSymbol("clawback");
+
+  const topicFilters = TRACKED_EVENT_TOPICS.map(encodeTopicSymbol);
 
   const { events, nextCursor } = await fetchIndexedEvents(contractId, config, {
-    topics: [topicTransfer, topicMint, topicBurn, topicClawback],
+    topics: topicFilters,
     cursor,
     limit,
   });
@@ -826,6 +941,7 @@ export async function fetchTransactionHistory(
     if (!topic0) continue;
 
     const typePath = decodeString(topic0);
+    // fetchTransactionHistory returns only the classic token-transfer types
     if (
       typePath !== "mint" &&
       typePath !== "burn" &&
@@ -869,13 +985,31 @@ export async function fetchTransactionHistory(
   return { items: items.reverse(), nextCursor };
 }
 
+export type TokenActivityType =
+  | "mint"
+  | "transfer"
+  | "burn"
+  | "clawback"
+  | "freeze"
+  | "unfreeze"
+  | "pause"
+  | "unpause"
+  | "authorize"
+  | "unauthorize"
+  | "set_admin"
+  | "revoke_admin"
+  | "upgrade"
+  | "other";
+
 export interface TokenActivityInfo {
   id: string;
   pagingToken: string;
-  type: "mint" | "transfer" | "burn" | "clawback" | "other";
+  type: TokenActivityType;
   amount: string;
   from: string;
   to: string;
+  /** address or subject involved in admin/compliance events */
+  subject?: string;
   timestamp: string;
   txHash: string;
 }
@@ -893,15 +1027,12 @@ export async function fetchAccountOperations(
   try {
     // For contract IDs, use indexer events instead of Horizon.
     if (accountId.startsWith("C")) {
-      const topicTransfer = encodeTopicSymbol("transfer");
-      const topicMint = encodeTopicSymbol("mint");
-      const topicBurn = encodeTopicSymbol("burn");
-      const topicClawback = encodeTopicSymbol("clawback");
+      const topicFilters = TRACKED_EVENT_TOPICS.map(encodeTopicSymbol);
       const pageSize = Math.min(limit, 200);
 
       const { events, nextCursor: nextIndexerCursor } =
         await fetchIndexedEvents(accountId, config, {
-          topics: [topicTransfer, topicMint, topicBurn, topicClawback],
+          topics: topicFilters,
           limit: pageSize,
           cursor: cursor ?? undefined,
         });
@@ -909,56 +1040,20 @@ export async function fetchAccountOperations(
       const records: TokenActivityInfo[] = [];
 
       for (const event of events) {
-        const topic0 = toScVal(event.topic[0]);
-        if (!topic0) continue;
-
-        const typePath = decodeString(topic0);
-        if (
-          typePath !== "mint" &&
-          typePath !== "burn" &&
-          typePath !== "clawback" &&
-          typePath !== "transfer"
-        ) {
-          continue;
-        }
-
-        const data = toScVal(event.value);
-        if (!data) continue;
-
-        const amount = decodeI128(data);
-        let from = "-";
-        let to = "-";
-
-        if (typePath === "mint" && event.topic.length > 1) {
-          const toVal = toScVal(event.topic[1]);
-          if (toVal) to = decodeAddress(toVal);
-        } else if (
-          (typePath === "burn" || typePath === "clawback") &&
-          event.topic.length > 1
-        ) {
-          const fromVal = toScVal(event.topic[1]);
-          if (fromVal) from = decodeAddress(fromVal);
-        } else if (typePath === "transfer" && event.topic.length > 2) {
-          const fromVal = toScVal(event.topic[1]);
-          const toVal = toScVal(event.topic[2]);
-          if (fromVal) from = decodeAddress(fromVal);
-          if (toVal) to = decodeAddress(toVal);
-        }
-
-        records.push({
-          id: event.id || `${event.tx_hash}-${event.ledger}`,
-          pagingToken: event.id || "",
-          type: typePath as TokenActivityInfo["type"],
-          amount,
-          from,
-          to,
-          timestamp: event.timestamp,
-          txHash: event.tx_hash,
-        });
+        const decoded = decodeActivityEvent(
+          event.topic,
+          event.value,
+          {
+            id: event.id || `${event.tx_hash}-${event.ledger}`,
+            txHash: event.tx_hash,
+            ledger: event.ledger,
+            timestamp: event.timestamp,
+          },
+        );
+        if (decoded) records.push(decoded);
       }
 
-      const nextCursor = nextIndexerCursor;
-      return { records, nextCursor };
+      return { records, nextCursor: nextIndexerCursor };
     }
 
     const horizon = new StellarSdk.Horizon.Server(getHorizonUrl());
