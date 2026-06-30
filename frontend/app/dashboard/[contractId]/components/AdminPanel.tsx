@@ -37,7 +37,10 @@ import {
   ExternalLink,
   Clock,
   Lock,
-  AlertTriangle,
+  Ban,
+  UserX,
+  ShieldOff,
+  CircleAlert,
 } from "lucide-react";
 import { VestingCurveChart } from "@/components/VestingCurveChart";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
@@ -142,6 +145,18 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [batchErrors, setBatchErrors] = useState<string[]>([]);
     const [parsedEntries, setParsedEntries] = useState<BatchMintEntry[]>([]);
 
+    // Authorization
+    const [authorizationRequired, setAuthorizationRequired] = useState(false);
+    const [authorizationRevocable, setAuthorizationRevocable] = useState(false);
+    const [authAddress, setAuthAddress] = useState("");
+    const [authResult, setAuthResult] = useState<string | null>(null);
+
+    // Security controls
+    const [isPaused, setIsPaused] = useState(false);
+    const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+    const [freezeAddress, setFreezeAddress] = useState("");
+    const [freezeResult, setFreezeResult] = useState<string | null>(null);
+
     // Forms
     const mintForm = useForm<MintData>({ resolver: zodResolver(mintSchema) });
     const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
@@ -223,7 +238,8 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
 
     useEffect(() => {
         refreshLocked();
-    }, [refreshLocked]);
+        refreshAuthAndPause();
+    }, [refreshLocked, refreshAuthAndPause]);
 
     useEffect(() => {
         refreshPaused();
@@ -690,6 +706,21 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
           </a>
         )}
       </div>
+
+      {isPaused && (
+        <div className="mb-6 flex items-start gap-3 rounded-xl border border-orange-500/30 bg-orange-500/5 p-4">
+          <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-orange-400" />
+          <div className="text-sm">
+            <p className="font-semibold text-orange-200">
+              Contract is paused
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-orange-100/80">
+              All state-changing operations (mint, burn, transfer, clawback)
+              are halted. Only the admin can unpause the contract.
+            </p>
+          </div>
+        </div>
+      )}
 
       {locked && (
         <div className="mb-6 flex items-start gap-3 rounded-xl border border-yellow-500/30 bg-yellow-500/5 p-4">
