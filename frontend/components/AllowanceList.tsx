@@ -17,6 +17,7 @@ interface AllowanceListProps {
   contractId?: string;
   allowances?: Allowance[];
   isLoading?: boolean;
+  currentLedger?: number;
   onRevoke?: (spenderId: string) => Promise<void>;
 }
 
@@ -33,10 +34,24 @@ export function AllowanceList({
   contractId,
   allowances = [],
   isLoading = false,
+  currentLedger,
   onRevoke,
 }: AllowanceListProps) {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  const ledgerToExpiryInfo = (expirationLedger: number): { date: string; countdown: string } | null => {
+    if (currentLedger === undefined) return null;
+    const ledgersRemaining = expirationLedger - currentLedger;
+    const secondsRemaining = ledgersRemaining * 5;
+    const expiryDate = new Date(Date.now() + secondsRemaining * 1000);
+    const dateStr = expiryDate.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    if (ledgersRemaining <= 0) return { date: dateStr, countdown: "Expired" };
+    const days = Math.floor(secondsRemaining / 86400);
+    const hours = Math.floor((secondsRemaining % 86400) / 3600);
+    const countdown = days > 0 ? `${days}d ${hours}h remaining` : `${hours}h remaining`;
+    return { date: dateStr, countdown };
+  };
 
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -150,6 +165,14 @@ export function AllowanceList({
                 <p className="text-sm text-gray-300">
                   {allowance.expirationLedger.toLocaleString()}
                 </p>
+                {ledgerToExpiryInfo(allowance.expirationLedger) && (() => {
+                  const expiry = ledgerToExpiryInfo(allowance.expirationLedger)!;
+                  return (
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {expiry.date} &middot; {expiry.countdown}
+                    </p>
+                  );
+                })()}
               </div>
             </div>
 
