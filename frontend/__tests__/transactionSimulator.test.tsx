@@ -29,9 +29,7 @@ jest.mock("@/app/providers/NetworkProvider", () => ({
   }),
 }));
 
-// ───────────────────────────────────────────────────────────────────────────
 // Error Parsing Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 describe("parseSorobanError", () => {
   it("maps insufficient balance error", () => {
