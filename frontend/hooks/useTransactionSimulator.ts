@@ -130,9 +130,10 @@ export function useTransactionSimulator() {
     async checkVestingRelease(
       vestingContractId: string,
       recipientAddress: string,
+      scheduleIndex?: number,
     ): Promise<PreflightCheckResult> {
       return runSimulation(() =>
-        simulateVestingRelease(vestingContractId, recipientAddress, networkConfig),
+        simulateVestingRelease(vestingContractId, recipientAddress, networkConfig, scheduleIndex),
       );
     },
 
@@ -143,6 +144,7 @@ export function useTransactionSimulator() {
       vestingContractId: string,
       recipientAddress: string,
       adminAddress: string,
+      scheduleIndex?: number,
     ): Promise<PreflightCheckResult> {
       return runSimulation(() =>
         simulateVestingRevoke(
@@ -150,6 +152,7 @@ export function useTransactionSimulator() {
           recipientAddress,
           adminAddress,
           networkConfig,
+          scheduleIndex,
         ),
       );
     },
