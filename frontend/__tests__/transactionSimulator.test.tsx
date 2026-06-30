@@ -1,6 +1,5 @@
 /**
  * Transaction Simulator Tests
- *
  * Tests for the Soroban transaction pre-flight check system.
  * These are examples of how to test the simulator and error parsing.
  */
