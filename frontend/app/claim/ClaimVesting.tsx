@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
+  fetchScheduleCount,
   fetchVestingInfo,
   buildReleaseTx,
   submitTx,
@@ -21,12 +22,14 @@ export function ClaimVesting() {
   const toast = useToast();
 
   const [contractId, setContractId] = useState("");
-  const [info, setInfo] = useState<VestingInfo | null>(null);
+  // One VestingInfo entry per schedule index
+  const [schedules, setSchedules] = useState<VestingInfo[]>([]);
   const [loading, setLoading] = useState(false);
-  const [releasing, setReleasing] = useState(false);
+  // Track which schedule index is currently releasing
+  const [releasingIndex, setReleasingIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  /* ── Fetch vesting schedule ────────────────────────────────────────── */
+  /* ── Fetch all vesting schedules ───────────────────────────────────── */
   const handleLookup = useCallback(async () => {
     if (!connected || !publicKey) {
       toast.show({
@@ -44,12 +47,24 @@ export function ClaimVesting() {
     }
 
     setError(null);
-    setInfo(null);
+    setSchedules([]);
     setLoading(true);
 
     try {
-      const vestingInfo = await fetchVestingInfo(trimmed, publicKey);
-      setInfo(vestingInfo);
+      const count = await fetchScheduleCount(trimmed, publicKey);
+
+      if (count === 0) {
+        setError("No vesting schedule found for your wallet on this contract.");
+        return;
+      }
+
+      // Fetch all schedules in parallel
+      const infos = await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          fetchVestingInfo(trimmed, publicKey, i),
+        ),
+      );
+      setSchedules(infos);
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : "Failed to fetch vesting info";
@@ -61,54 +76,65 @@ export function ClaimVesting() {
     } finally {
       setLoading(false);
     }
-  }, [connected, publicKey, contractId]);
+  }, [connected, publicKey, contractId, toast]);
 
-  /* ── Release unlocked tokens ───────────────────────────────────────── */
-  const handleRelease = useCallback(async () => {
-    if (!connected || !publicKey || !info) return;
+  /* ── Release unlocked tokens for a specific schedule index ─────────── */
+  const handleRelease = useCallback(
+    async (scheduleIndex: number) => {
+      if (!connected || !publicKey) return;
+      const info = schedules[scheduleIndex];
+      if (!info) return;
 
-    if (info.releasableAmount <= 0n) {
-      toast.show({
-        title: "No Tokens Available",
-        message: "No tokens available to release right now.",
-        variant: "error",
-      });
-      return;
-    }
+      if (info.releasableAmount <= 0n) {
+        toast.show({
+          title: "No Tokens Available",
+          message: "No tokens available to release right now.",
+          variant: "error",
+        });
+        return;
+      }
 
-    setReleasing(true);
-    try {
-      const xdr = await buildReleaseTx(contractId.trim(), publicKey, publicKey);
-      const signedXdr = await signTransaction(xdr);
-      await submitTx(signedXdr);
-      toast.show({
-        title: "Success",
-        message: "Tokens released successfully!",
-        variant: "success",
-      });
+      setReleasingIndex(scheduleIndex);
+      try {
+        const xdr = await buildReleaseTx(
+          contractId.trim(),
+          publicKey,
+          publicKey,
+          scheduleIndex,
+        );
+        const signedXdr = await signTransaction(xdr);
+        await submitTx(signedXdr);
+        toast.show({
+          title: "Success",
+          message: `Schedule ${scheduleIndex + 1}: tokens released successfully!`,
+          variant: "success",
+        });
 
-      // Refresh data
-      const updated = await fetchVestingInfo(contractId.trim(), publicKey);
-      setInfo(updated);
-    } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : "Release transaction failed";
-      toast.show({
-        title: "Release Failed",
-        message: msg,
-        variant: "error",
-      });
-    } finally {
-      setReleasing(false);
-    }
-  }, [connected, publicKey, info, contractId, signTransaction]);
-
-  /* ── Computed display values ───────────────────────────────────────── */
-  const schedule = info?.schedule;
-  const progressPct =
-    schedule && schedule.totalAmount > 0n
-      ? Number((info.vestedAmount * 100n) / schedule.totalAmount)
-      : 0;
+        // Refresh this schedule
+        const updated = await fetchVestingInfo(
+          contractId.trim(),
+          publicKey,
+          scheduleIndex,
+        );
+        setSchedules((prev) => {
+          const next = [...prev];
+          next[scheduleIndex] = updated;
+          return next;
+        });
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error ? err.message : "Release transaction failed";
+        toast.show({
+          title: "Release Failed",
+          message: msg,
+          variant: "error",
+        });
+      } finally {
+        setReleasingIndex(null);
+      }
+    },
+    [connected, publicKey, schedules, contractId, signTransaction, toast],
+  );
 
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
@@ -117,7 +143,7 @@ export function ClaimVesting() {
       {!connected && (
         <div className="glass-card p-8 text-center">
           <p className="mb-4 text-gray-400">
-            Connect your Freighter wallet to view your vesting schedule.
+            Connect your Freighter wallet to view your vesting schedules.
           </p>
           <Button onClick={connect}>Connect Wallet</Button>
         </div>
@@ -166,106 +192,147 @@ export function ClaimVesting() {
             )}
           </div>
 
-          {/* ── Vesting schedule details ──────────────────────────────── */}
-          {info && schedule && (
-            <div className="glass-card animate-fade-in-up space-y-6 p-6">
-              {/* Header */}
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">
-                  Your Vesting Schedule
-                </h2>
-                {schedule.revoked && (
-                  <span className="rounded-lg bg-red-500/10 px-3 py-1 text-xs font-medium text-red-400">
-                    Revoked
-                  </span>
-                )}
-              </div>
-
-              {/* Progress bar */}
-              <div>
-                <div className="mb-2 flex justify-between text-sm">
-                  <span className="text-gray-400">Vesting Progress</span>
-                  <span className="font-medium text-stellar-400">
-                    {progressPct}%
-                  </span>
-                </div>
-                <div className="h-3 overflow-hidden rounded-full bg-void-700">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-stellar-400 to-stellar-600 transition-all duration-500"
-                    style={{ width: `${Math.min(progressPct, 100)}%` }}
-                    role="progressbar"
-                    aria-valuenow={progressPct}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label="Vesting progress"
-                  />
-                </div>
-              </div>
-
-              {/* Stats grid */}
-              <div className="grid grid-cols-2 gap-4">
-                <StatCard
-                  label="Total Allocation"
-                  value={formatTokenAmount(schedule.totalAmount)}
-                />
-                <StatCard
-                  label="Vested So Far"
-                  value={formatTokenAmount(info.vestedAmount)}
-                />
-                <StatCard
-                  label="Already Released"
-                  value={formatTokenAmount(schedule.released)}
-                />
-                <StatCard
-                  label="Available to Claim"
-                  value={formatTokenAmount(info.releasableAmount)}
-                  highlight
-                />
-              </div>
-
-              {/* Schedule metadata */}
-              <div className="space-y-2 rounded-xl border border-white/5 bg-void-800/50 p-4 text-sm">
-                <DetailRow
-                  label="Recipient"
-                  value={truncateAddress(schedule.recipient)}
-                />
-                <DetailRow
-                  label="Cliff Ledger"
-                  value={schedule.cliffLedger.toLocaleString()}
-                />
-                <DetailRow
-                  label="End Ledger"
-                  value={schedule.endLedger.toLocaleString()}
-                />
-                <DetailRow
-                  label="Current Ledger"
-                  value={info.currentLedger.toLocaleString()}
-                />
-              </div>
-
-              {/* Release button */}
-              <Button
-                onClick={handleRelease}
-                isLoading={releasing}
-                disabled={
-                  releasing ||
-                  info.releasableAmount <= 0n ||
-                  schedule.revoked
-                }
-                className="w-full"
-                aria-label={`Release ${formatTokenAmount(info.releasableAmount)} vested tokens`}
-              >
-                {schedule.revoked
-                  ? "Schedule Revoked"
-                  : info.releasableAmount <= 0n
-                    ? "No Tokens to Release"
-                    : `Release ${formatTokenAmount(info.releasableAmount)} Tokens`}
-              </Button>
-            </div>
-          )}
+          {/* ── One card per schedule ─────────────────────────────────── */}
+          {schedules.map((info, idx) => (
+            <ScheduleCard
+              key={idx}
+              info={info}
+              scheduleIndex={idx}
+              scheduleCount={schedules.length}
+              releasing={releasingIndex === idx}
+              onRelease={() => handleRelease(idx)}
+            />
+          ))}
         </div>
       )}
     </>
+  );
+}
+
+/* ── Per-schedule card ─────────────────────────────────────────────── */
+
+function ScheduleCard({
+  info,
+  scheduleIndex,
+  scheduleCount,
+  releasing,
+  onRelease,
+}: {
+  info: VestingInfo;
+  scheduleIndex: number;
+  scheduleCount: number;
+  releasing: boolean;
+  onRelease: () => void;
+}) {
+  const { schedule } = info;
+
+  const progressPct =
+    schedule.totalAmount > 0n
+      ? Number((info.vestedAmount * 100n) / schedule.totalAmount)
+      : 0;
+
+  return (
+    <div className="glass-card animate-fade-in-up space-y-6 p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-white">
+            {scheduleCount > 1
+              ? `Vesting Schedule ${scheduleIndex + 1} of ${scheduleCount}`
+              : "Your Vesting Schedule"}
+          </h2>
+          {scheduleCount > 1 && (
+            <span className="rounded-full border border-stellar-400/20 bg-stellar-400/10 px-2.5 py-0.5 text-xs text-stellar-400">
+              #{scheduleIndex + 1}
+            </span>
+          )}
+        </div>
+        {schedule.revoked && (
+          <span className="rounded-lg bg-red-500/10 px-3 py-1 text-xs font-medium text-red-400">
+            Revoked
+          </span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div>
+        <div className="mb-2 flex justify-between text-sm">
+          <span className="text-gray-400">Vesting Progress</span>
+          <span className="font-medium text-stellar-400">
+            {progressPct.toFixed(1)}%
+          </span>
+        </div>
+        <div className="h-3 overflow-hidden rounded-full bg-void-700">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-stellar-400 to-stellar-600 transition-all duration-500"
+            style={{ width: `${Math.min(progressPct, 100)}%` }}
+            role="progressbar"
+            aria-valuenow={Math.round(progressPct)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label={`Vesting progress for schedule ${scheduleIndex + 1}`}
+          />
+        </div>
+      </div>
+
+      {/* Stats grid */}
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard
+          label="Total Allocation"
+          value={formatTokenAmount(schedule.totalAmount)}
+        />
+        <StatCard
+          label="Vested So Far"
+          value={formatTokenAmount(info.vestedAmount)}
+        />
+        <StatCard
+          label="Already Released"
+          value={formatTokenAmount(schedule.released)}
+        />
+        <StatCard
+          label="Available to Claim"
+          value={formatTokenAmount(info.releasableAmount)}
+          highlight
+        />
+      </div>
+
+      {/* Schedule metadata */}
+      <div className="space-y-2 rounded-xl border border-white/5 bg-void-800/50 p-4 text-sm">
+        <DetailRow
+          label="Recipient"
+          value={truncateAddress(schedule.recipient)}
+        />
+        <DetailRow
+          label="Cliff Ledger"
+          value={schedule.cliffLedger.toLocaleString()}
+        />
+        <DetailRow
+          label="End Ledger"
+          value={schedule.endLedger.toLocaleString()}
+        />
+        <DetailRow
+          label="Current Ledger"
+          value={info.currentLedger.toLocaleString()}
+        />
+      </div>
+
+      {/* Release button */}
+      <Button
+        onClick={onRelease}
+        isLoading={releasing}
+        disabled={
+          releasing || info.releasableAmount <= 0n || schedule.revoked
+        }
+        className="w-full"
+        aria-label={`Release ${formatTokenAmount(info.releasableAmount)} vested tokens from schedule ${scheduleIndex + 1}`}
+      >
+        {schedule.revoked
+          ? "Schedule Revoked"
+          : info.releasableAmount <= 0n
+            ? "No Tokens to Release"
+            : `Release ${formatTokenAmount(info.releasableAmount)} Tokens`}
+      </Button>
+    </div>
   );
 }
 
