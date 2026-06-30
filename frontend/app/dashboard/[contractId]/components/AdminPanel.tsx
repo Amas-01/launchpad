@@ -137,6 +137,11 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [paused, setPaused] = useState(false);
     const [showPauseConfirm, setShowPauseConfirm] = useState(false);
 
+    // Clawback card supports two admin-initiated removals that share one form:
+    //   "clawback" → confiscate tokens into the admin balance (reversible)
+    //   "burn"     → permanently destroy tokens, reducing supply (irreversible)
+    const [burnMode, setBurnMode] = useState<"clawback" | "burn">("clawback");
+
     const [mintMode, setMintMode] = useState<"single" | "batch">("single");
     const [batchData, setBatchData] = useState("");
     const [batchErrors, setBatchErrors] = useState<string[]>([]);
@@ -343,6 +348,8 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 ? "Mint"
                 : action === "clawback"
                   ? "Clawback"
+                  : action === "burn-admin"
+                  ? "Burn (admin)"
                   : action === "transfer"
                     ? "Propose admin"
                     : action === "accept-admin"
@@ -376,6 +383,20 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
             } else if (action === "clawback") {
                 const burnData = data as BurnData;
                 method = "clawback";
+                const scaledAmount =
+                    BigInt(Math.round(parseFloat(burnData.amount) * 10 ** decimals));
+                args = [addressToScVal(burnData.from), i128ToScVal(scaledAmount)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setBurnPreflight(simulationResult);
+            } else if (action === "burn-admin") {
+                const burnData = data as BurnData;
+                method = "burn_admin";
                 const scaledAmount =
                     BigInt(Math.round(parseFloat(burnData.amount) * 10 ** decimals));
                 args = [addressToScVal(burnData.from), i128ToScVal(scaledAmount)];
@@ -497,7 +518,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 mintForm.reset();
                 setMintPreflight(null);
             }
-            if (action === "clawback") {
+            if (action === "clawback" || action === "burn-admin") {
                 burnForm.reset();
                 setBurnPreflight(null);
             }
@@ -893,17 +914,63 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
           </div>
         )}
 
-        {/* ── Burn Form ─────────────────────────────────────── */}
+        {/* ── Clawback / Burn Form ───────────────────────────── */}
         <div className="glass-card p-6 flex flex-col hover:border-red-500/30 transition-all duration-300 group">
-          <div className="flex items-center gap-2 mb-6 text-red-400">
-            <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
-              <Flame className="w-5 h-5" />
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-2 text-red-400">
+              <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
+                <Flame className="w-5 h-5" />
+              </div>
+              <h3 className="font-bold text-lg">Remove Assets</h3>
             </div>
-            <h3 className="font-bold text-lg">Clawback Assets</h3>
+            <div className="flex bg-white/5 p-1 rounded-lg border border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setBurnMode("clawback");
+                  setBurnPreflight(null);
+                }}
+                className={`px-3 py-1 text-xs rounded-md transition-all ${burnMode === "clawback" ? "bg-red-500 text-white shadow-lg" : "text-gray-400 hover:text-white"}`}
+              >
+                Confiscate
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBurnMode("burn");
+                  setBurnPreflight(null);
+                }}
+                className={`px-3 py-1 text-xs rounded-md transition-all ${burnMode === "burn" ? "bg-red-500 text-white shadow-lg" : "text-gray-400 hover:text-white"}`}
+              >
+                Destroy
+              </button>
+            </div>
           </div>
+
+          {/* Differentiate the two admin-initiated removals for the operator. */}
+          <p className="text-xs text-gray-400 mb-4 leading-relaxed">
+            {burnMode === "clawback" ? (
+              <>
+                <span className="font-semibold text-red-300">
+                  Confiscate to admin (clawback):
+                </span>{" "}
+                forcibly moves tokens into the admin balance. Reversible — you
+                can transfer them back later.
+              </>
+            ) : (
+              <>
+                <span className="font-semibold text-red-300">
+                  Permanently destroy (burn admin):
+                </span>{" "}
+                burns tokens out of existence, reducing total supply. This
+                cannot be undone.
+              </>
+            )}
+          </p>
+
           <form
             onSubmit={burnForm.handleSubmit((data) =>
-              handleAction("clawback", data),
+              handleAction(burnMode === "burn" ? "burn-admin" : "clawback", data),
             )}
             className="space-y-4 flex-grow"
           >
@@ -930,7 +997,9 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                 successMessage={
                   !burnPreflight.errors?.length &&
                   !burnPreflight.warnings?.length
-                    ? "Clawback transaction is ready"
+                    ? burnMode === "burn"
+                      ? "Burn transaction is ready"
+                      : "Clawback transaction is ready"
                     : undefined
                 }
               />
@@ -939,15 +1008,17 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               type="submit"
               variant="secondary"
               className="w-full mt-4 border-red-500/20 hover:border-red-500/40 text-red-400"
-              isLoading={loading === "clawback"}
+              isLoading={loading === "clawback" || loading === "burn-admin"}
               disabled={adminDisabled}
             >
-              {success === "clawback" ? (
+              {success === "clawback" || success === "burn-admin" ? (
                 <span className="flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" /> Success
                 </span>
+              ) : burnMode === "burn" ? (
+                "Permanently Burn"
               ) : (
-                "Clawback Tokens"
+                "Confiscate to Admin"
               )}
             </Button>
           </form>
