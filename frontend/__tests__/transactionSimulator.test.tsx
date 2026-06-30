@@ -10,8 +10,7 @@ import {
   // simulateTransaction,
 } from "@/lib/transactionSimulator";
 import {
-  render,
-  screen,
+
   renderHook,
   //  act
 } from "@testing-library/react";
@@ -29,9 +28,7 @@ jest.mock("@/app/providers/NetworkProvider", () => ({
   }),
 }));
 
-// ───────────────────────────────────────────────────────────────────────────
 // Error Parsing Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 describe("parseSorobanError", () => {
   it("maps insufficient balance error", () => {
