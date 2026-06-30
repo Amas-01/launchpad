@@ -10,6 +10,7 @@ import { NumericInput } from "@/components/ui/NumericInput";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { Send } from "lucide-react";
+import { useToast } from "@/app/providers/ToastProvider";
 
 const transferSchema = z.object({
   tokenContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid token contract ID"),
@@ -28,6 +29,7 @@ interface TransferFormProps {
 
 export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
     isLoading: boolean;
     success: boolean;
@@ -84,7 +86,11 @@ export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
 
   const onSubmit = async (data: TransferFormData) => {
     if (!preflightResult?.success) {
-      alert("Please run pre-flight check first");
+      toast.show({
+        title: "Pre-flight Check Required",
+        message: "Run the pre-flight check first",
+        variant: "warning",
+      });
       return;
     }
 
