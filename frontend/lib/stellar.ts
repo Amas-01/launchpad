@@ -543,7 +543,13 @@ async function _fetchTokenInfo(
     decimals,
     totalSupply,
     circulatingSupply,
-    admin: adminVal ? decodeAddress(adminVal) : "N/A",
+    admin:
+      adminVal &&
+      typeof (adminVal as StellarSdk.xdr.ScVal).switch === "function" &&
+      (adminVal as StellarSdk.xdr.ScVal).switch() !==
+        StellarSdk.xdr.ScValType.scvVoid()
+        ? decodeAddress(adminVal as StellarSdk.xdr.ScVal)
+        : "N/A",
     contractId,
     maxSupply,
     contractUri,
