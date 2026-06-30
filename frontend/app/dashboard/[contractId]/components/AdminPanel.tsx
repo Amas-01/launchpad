@@ -47,6 +47,16 @@ import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 /** String the admin must type to confirm permanent revocation. */
 const REVOKE_CONFIRM_PHRASE = "REVOKE";
 
+/**
+ * Encode an optional vesting schedule index as Soroban `Option<u32>`.
+ * Soroban represents `None` as a Void ScVal and `Some(n)` as the inner value.
+ */
+function indexToScVal(scheduleIndex: string): xdr.ScVal {
+  return scheduleIndex === ""
+    ? xdr.ScVal.scvVoid()
+    : nativeToScVal(Number(scheduleIndex), { type: "u32" });
+}
+
 /* ── Validation Schemas ────────────────────────────────────────── */
 
 const mintSchema = z.object({
@@ -98,6 +108,30 @@ const vestingSchema = z.object({
     ),
 });
 
+// Manage an existing vesting schedule (extend cliff / revoke). The schedule
+// index is optional — empty means the contract's default (first) schedule.
+const manageVestingSchema = z.object({
+  vestingContract: z
+    .string()
+    .regex(/^C[A-Z2-7]{55}$/, "Invalid contract address (must start with C)"),
+  recipient: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid Stellar address"),
+  scheduleIndex: z
+    .string()
+    .refine(
+      (val) =>
+        val === "" || (Number.isInteger(Number(val)) && Number(val) >= 0),
+      "Index must be a whole number ≥ 0",
+    ),
+  // Only required for "Extend Cliff"; validated in the handler so "Revoke"
+  // can submit with this left blank.
+  newCliffDays: z
+    .string()
+    .refine(
+      (val) => val === "" || (!isNaN(Number(val)) && Number(val) > 0),
+      "Cliff extension must be positive",
+    ),
+});
+
 const metadataUriSchema = z.object({
   uri: z
     .string()
@@ -109,10 +143,18 @@ type MintData = z.infer<typeof mintSchema>;
 type BurnData = z.infer<typeof burnSchema>;
 type TransferAdminData = z.infer<typeof transferAdminSchema>;
 type VestingData = z.infer<typeof vestingSchema>;
+type ManageVestingData = z.infer<typeof manageVestingSchema>;
 type MetadataUriData = z.infer<typeof metadataUriSchema>;
 
 type AcceptAdminData = Record<string, never>;
-type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData | AcceptAdminData;
+type AdminActionData =
+  | MintData
+  | BurnData
+  | TransferAdminData
+  | VestingData
+  | ManageVestingData
+  | MetadataUriData
+  | AcceptAdminData;
 
 /* ── AdminPanel Component ───────────────────────────────────────── */
 
@@ -153,7 +195,11 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const burnForm = useForm<BurnData>({ resolver: zodResolver(burnSchema) });
     const transferForm = useForm<TransferAdminData>({ resolver: zodResolver(transferAdminSchema) });
     const vestingForm = useForm<VestingData>({ resolver: zodResolver(vestingSchema) });
+    const manageVestingForm = useForm<ManageVestingData>({ resolver: zodResolver(manageVestingSchema) });
     const metadataUriForm = useForm<MetadataUriData>({ resolver: zodResolver(metadataUriSchema) });
+
+    // Revoke is destructive, so it sits behind an explicit confirmation step.
+    const [showVestingRevokeConfirm, setShowVestingRevokeConfirm] = useState(false);
 
     // Live values for the vesting curve preview chart.
     const [watchedCliff, watchedDuration] = vestingForm.watch(["cliffDays", "durationDays"]);
@@ -377,6 +423,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [burnPreflight, setBurnPreflight] = useState<PreflightCheckResult | null>(null);
     const [transferPreflight, setTransferPreflight] = useState<PreflightCheckResult | null>(null);
     const [vestingPreflight, setVestingPreflight] = useState<PreflightCheckResult | null>(null);
+    const [manageVestingPreflight, setManageVestingPreflight] = useState<PreflightCheckResult | null>(null);
 
     const handleAction = async (action: string, data: AdminActionData) => {
         if (!publicKey) return;
@@ -400,7 +447,11 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                       ? "Accept admin"
                       : action === "metadata-uri"
                         ? "Update metadata URI"
-                        : "Vesting";
+                        : action === "extend-cliff"
+                          ? "Extend cliff"
+                          : action === "vesting-revoke"
+                            ? "Revoke schedule"
+                            : "Vesting";
 
         try {
             const server = new rpc.Server(networkConfig.rpcUrl);
@@ -530,6 +581,48 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                     args,
                     publicKey,
                 );
+            } else if (action === "extend-cliff") {
+                const manageData = data as ManageVestingData;
+                method = "extend_cliff";
+                targetContractId = manageData.vestingContract;
+
+                // Same ledger math as create_schedule: the new cliff is an
+                // absolute ledger computed as "now + N days".
+                const currentLedgerRes = await server.getLatestLedger();
+                const currentLedger = currentLedgerRes.sequence;
+                const newCliffLedger =
+                    currentLedger + Math.round(Number(manageData.newCliffDays) * 17280);
+
+                args = [
+                    addressToScVal(manageData.recipient),
+                    nativeToScVal(newCliffLedger, { type: "u32" }),
+                    indexToScVal(manageData.scheduleIndex),
+                ];
+
+                simulationResult = await simulator.simulateContract(
+                    targetContractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setManageVestingPreflight(simulationResult);
+            } else if (action === "vesting-revoke") {
+                const manageData = data as ManageVestingData;
+                method = "revoke";
+                targetContractId = manageData.vestingContract;
+
+                args = [
+                    addressToScVal(manageData.recipient),
+                    indexToScVal(manageData.scheduleIndex),
+                ];
+
+                simulationResult = await simulator.simulateContract(
+                    targetContractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+                setManageVestingPreflight(simulationResult);
             } else {
                 throw new Error("Unsupported action");
             }
@@ -599,6 +692,17 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
             if (action === "vesting") {
                 vestingForm.reset();
                 setVestingPreflight(null);
+            }
+            if (action === "extend-cliff") {
+                // Keep the contract / recipient / index so further edits are easy;
+                // just clear the one-off cliff input and the preflight banner.
+                manageVestingForm.resetField("newCliffDays");
+                setManageVestingPreflight(null);
+            }
+            if (action === "vesting-revoke") {
+                manageVestingForm.reset();
+                setManageVestingPreflight(null);
+                setShowVestingRevokeConfirm(false);
             }
         } catch (err) {
             const error = err as Error;
@@ -1205,6 +1309,170 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               )}
             </Button>
           </form>
+        </div>
+
+        {/* ── Manage Vesting (#302) ─────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-stellar-400/30 transition-all duration-300 group">
+          <div className="flex items-center gap-2 mb-4 text-stellar-300">
+            <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg">Manage Vesting</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Extend the cliff of, or revoke, an existing schedule.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4 flex-grow">
+            <Input
+              label="Vesting Contract"
+              placeholder="C..."
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("vestingContract")}
+              error={manageVestingForm.formState.errors.vestingContract?.message}
+            />
+            <Input
+              label="Recipient Address"
+              placeholder="G..."
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("recipient")}
+              error={manageVestingForm.formState.errors.recipient?.message}
+            />
+            <Input
+              label="Schedule Index (optional)"
+              type="number"
+              placeholder="0"
+              className="bg-white/5 border-white/10"
+              {...manageVestingForm.register("scheduleIndex")}
+              error={manageVestingForm.formState.errors.scheduleIndex?.message}
+            />
+
+            {manageVestingPreflight && (
+              <PreflightCheckDisplay
+                isLoading={simulator.isLoading}
+                errors={manageVestingPreflight.errors}
+                warnings={manageVestingPreflight.warnings}
+                successMessage={
+                  !manageVestingPreflight.errors?.length &&
+                  !manageVestingPreflight.warnings?.length
+                    ? "Vesting transaction is ready"
+                    : undefined
+                }
+              />
+            )}
+
+            {/* ── Extend cliff ── */}
+            <div className="pt-2 border-t border-white/10">
+              <p className="text-[10px] uppercase tracking-widest text-stellar-400 font-bold mb-2">
+                Extend Cliff
+              </p>
+              <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+                Push the cliff back by the number of days from now. Only works
+                while the current cliff is still in the future.
+              </p>
+              <Input
+                label="New Cliff (Days from now)"
+                type="number"
+                placeholder="30"
+                className="bg-white/5 border-white/10"
+                {...manageVestingForm.register("newCliffDays")}
+                error={manageVestingForm.formState.errors.newCliffDays?.message}
+              />
+              <Button
+                type="button"
+                className="w-full mt-3 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                isLoading={loading === "extend-cliff"}
+                disabled={adminDisabled}
+                onClick={manageVestingForm.handleSubmit((data) => {
+                  // newCliffDays is optional in the schema (Revoke ignores it),
+                  // so enforce it here for the Extend path.
+                  if (!data.newCliffDays) {
+                    manageVestingForm.setError("newCliffDays", {
+                      message: "Cliff extension must be positive",
+                    });
+                    return;
+                  }
+                  handleAction("extend-cliff", data);
+                })}
+              >
+                {success === "extend-cliff" ? (
+                  <span className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" /> Cliff Extended
+                  </span>
+                ) : (
+                  "Extend Cliff"
+                )}
+              </Button>
+            </div>
+
+            {/* ── Revoke ── */}
+            <div className="pt-2 border-t border-white/10">
+              <p className="text-[10px] uppercase tracking-widest text-red-400 font-bold mb-2">
+                Revoke Schedule
+              </p>
+              {!showVestingRevokeConfirm ? (
+                <>
+                  <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+                    Cancels the schedule. Vested tokens are released to the
+                    recipient and all unvested tokens return to the admin.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full border-red-500/20 text-red-400 hover:border-red-500/40"
+                    disabled={adminDisabled}
+                    onClick={manageVestingForm.handleSubmit(() =>
+                      setShowVestingRevokeConfirm(true),
+                    )}
+                  >
+                    Revoke Schedule
+                  </Button>
+                </>
+              ) : (
+                <div className="space-y-3 pt-1 animate-in fade-in slide-in-from-top-2 duration-300 bg-red-950/20 p-4 rounded-xl border border-red-500/20">
+                  <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest text-center">
+                    Confirm Revocation
+                  </p>
+                  <p className="text-xs text-stellar-200 text-center leading-relaxed">
+                    Unvested tokens will be returned to the admin and the
+                    schedule will be permanently revoked. This cannot be undone.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="flex-1 text-xs py-2 h-9"
+                      onClick={() => setShowVestingRevokeConfirm(false)}
+                      disabled={loading === "vesting-revoke"}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      className="flex-1 text-xs py-2 h-9 bg-red-600 hover:bg-red-700 border-none shadow-lg shadow-red-600/20"
+                      isLoading={loading === "vesting-revoke"}
+                      onClick={() =>
+                        handleAction(
+                          "vesting-revoke",
+                          manageVestingForm.getValues(),
+                        )
+                      }
+                    >
+                      {success === "vesting-revoke" ? (
+                        <span className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4" /> Revoked
+                        </span>
+                      ) : (
+                        "Confirm Revoke"
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* ── Transfer Admin ────────────────────────────────── */}
