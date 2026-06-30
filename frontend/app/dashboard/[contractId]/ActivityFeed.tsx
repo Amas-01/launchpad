@@ -7,6 +7,14 @@ import {
   ArrowLeftRight,
   Flame,
   Droplets,
+  SnowflakeIcon,
+  PauseCircle,
+  PlayCircle,
+  ShieldCheck,
+  ShieldOff,
+  UserCheck,
+  UserX,
+  Upload,
 } from "lucide-react";
 import {
   type TokenActivityInfo,
@@ -118,8 +126,45 @@ export default function ActivityFeed({ accountId }: { accountId: string }) {
         return <Flame className="h-4 w-4 text-red-400" />;
       case "transfer":
         return <ArrowLeftRight className="h-4 w-4 text-green-400" />;
+      case "freeze":
+        return <SnowflakeIcon className="h-4 w-4 text-cyan-400" />;
+      case "unfreeze":
+        return <SnowflakeIcon className="h-4 w-4 text-teal-400" />;
+      case "pause":
+        return <PauseCircle className="h-4 w-4 text-yellow-400" />;
+      case "unpause":
+        return <PlayCircle className="h-4 w-4 text-green-400" />;
+      case "authorize":
+        return <ShieldCheck className="h-4 w-4 text-emerald-400" />;
+      case "unauthorize":
+        return <ShieldOff className="h-4 w-4 text-orange-400" />;
+      case "set_admin":
+        return <UserCheck className="h-4 w-4 text-stellar-400" />;
+      case "revoke_admin":
+        return <UserX className="h-4 w-4 text-red-400" />;
+      case "upgrade":
+        return <Upload className="h-4 w-4 text-purple-400" />;
       default:
         return <ArrowRight className="h-4 w-4 text-gray-400" />;
+    }
+  };
+
+  const getTypeLabel = (type: string): string => {
+    switch (type) {
+      case "mint":          return "Mint";
+      case "burn":          return "Burn";
+      case "clawback":      return "Clawback";
+      case "transfer":      return "Transfer";
+      case "freeze":        return "Account frozen";
+      case "unfreeze":      return "Account unfrozen";
+      case "pause":         return "Token paused";
+      case "unpause":       return "Token unpaused";
+      case "authorize":     return "Authorized";
+      case "unauthorize":   return "Unauthorize";
+      case "set_admin":     return "Admin set";
+      case "revoke_admin":  return "Admin revoked";
+      case "upgrade":       return "Contract upgraded";
+      default:              return "Other";
     }
   };
 
@@ -129,9 +174,24 @@ export default function ActivityFeed({ accountId }: { accountId: string }) {
         return "text-blue-400 bg-blue-400/10 border-blue-400/20";
       case "burn":
       case "clawback":
+      case "revoke_admin":
         return "text-red-400 bg-red-400/10 border-red-400/20";
       case "transfer":
+      case "unpause":
+      case "authorize":
         return "text-green-400 bg-green-400/10 border-green-400/20";
+      case "freeze":
+        return "text-cyan-400 bg-cyan-400/10 border-cyan-400/20";
+      case "unfreeze":
+        return "text-teal-400 bg-teal-400/10 border-teal-400/20";
+      case "pause":
+        return "text-yellow-400 bg-yellow-400/10 border-yellow-400/20";
+      case "unauthorize":
+        return "text-orange-400 bg-orange-400/10 border-orange-400/20";
+      case "set_admin":
+        return "text-stellar-400 bg-stellar-400/10 border-stellar-400/20";
+      case "upgrade":
+        return "text-purple-400 bg-purple-400/10 border-purple-400/20";
       default:
         return "text-gray-400 bg-gray-400/10 border-gray-400/20";
     }
@@ -174,14 +234,22 @@ export default function ActivityFeed({ accountId }: { accountId: string }) {
                     className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium capitalize ${getStyleForType(op.type)}`}
                   >
                     {getTypeIcon(op.type)}
-                    {op.type}
+                    {getTypeLabel(op.type)}
                   </div>
                 </td>
                 <td className="px-4 py-3 text-right font-mono text-white">
                   {op.amount !== "-" ? op.amount : "-"}
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-stellar-300">
-                  {op.from !== "-" ? (
+                  {op.subject ? (
+                    <ExplorerLink
+                      type="account"
+                      identifier={op.subject}
+                      truncate={true}
+                      truncateChars={5}
+                      showCopy={false}
+                    />
+                  ) : op.from !== "-" ? (
                     <ExplorerLink
                       type="account"
                       identifier={op.from}

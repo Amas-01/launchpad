@@ -3,6 +3,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import {
   type TokenActivityInfo,
+  type TokenActivityType,
   toScVal,
   decodeString,
   decodeI128,
@@ -13,6 +14,23 @@ import {
   readEventLedger,
   readEventTimestamp,
 } from "@/lib/stellar";
+
+// All event topic names the hook subscribes to — mirrors TRACKED_EVENT_TOPICS in stellar.ts
+const TRACKED_TOPICS = new Set([
+  "transfer",
+  "mint",
+  "burn",
+  "clawback",
+  "freeze",
+  "unfreeze",
+  "pause",
+  "unpause",
+  "authorize",
+  "unauthorize",
+  "set_admin",
+  "revoke_admin",
+  "upgrade",
+]);
 
 interface UseContractEventsOptions {
   intervalMs?: number;
@@ -36,7 +54,7 @@ export function useContractEvents(
   const { networkConfig } = useNetwork();
   const [events, setEvents] = useState<TokenActivityInfo[]>([]);
   const [error, setError] = useState<Error | null>(null);
-  
+
   const startLedgerRef = useRef<number | null>(null);
   const intervalMs = options?.intervalMs ?? 10000;
 
@@ -44,7 +62,6 @@ export function useContractEvents(
     if (!contractId || !networkConfig?.rpcUrl) return;
 
     const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
-    // TypeScript workaround since getEvents is experimental/not fully typed in some SDK versions
     const getEvents = (
       rpc as unknown as {
         getEvents?: (req: unknown) => Promise<{ events?: RpcEvent[] }>;
@@ -60,13 +77,12 @@ export function useContractEvents(
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let isPolling = false;
 
-    // Helper to safely fetch events and catch errors
     const safeGetEvents = async (startLedger: number) => {
       try {
         const response = await getEvents.call(rpc, {
           startLedger,
           filters: [{ type: "contract", contractIds: [contractId] }],
-          pagination: { limit: 100 }, // Fetch up to 100 latest events
+          pagination: { limit: 100 },
         });
         return response?.events ?? [];
       } catch (err) {
@@ -80,14 +96,13 @@ export function useContractEvents(
       isPolling = true;
 
       try {
-        // If we don't have a starting ledger, initialize it to the latest ledger
         if (startLedgerRef.current === null) {
           const { sequence } = await rpc.getLatestLedger();
           startLedgerRef.current = sequence;
         }
 
         const rawEvents = await safeGetEvents(startLedgerRef.current);
-        
+
         if (!isMounted) return;
 
         const newRecords: TokenActivityInfo[] = [];
@@ -95,9 +110,7 @@ export function useContractEvents(
 
         for (const evt of rawEvents) {
           const evtLedger = readEventLedger(evt) || startLedgerRef.current;
-          if (evtLedger > maxLedgerSeen) {
-            maxLedgerSeen = evtLedger;
-          }
+          if (evtLedger > maxLedgerSeen) maxLedgerSeen = evtLedger;
 
           const topics = readEventTopics(evt);
           if (topics.length === 0) continue;
@@ -106,81 +119,106 @@ export function useContractEvents(
           if (!topic0) continue;
 
           const typePath = decodeString(topic0);
-          if (
-            typePath !== "mint" &&
-            typePath !== "burn" &&
-            typePath !== "transfer"
-          ) {
-            continue;
-          }
 
-          const data = toScVal(
-            (evt as { value?: unknown; data?: unknown }).value ??
-              (evt as { data?: unknown }).data,
-          );
-          
-          if (!data) continue;
+          // Keep all tracked topics; label anything else as "other"
+          const eventType: TokenActivityType = TRACKED_TOPICS.has(typePath)
+            ? (typePath as TokenActivityType)
+            : "other";
 
-          const amount = decodeI128(data);
-          let from = "-";
-          let to = "-";
+          const rawValue = (evt as { value?: unknown; data?: unknown }).value ??
+            (evt as { data?: unknown }).data;
+          const data = toScVal(rawValue as string | undefined);
 
-          if (typePath === "mint" && topics.length > 1) {
-            const toVal = toScVal(topics[1]);
-            if (toVal) to = decodeAddress(toVal);
-          } else if (typePath === "burn" && topics.length > 1) {
-            const fromVal = toScVal(topics[1]);
-            if (fromVal) from = decodeAddress(fromVal);
-          } else if (typePath === "transfer" && topics.length > 2) {
-            const fromVal = toScVal(topics[1]);
-            const toVal = toScVal(topics[2]);
-            if (fromVal) from = decodeAddress(fromVal);
-            if (toVal) to = decodeAddress(toVal);
-          }
-
-          newRecords.push({
+          const record: TokenActivityInfo = {
             id: readEventId(evt, `${readEventTxHash(evt)}-${evtLedger}`),
             pagingToken: evt.pagingToken ?? "",
-            type: typePath as TokenActivityInfo["type"],
-            amount,
-            from,
-            to,
-            timestamp: readEventTimestamp(evt),
+            type: eventType,
+            amount: "-",
+            from: "-",
+            to: "-",
             txHash: readEventTxHash(evt),
-          });
+            timestamp: readEventTimestamp(evt),
+          };
+
+          switch (typePath) {
+            case "mint":
+              if (data) record.amount = decodeI128(data);
+              if (topics.length > 1) {
+                const toVal = toScVal(topics[1]);
+                if (toVal) record.to = decodeAddress(toVal);
+              }
+              break;
+
+            case "burn":
+            case "clawback":
+              if (data) record.amount = decodeI128(data);
+              if (topics.length > 1) {
+                const fromVal = toScVal(topics[1]);
+                if (fromVal) record.from = decodeAddress(fromVal);
+              }
+              break;
+
+            case "transfer":
+              if (data) record.amount = decodeI128(data);
+              if (topics.length > 2) {
+                const fromVal = toScVal(topics[1]);
+                const toVal = toScVal(topics[2]);
+                if (fromVal) record.from = decodeAddress(fromVal);
+                if (toVal) record.to = decodeAddress(toVal);
+              }
+              break;
+
+            case "freeze":
+            case "unfreeze":
+            case "authorize":
+            case "unauthorize":
+            case "set_admin":
+            case "revoke_admin":
+              if (topics.length > 1) {
+                const addrVal = toScVal(topics[1]);
+                if (addrVal) record.subject = decodeAddress(addrVal);
+              }
+              break;
+
+            case "pause":
+            case "unpause":
+            case "upgrade":
+              // no extra payload needed
+              break;
+
+            default:
+              // unknown topic — kept as "other", no extra decoding
+              break;
+          }
+
+          newRecords.push(record);
         }
 
-        // Advance the ledger so we don't re-fetch old events
-        // +1 if we want to strictly ask for new ledgers next time
         if (maxLedgerSeen >= startLedgerRef.current) {
           startLedgerRef.current = maxLedgerSeen + 1;
         }
 
         if (newRecords.length > 0) {
-          // Sort descending by ledger/timestamp if needed, though they usually arrive in order.
           setEvents((prev: TokenActivityInfo[]) => {
             const addedIds = new Set(prev.map((p: TokenActivityInfo) => p.id));
-            const uniqueNew = newRecords.filter((r: TokenActivityInfo) => !addedIds.has(r.id));
+            const uniqueNew = newRecords.filter(
+              (r: TokenActivityInfo) => !addedIds.has(r.id),
+            );
             if (uniqueNew.length === 0) return prev;
-            // Prepend new events (newest first in typical feeds, though we should check how ActivityFeed renders)
-            // The ActivityFeed displays newest first. So we prepend unique new records.
-            // Reverse uniqueNew if it came in oldest->newest, but usually we just prepend.
             return [...uniqueNew.reverse(), ...prev];
           });
         }
-        
+
         setError(null);
       } catch (err) {
-        if (isMounted) setError(err instanceof Error ? err : new Error(String(err)));
+        if (isMounted)
+          setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         isPolling = false;
       }
     };
 
-    // Initial poll
     poll();
-
-    // Setup interval
     timerId = setInterval(poll, intervalMs);
 
     return () => {

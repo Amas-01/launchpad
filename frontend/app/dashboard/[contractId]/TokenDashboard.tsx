@@ -169,6 +169,7 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
           maxSupply={tokenInfo.maxSupply}
           totalSupply={tokenInfo.totalSupply}
           decimals={tokenInfo.decimals}
+          tokenSymbol={tokenInfo.symbol}
         />
       )}
 
