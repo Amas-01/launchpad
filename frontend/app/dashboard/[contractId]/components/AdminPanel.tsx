@@ -15,7 +15,9 @@ import {
   i128ToScVal,
   nativeToScVal,
   wrapRpcCall,
+  scValToNative,
 } from "@/lib/soroban";
+import { ExplorerLink } from "@/components/ui/ExplorerLink";
 import {
   parseBatchMintData,
   parseBatchMintFile,
@@ -37,6 +39,8 @@ import {
   ExternalLink,
   Clock,
   Lock,
+  AlertTriangle,
+  Percent,
   Ban,
   UserX,
   ShieldOff,
@@ -113,8 +117,39 @@ type TransferAdminData = z.infer<typeof transferAdminSchema>;
 type VestingData = z.infer<typeof vestingSchema>;
 type MetadataUriData = z.infer<typeof metadataUriSchema>;
 
+const whaleCapSchema = z.object({
+  cap: z
+    .string()
+    .refine(
+      (val) => {
+        const num = Number(val);
+        return !isNaN(num) && Number.isInteger(num) && num >= 1 && num <= 100;
+      },
+      "Cap must be an integer between 1 and 100",
+    ),
+});
+
+const complianceNodeSchema = z.object({
+  address: z.string().regex(/^C[A-Z2-7]{55}$/, "Invalid contract address (must start with C)"),
+});
+
+type WhaleCapData = z.infer<typeof whaleCapSchema>;
+type ComplianceNodeData = z.infer<typeof complianceNodeSchema>;
+type DisableWhaleCapData = Record<string, never>;
+type ClearComplianceNodeData = Record<string, never>;
+
 type AcceptAdminData = Record<string, never>;
-type AdminActionData = MintData | BurnData | TransferAdminData | VestingData | MetadataUriData | AcceptAdminData;
+type AdminActionData =
+  | MintData
+  | BurnData
+  | TransferAdminData
+  | VestingData
+  | MetadataUriData
+  | AcceptAdminData
+  | WhaleCapData
+  | ComplianceNodeData
+  | DisableWhaleCapData
+  | ClearComplianceNodeData;
 
 /* ── AdminPanel Component ───────────────────────────────────────── */
 
@@ -139,6 +174,8 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const [revokePhrase, setRevokePhrase] = useState("");
     const [paused, setPaused] = useState(false);
     const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+    const [whaleCap, setWhaleCap] = useState<number | null>(null);
+    const [complianceNode, setComplianceNode] = useState<string | null>(null);
 
     const [mintMode, setMintMode] = useState<"single" | "batch">("single");
     const [batchData, setBatchData] = useState("");
@@ -163,6 +200,8 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     const transferForm = useForm<TransferAdminData>({ resolver: zodResolver(transferAdminSchema) });
     const vestingForm = useForm<VestingData>({ resolver: zodResolver(vestingSchema) });
     const metadataUriForm = useForm<MetadataUriData>({ resolver: zodResolver(metadataUriSchema) });
+    const whaleForm = useForm<WhaleCapData>({ resolver: zodResolver(whaleCapSchema) });
+    const complianceForm = useForm<ComplianceNodeData>({ resolver: zodResolver(complianceNodeSchema) });
 
     // Live values for the vesting curve preview chart.
     const [watchedCliff, watchedDuration] = vestingForm.watch(["cliffDays", "durationDays"]);
@@ -236,6 +275,76 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
         }
     }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
 
+    const refreshWhaleCap = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("max_balance_per_account"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+                    const native = scValToNative(sim.result.retval);
+                    return typeof native === "number" ? native : null;
+                },
+                { operation: "Check whale cap state", silent: true },
+            );
+            setWhaleCap(value);
+        } catch {
+            // Best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
+    const refreshComplianceNode = useCallback(async () => {
+        try {
+            const value = await wrapRpcCall(
+                async () => {
+                    const server = new rpc.Server(networkConfig.rpcUrl);
+                    const contract = new Contract(contractId);
+                    const dummy = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+                    const account = new (
+                        await import("@stellar/stellar-sdk")
+                    ).Account(dummy, "0");
+                    const tx = new TransactionBuilder(account, {
+                        fee: "100",
+                        networkPassphrase: networkConfig.passphrase,
+                    })
+                        .addOperation(contract.call("compliance_node"))
+                        .setTimeout(30)
+                        .build();
+                    const sim = await server.simulateTransaction(tx);
+                    if (rpc.Api.isSimulationError(sim)) {
+                        return null;
+                    }
+                    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
+                    
+                    const native = scValToNative(sim.result.retval);
+                    if (native && typeof native === "object" && "toString" in native) {
+                        return native.toString();
+                    }
+                    return typeof native === "string" ? native : null;
+                },
+                { operation: "Check compliance node state", silent: true },
+            );
+            setComplianceNode(value);
+        } catch {
+            // Best effort
+        }
+    }, [contractId, networkConfig.rpcUrl, networkConfig.passphrase]);
+
     useEffect(() => {
         refreshLocked();
         refreshAuthAndPause();
@@ -244,6 +353,14 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
     useEffect(() => {
         refreshPaused();
     }, [refreshPaused]);
+
+    useEffect(() => {
+        refreshWhaleCap();
+    }, [refreshWhaleCap]);
+
+    useEffect(() => {
+        refreshComplianceNode();
+    }, [refreshComplianceNode]);
 
     const submitSignedTransaction = useCallback(
         async (signedXdr: string) => {
@@ -365,7 +482,15 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                       ? "Accept admin"
                       : action === "metadata-uri"
                         ? "Update metadata URI"
-                        : "Vesting";
+                        : action === "set-whale-cap"
+                          ? "Set whale protection cap"
+                          : action === "disable-whale-cap"
+                            ? "Disable whale protection"
+                            : action === "set-compliance-node"
+                              ? "Set compliance node"
+                              : action === "clear-compliance-node"
+                                ? "Clear compliance node"
+                                : "Vesting";
 
         try {
             const server = new rpc.Server(networkConfig.rpcUrl);
@@ -468,6 +593,48 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
                     args,
                     publicKey,
                 );
+            } else if (action === "set-whale-cap") {
+                const whaleData = data as WhaleCapData;
+                method = "set_max_balance_per_account";
+                args = [nativeToScVal(Number(whaleData.cap), { type: "u32" })];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "disable-whale-cap") {
+                method = "set_max_balance_per_account";
+                args = [xdr.ScVal.scvVoid()];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "set-compliance-node") {
+                const nodeData = data as ComplianceNodeData;
+                method = "set_compliance_node";
+                args = [addressToScVal(nodeData.address)];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
+            } else if (action === "clear-compliance-node") {
+                method = "set_compliance_node";
+                args = [xdr.ScVal.scvVoid()];
+
+                simulationResult = await simulator.simulateContract(
+                    contractId,
+                    method,
+                    args,
+                    publicKey,
+                );
             } else {
                 throw new Error("Unsupported action");
             }
@@ -528,6 +695,14 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
             if (action === "vesting") {
                 vestingForm.reset();
                 setVestingPreflight(null);
+            }
+            if (action === "set-whale-cap" || action === "disable-whale-cap") {
+                whaleForm.reset();
+                await refreshWhaleCap();
+            }
+            if (action === "set-compliance-node" || action === "clear-compliance-node") {
+                complianceForm.reset();
+                await refreshComplianceNode();
             }
         } catch (err) {
             const error = err as Error;
@@ -1251,6 +1426,140 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals }: Adm
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Transfer Policy ────────────────────────────────── */}
+        <div className="glass-card p-6 flex flex-col hover:border-stellar-400/30 transition-all duration-300 group md:col-span-2">
+          <div className="flex items-center gap-2 mb-6 text-stellar-300">
+            <div className="p-2 bg-stellar-500/10 rounded-lg group-hover:scale-110 transition-transform">
+              <Percent className="w-5 h-5" />
+            </div>
+            <h3 className="font-bold text-lg">Transfer Policy</h3>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 flex-grow">
+            {/* Whale Protection */}
+            <form
+              onSubmit={whaleForm.handleSubmit((data) =>
+                handleAction("set-whale-cap", data)
+              )}
+              className="space-y-4 flex flex-col justify-between"
+            >
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Whale Protection</h4>
+                  <p className="text-xs text-gray-400">
+                    Limits the maximum balance any non-admin account can hold, as a percentage of the total supply.
+                  </p>
+                </div>
+                <div className="text-xs text-stellar-200 bg-white/5 px-3 py-2 rounded-lg border border-white/10 flex items-center justify-between">
+                  <span>Current Max Balance Cap:</span>
+                  <span className="font-semibold text-stellar-400">
+                    {whaleCap !== null ? `${whaleCap}% of total supply` : "None"}
+                  </span>
+                </div>
+                <Input
+                  label="Percentage Cap (1-100)"
+                  type="number"
+                  placeholder="1-100"
+                  className="bg-white/5 border-white/10"
+                  {...whaleForm.register("cap")}
+                  error={whaleForm.formState.errors.cap?.message}
+                  disabled={adminDisabled}
+                />
+              </div>
+              <div className="flex gap-2 mt-4">
+                <Button
+                  type="submit"
+                  className="flex-1 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                  isLoading={loading === "set-whale-cap"}
+                  disabled={adminDisabled}
+                >
+                  Set Cap
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="border-red-500/20 text-red-400 hover:border-red-500/40"
+                  isLoading={loading === "disable-whale-cap"}
+                  disabled={adminDisabled || whaleCap === null}
+                  onClick={() => handleAction("disable-whale-cap", {})}
+                >
+                  Disable
+                </Button>
+              </div>
+            </form>
+
+            {/* Compliance Node */}
+            <form
+              onSubmit={complianceForm.handleSubmit((data) =>
+                handleAction("set-compliance-node", data)
+              )}
+              className="space-y-4 flex flex-col justify-between border-t md:border-t-0 md:border-l border-white/10 pt-6 md:pt-0 md:pl-8"
+            >
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-white mb-1">Compliance Node</h4>
+                  <p className="text-xs text-gray-400">
+                    Set a compliance gating contract to inspect and authorize transfers.
+                  </p>
+                </div>
+                <div className="text-xs text-stellar-200 bg-white/5 px-3 py-2 rounded-lg border border-white/10 flex flex-col gap-1">
+                  <span className="text-gray-400">Current Node Address:</span>
+                  <span className="font-semibold text-stellar-400 break-all min-h-[1.5rem] flex items-center">
+                    {complianceNode ? (
+                      <ExplorerLink
+                        type="contract"
+                        identifier={complianceNode}
+                        truncate={true}
+                        truncateChars={12}
+                        showCopy={true}
+                      />
+                    ) : (
+                      "None"
+                    )}
+                  </span>
+                </div>
+                <Input
+                  label="Contract ID"
+                  placeholder="C..."
+                  className="bg-white/5 border-white/10"
+                  {...complianceForm.register("address")}
+                  error={complianceForm.formState.errors.address?.message}
+                  disabled={adminDisabled}
+                />
+              </div>
+              <div className="space-y-3 mt-4">
+                <div className="flex gap-2">
+                  <Button
+                    type="submit"
+                    className="flex-1 bg-stellar-500 hover:bg-stellar-600 text-white shadow-lg shadow-stellar-500/20"
+                    isLoading={loading === "set-compliance-node"}
+                    disabled={adminDisabled}
+                  >
+                    Set Node
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="border-red-500/20 text-red-400 hover:border-red-500/40"
+                    isLoading={loading === "clear-compliance-node"}
+                    disabled={adminDisabled || !complianceNode}
+                    onClick={() => handleAction("clear-compliance-node", {})}
+                  >
+                    Clear
+                  </Button>
+                </div>
+
+                <div className="flex items-start gap-2 text-[10px] leading-relaxed text-yellow-400 bg-yellow-500/5 p-2.5 rounded-lg border border-yellow-500/10">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    A compliance node contract must implement the <code>can_trade</code> function. Setting an invalid node or one without this method will block all transfers.
+                  </span>
+                </div>
+              </div>
+            </form>
+          </div>
         </div>
 
         {/* ── Update Metadata URI ──────────────────────────────── */}

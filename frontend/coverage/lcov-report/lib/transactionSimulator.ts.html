@@ -23,9 +23,9 @@
         <div class='clearfix'>
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">31.93% </span>
+                <span class="strong">32.01% </span>
                 <span class="quiet">Statements</span>
-                <span class='fraction'>168/526</span>
+                <span class='fraction'>170/531</span>
             </div>
         
             
@@ -44,9 +44,9 @@
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">31.93% </span>
+                <span class="strong">32.01% </span>
                 <span class="quiet">Lines</span>
-                <span class='fraction'>168/526</span>
+                <span class='fraction'>170/531</span>
             </div>
         
             
@@ -589,7 +589,14 @@
 <a name='L524'></a><a href='#L524'>524</a>
 <a name='L525'></a><a href='#L525'>525</a>
 <a name='L526'></a><a href='#L526'>526</a>
-<a name='L527'></a><a href='#L527'>527</a></td><td class="line-coverage quiet"><span class="cline-any cline-yes">1x</span>
+<a name='L527'></a><a href='#L527'>527</a>
+<a name='L528'></a><a href='#L528'>528</a>
+<a name='L529'></a><a href='#L529'>529</a>
+<a name='L530'></a><a href='#L530'>530</a>
+<a name='L531'></a><a href='#L531'>531</a>
+<a name='L532'></a><a href='#L532'>532</a></td><td class="line-coverage quiet"><span class="cline-any cline-yes">1x</span>
+<span class="cline-any cline-yes">1x</span>
+<span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
@@ -645,10 +652,10 @@
 <span class="cline-any cline-yes">11x</span>
 <span class="cline-any cline-yes">11x</span>
 <span class="cline-any cline-yes">11x</span>
-<span class="cline-any cline-yes">158x</span>
+<span class="cline-any cline-yes">166x</span>
 <span class="cline-any cline-yes">8x</span>
 <span class="cline-any cline-yes">8x</span>
-<span class="cline-any cline-yes">158x</span>
+<span class="cline-any cline-yes">166x</span>
 <span class="cline-any cline-yes">3x</span>
 <span class="cline-any cline-yes">3x</span>
 <span class="cline-any cline-yes">11x</span>
@@ -1036,6 +1043,9 @@
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
 <span class="cline-any cline-yes">1x</span>
@@ -1154,6 +1164,8 @@ const ERROR_MESSAGE_MAP: Record&lt;string, string&gt; = {
   "schedule has been revoked": "This vesting schedule has been revoked.",
   "nothing to release": "No vested tokens are available to release.",
   "schedule already revoked": "This schedule has already been revoked.",
+  "batch size exceeds maximum of 50": "Batch size exceeds the maximum of 50 schedules.",
+  "schedules cannot be empty": "At least one schedule is required.",
   "end_ledger must be after cliff_ledger": "End ledger must be after cliff ledger.",
   "total_amount must be positive": "Total amount must be greater than zero.",
   "Invalid Stellar public key": "The provided Stellar address is not valid.",
@@ -1517,7 +1529,7 @@ export <span class="fstat-no" title="function not covered" >async function simul
 <span class="cstat-no" title="statement not covered" ></span>
 <span class="cstat-no" title="statement not covered" >    let estimatedFee = "0.01";</span>
 <span class="cstat-no" title="statement not covered" >    let simulationCost = "0.01";</span>
-<span class="cstat-no" title="statement not covered" >    const simulationFootprint = "";</span>
+<span class="cstat-no" title="statement not covered" >    let simulationFootprint = "";</span>
 <span class="cstat-no" title="statement not covered" >    </span>
 <span class="cstat-no" title="statement not covered" >    if (StellarSdk.rpc.Api.isSimulationSuccess(sim)) {</span>
 <span class="cstat-no" title="statement not covered" >      try {</span>
@@ -1526,6 +1538,9 @@ export <span class="fstat-no" title="function not covered" >async function simul
 <span class="cstat-no" title="statement not covered" >        const totalFee = (minResourceFee + baseFee) / 10_000_000;</span>
 <span class="cstat-no" title="statement not covered" >        estimatedFee = totalFee &gt;= 1 ? totalFee.toFixed(2) : totalFee.toFixed(4);</span>
 <span class="cstat-no" title="statement not covered" >        simulationCost = estimatedFee;</span>
+<span class="cstat-no" title="statement not covered" >        if (sim.transactionData) {</span>
+<span class="cstat-no" title="statement not covered" >          simulationFootprint = sim.transactionData.getFootprint().toString();</span>
+<span class="cstat-no" title="statement not covered" >        }</span>
 <span class="cstat-no" title="statement not covered" >      } catch {</span>
 <span class="cstat-no" title="statement not covered" >        estimatedFee = "0.01";</span>
 <span class="cstat-no" title="statement not covered" >      }</span>
@@ -1648,7 +1663,7 @@ export <span class="fstat-no" title="function not covered" >async function simul
             <div class='footer quiet pad2 space-top1 center small'>
                 Code coverage generated by
                 <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
-                at 2026-06-24T02:25:15.948Z
+                at 2026-06-30T05:09:39.200Z
             </div>
         <script src="../prettify.js"></script>
         <script>
