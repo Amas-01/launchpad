@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { useWallet } from "./useWallet";
 import { useNetwork } from "../providers/NetworkProvider";
+import { toBaseUnits } from "@/lib/utils";
 
 // Generate random bytes for salt
 function randomBytes(length: number): Buffer {
@@ -333,9 +334,9 @@ async function initializeContract(
   const decimalScVal = StellarSdk.nativeToScVal(params.decimals, { type: "u32" });
   const nameScVal = StellarSdk.nativeToScVal(params.name, { type: "string" });
   const symbolScVal = StellarSdk.nativeToScVal(params.symbol, { type: "string" });
-  const initialSupplyScVal = StellarSdk.nativeToScVal(BigInt(params.initialSupply), { type: "i128" });
+  const initialSupplyScVal = StellarSdk.nativeToScVal(toBaseUnits(params.initialSupply, params.decimals), { type: "i128" });
   const maxSupplyScVal = params.maxSupply
-    ? StellarSdk.nativeToScVal(BigInt(params.maxSupply), { type: "i128" })
+    ? StellarSdk.nativeToScVal(toBaseUnits(params.maxSupply, params.decimals), { type: "i128" })
     : StellarSdk.xdr.ScVal.scvVoid();
   const authorizationRequiredScVal = StellarSdk.nativeToScVal(
     params.authorizationRequired ?? false,
