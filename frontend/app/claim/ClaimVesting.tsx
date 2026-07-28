@@ -321,17 +321,28 @@ function ScheduleCard({
         onClick={onRelease}
         isLoading={releasing}
         disabled={
-          releasing || info.releasableAmount <= 0n || schedule.revoked
+          releasing ||
+          info.releasableAmount <= 0n ||
+          schedule.revoked ||
+          info.isPaused
         }
         className="w-full"
         aria-label={`Release ${formatTokenAmount(info.releasableAmount)} vested tokens from schedule ${scheduleIndex + 1}`}
       >
         {schedule.revoked
           ? "Schedule Revoked"
-          : info.releasableAmount <= 0n
-            ? "No Tokens to Release"
-            : `Release ${formatTokenAmount(info.releasableAmount)} Tokens`}
+          : info.isPaused
+            ? "Vesting Paused"
+            : info.releasableAmount <= 0n
+              ? "No Tokens to Release"
+              : `Release ${formatTokenAmount(info.releasableAmount)} Tokens`}
       </Button>
+      {info.isPaused && !schedule.revoked && (
+        <p className="text-xs text-orange-400">
+          This vesting contract is currently paused by its admin. Releases
+          are halted until it is unpaused.
+        </p>
+      )}
     </div>
   );
 }
