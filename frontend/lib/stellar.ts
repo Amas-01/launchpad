@@ -1041,8 +1041,10 @@ export async function fetchAccountOperations(
 
       for (const event of events) {
         const decoded = decodeActivityEvent(
-          event.topic,
-          event.value,
+          // IndexedEvent.topic is unknown[]; the decoder re-parses each entry
+          // as an XDR-encoded string, so normalize before handing it over.
+          event.topic.map((t) => String(t)),
+          typeof event.value === "string" ? event.value : undefined,
           {
             id: event.id || `${event.tx_hash}-${event.ledger}`,
             txHash: event.tx_hash,
