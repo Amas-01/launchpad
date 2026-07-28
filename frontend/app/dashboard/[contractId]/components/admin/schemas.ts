@@ -103,6 +103,11 @@ export const complianceNodeSchema = z.object({
   address: contractAddress,
 });
 
+/** Freeze, unfreeze, and is_frozen all take a single account address. */
+export const accountSchema = z.object({
+  address: stellarAddress,
+});
+
 export type MintData = z.infer<typeof mintSchema>;
 export type BurnData = z.infer<typeof burnSchema>;
 export type TransferAdminData = z.infer<typeof transferAdminSchema>;
@@ -112,6 +117,7 @@ export type MetadataUriData = z.infer<typeof metadataUriSchema>;
 export type UpgradeData = z.infer<typeof upgradeSchema>;
 export type WhaleCapData = z.infer<typeof whaleCapSchema>;
 export type ComplianceNodeData = z.infer<typeof complianceNodeSchema>;
+export type AccountData = z.infer<typeof accountSchema>;
 
 /** Actions that take no form input (accept-admin, pause, clear-node, …). */
 export type EmptyData = Record<string, never>;

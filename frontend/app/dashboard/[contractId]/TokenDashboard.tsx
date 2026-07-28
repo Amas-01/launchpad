@@ -26,6 +26,8 @@ import {
   LoadingState,
   NotATokenState,
 } from "./components/DashboardUi";
+import { useContractRead } from "./hooks/useContractRead";
+import { useFrozenAccounts } from "./hooks/useFrozenAccounts";
 
 // ---------------------------------------------------------------------------
 // Main dashboard component
@@ -42,6 +44,17 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
   const { publicKey } = useWallet();
   const { fetchTokenInfo, fetchTopHolders, fetchSupplyBreakdown } =
     useSoroban();
+
+  // Frozen state costs one simulation per holder, so only read it for the
+  // admin — they are the only viewer who can act on it.
+  const isAdmin = !!publicKey && tokenInfo?.admin === publicKey;
+  const { read } = useContractRead(contractId);
+  const { frozen: frozenAddresses, refresh: refreshFrozen } =
+    useFrozenAccounts(
+      read,
+      holders.map((h) => h.address),
+      isAdmin,
+    );
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -182,6 +195,7 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
           totalSupply={tokenInfo.totalSupply}
           decimals={tokenInfo.decimals}
           tokenSymbol={tokenInfo.symbol}
+          onFrozenChanged={refreshFrozen}
         />
       )}
 
@@ -211,6 +225,7 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
         </div>
         <HoldersTable
           holders={holders}
+          frozenAddresses={isAdmin ? frozenAddresses : undefined}
           emptyMessage={
             contractId.startsWith("C")
               ? "This is a Soroban-native token, so Horizon cannot enumerate its holders."

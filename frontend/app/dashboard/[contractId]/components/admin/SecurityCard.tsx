@@ -4,14 +4,18 @@ import React, { useState } from "react";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import type { UseAdminActionResult } from "../../hooks/useAdminAction";
+import { AccountActionForm } from "./AccountActionForm";
 import { AdminCard } from "./AdminCard";
 import { ActionSuccess, ConfirmPanel } from "./ConfirmPanel";
 
 /**
- * Security controls: the token-wide circuit breaker.
+ * Security controls: the token-wide circuit breaker and per-account freeze.
  *
  * Pausing halts every holder at once, so it is the blunt instrument of last
- * resort.
+ * resort. Freezing quarantines a single compromised or sanctioned account —
+ * which is the whole reason the contract has `freeze_account` — so an admin
+ * facing one bad holder no longer has to choose between stopping the entire
+ * token and dropping to the Soroban CLI.
  */
 export function SecurityCard({
   admin,
@@ -19,12 +23,15 @@ export function SecurityCard({
   locked,
   paused,
   onPausedChanged,
+  onFrozenChanged,
 }: {
   admin: UseAdminActionResult;
   disabled: boolean;
   locked: boolean;
   paused: boolean;
   onPausedChanged: (paused: boolean) => void;
+  /** Lets the holders table re-read frozen state after a change. */
+  onFrozenChanged?: () => void;
 }) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
 
@@ -38,11 +45,14 @@ export function SecurityCard({
 
   return (
     <AdminCard
-      title="Circuit Breaker"
+      title="Security Controls"
       icon={AlertTriangle}
       accent="yellow"
-      description="Pause or unpause all token operations in an emergency."
+      description="Halt the whole token, or quarantine a single account."
     >
+      <p className="text-[10px] uppercase tracking-widest text-yellow-400 font-bold mb-3">
+        Circuit Breaker
+      </p>
       {paused ? (
         <div className="flex flex-col gap-3">
           <div className="flex items-center gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3 text-sm text-yellow-200">
@@ -95,6 +105,52 @@ export function SecurityCard({
           )}
         </div>
       )}
+
+      <div className="mt-6 pt-4 border-t border-white/10">
+        <p className="text-[10px] uppercase tracking-widest text-yellow-400 font-bold mb-2">
+          Freeze Account
+        </p>
+        <p className="text-xs text-gray-400 mb-3 leading-relaxed">
+          A frozen account cannot send or burn its tokens, but can still
+          receive them. Use this to quarantine one holder instead of pausing
+          the whole token.
+        </p>
+        <AccountActionForm
+          admin={admin}
+          disabled={disabled || locked}
+          checkMethod="is_frozen"
+          checkLabel="Check"
+          describeCheck={(frozen) =>
+            frozen
+              ? { tone: "negative", text: "is frozen." }
+              : { tone: "positive", text: "is not frozen." }
+          }
+          onCompleted={onFrozenChanged}
+          actions={[
+            {
+              action: "freeze",
+              label: "Freeze",
+              successLabel: "Frozen",
+              variant: "secondary",
+              className:
+                "border-yellow-500/20 text-yellow-400 hover:border-yellow-500/40",
+              confirm: {
+                accent: "yellow",
+                title: "Freeze this account?",
+                message:
+                  "The account will be unable to send or burn its tokens until you unfreeze it. Incoming transfers still succeed.",
+                confirmLabel: "Confirm Freeze",
+              },
+            },
+            {
+              action: "unfreeze",
+              label: "Unfreeze",
+              successLabel: "Unfrozen",
+              variant: "secondary",
+            },
+          ]}
+        />
+      </div>
     </AdminCard>
   );
 }

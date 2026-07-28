@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import { TransactionBuilder, rpc, Contract, xdr } from "@stellar/stellar-sdk";
+import { useCallback, useState } from "react";
+import { TransactionBuilder, rpc, Contract } from "@stellar/stellar-sdk";
 import { useWallet } from "../../../hooks/useWallet";
 import { useNetwork } from "../../../providers/NetworkProvider";
 import { useToast } from "../../../providers/ToastProvider";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
-import { scValToNative } from "@/lib/soroban";
 import type { PreflightCheckResult } from "@/lib/transactionSimulator";
+import { useContractRead, type ContractReadFn } from "./useContractRead";
 import {
   ADMIN_ACTIONS,
   type AdminActionContext,
@@ -26,13 +26,6 @@ import {
  * actions pointed at different endpoints. The hook now owns one client and one
  * copy of the sequence.
  */
-
-/**
- * A deterministic dummy account, used as the source for read-only simulations
- * so getters work before (or without) a connected wallet.
- */
-const READ_ONLY_SOURCE =
-  "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 export interface UseAdminActionResult {
   /** The single shared RPC client, derived from the active network. */
@@ -62,7 +55,7 @@ export interface UseAdminActionResult {
    * Resolves `null` when the call is unavailable or fails, so callers can
    * degrade gracefully on older deployments.
    */
-  read: (method: string, args?: xdr.ScVal[]) => Promise<unknown>;
+  read: ContractReadFn;
 }
 
 export function useAdminAction(
@@ -73,6 +66,8 @@ export function useAdminAction(
   const { networkConfig } = useNetwork();
   const toast = useToast();
   const simulator = useTransactionSimulator();
+  // One client per network, not one per call site.
+  const { server, read } = useContractRead(contractId);
 
   const [loading, setLoading] = useState<AdminActionKey | null>(null);
   const [success, setSuccess] = useState<AdminActionKey | null>(null);
@@ -81,12 +76,6 @@ export function useAdminAction(
   const [preflight, setPreflight] = useState<
     Partial<Record<AdminActionKey, PreflightCheckResult | null>>
   >({});
-
-  // One client per network, not one per call site.
-  const server = useMemo(
-    () => new rpc.Server(networkConfig.rpcUrl),
-    [networkConfig.rpcUrl],
-  );
 
   const clearPreflight = useCallback((action: AdminActionKey) => {
     setPreflight((prev) => ({ ...prev, [action]: null }));
@@ -123,31 +112,6 @@ export function useAdminAction(
       return send.hash;
     },
     [networkConfig.passphrase, server],
-  );
-
-  const read = useCallback(
-    async (method: string, args: xdr.ScVal[] = []): Promise<unknown> => {
-      try {
-        const { Account } = await import("@stellar/stellar-sdk");
-        const tx = new TransactionBuilder(new Account(READ_ONLY_SOURCE, "0"), {
-          fee: "100",
-          networkPassphrase: networkConfig.passphrase,
-        })
-          .addOperation(new Contract(contractId).call(method, ...args))
-          .setTimeout(30)
-          .build();
-
-        const sim = await server.simulateTransaction(tx);
-        // A simulation error usually means an older deployment without this
-        // getter. Callers treat `null` as "unknown" rather than surfacing it.
-        if (rpc.Api.isSimulationError(sim)) return null;
-        if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) return null;
-        return scValToNative(sim.result.retval);
-      } catch {
-        return null;
-      }
-    },
-    [contractId, networkConfig.passphrase, server],
   );
 
   const run = useCallback(

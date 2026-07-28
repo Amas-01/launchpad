@@ -42,6 +42,8 @@ interface AdminPanelProps {
   totalSupply?: string;
   decimals: number;
   tokenSymbol?: string;
+  /** Re-read holders' frozen state after a freeze/unfreeze. */
+  onFrozenChanged?: () => void;
 }
 
 /**
@@ -64,6 +66,7 @@ export function AdminPanel({
   totalSupply,
   decimals,
   tokenSymbol,
+  onFrozenChanged,
 }: AdminPanelProps) {
   const { publicKey } = useWallet();
   const { networkConfig } = useNetwork();
@@ -185,6 +188,7 @@ export function AdminPanel({
           locked={state.locked}
           paused={state.paused}
           onPausedChanged={state.setPaused}
+          onFrozenChanged={onFrozenChanged}
         />
 
         <RevokeAdminCard

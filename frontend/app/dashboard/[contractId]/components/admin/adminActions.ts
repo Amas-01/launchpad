@@ -13,6 +13,7 @@ import type {
   UpgradeData,
   WhaleCapData,
   ComplianceNodeData,
+  AccountData,
   EmptyData,
 } from "./schemas";
 
@@ -96,6 +97,8 @@ export interface AdminActionData {
   "clear-compliance-node": EmptyData;
   pause: EmptyData;
   unpause: EmptyData;
+  freeze: AccountData;
+  unfreeze: AccountData;
   revoke: EmptyData;
   upgrade: UpgradeData;
 }
@@ -351,6 +354,31 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     successToast: {
       title: "Token unpaused",
       message: "All token operations have been resumed.",
+    },
+  },
+
+  freeze: {
+    label: "Freeze account",
+    resolve: (data) => ({
+      method: "freeze_account",
+      args: [addressToScVal(data.address)],
+    }),
+    successToast: {
+      title: "Account frozen",
+      message:
+        "The account can no longer send or burn tokens. It can still receive them.",
+    },
+  },
+
+  unfreeze: {
+    label: "Unfreeze account",
+    resolve: (data) => ({
+      method: "unfreeze_account",
+      args: [addressToScVal(data.address)],
+    }),
+    successToast: {
+      title: "Account unfrozen",
+      message: "The account can send and burn tokens again.",
     },
   },
 

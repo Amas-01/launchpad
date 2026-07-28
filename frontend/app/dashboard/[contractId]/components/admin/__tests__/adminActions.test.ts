@@ -77,6 +77,8 @@ describe("ADMIN_ACTIONS registry", () => {
       "metadata-uri",
       "pause",
       "unpause",
+      "freeze",
+      "unfreeze",
       "upgrade",
     ];
     expect(Object.keys(ADMIN_ACTIONS).sort()).toEqual(expected.sort());
@@ -174,6 +176,22 @@ describe("action resolution", () => {
       const def = ADMIN_ACTIONS[key] as (typeof ADMIN_ACTIONS)["pause"];
       expect((await def.resolve({}, ctx)).method).toBe(method);
     }
+  });
+
+  it("maps the per-account freeze actions to their contract methods", async () => {
+    const ctx = makeContext();
+    const freeze = await ADMIN_ACTIONS.freeze.resolve({ address: ALICE }, ctx);
+    const unfreeze = await ADMIN_ACTIONS.unfreeze.resolve(
+      { address: ALICE },
+      ctx,
+    );
+
+    expect(freeze.method).toBe("freeze_account");
+    expect(unfreeze.method).toBe("unfreeze_account");
+    expect(addressOf(freeze.args[0])).toBe(ALICE);
+    expect(addressOf(unfreeze.args[0])).toBe(ALICE);
+    // Both target the token itself, not a secondary contract.
+    expect(freeze.contractId).toBeUndefined();
   });
 
   it("decodes the upgrade WASM hash into 32 raw bytes", async () => {
