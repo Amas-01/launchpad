@@ -3,6 +3,31 @@
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Soroban's network-enforced ceiling on how far into the future a ledger
+/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
+/// network config; 6,312,000 ledgers on mainnet). Passing a value above
+/// this to `extend_ttl` fails the transaction.
+const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
+
+/// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
+/// us a more precise target (e.g. it's already in the past): about a year.
+///
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
+/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
+/// will accept even if the formula above or the network parameter changes.
+const TTL_LEDGERS: u32 = {
+    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
+    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
+        YEAR_LEDGERS as u32
+    } else {
+        MAX_ENTRY_TTL_LEDGERS
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
 
@@ -243,7 +268,7 @@ impl VestingContract {
             let ttl_ledgers = if input.end_ledger > current_ledger {
                 input.end_ledger - current_ledger
             } else {
-                52 * 7 * 24 * 60 / 5
+                TTL_LEDGERS
             };
             Self::_extend_persistent_ttl(&env, &key, ttl_ledgers);
             Self::_set_schedule_count(&env, &input.recipient, schedule_index + 1, ttl_ledgers);
@@ -567,7 +592,7 @@ impl VestingContract {
             end_ledger - current_ledger
         } else {
             // Default TTL if end_ledger is in the past
-            52 * 7 * 24 * 60 / 5
+            TTL_LEDGERS
         }
     }
 
@@ -619,7 +644,7 @@ impl VestingContract {
             .set(&DataKey::Recipients, &recipients);
 
         // Extend TTL for the recipients list
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~1 year in ledger units
+        let ttl_ledgers = TTL_LEDGERS;
         Self::_extend_persistent_ttl(env, &DataKey::Recipients, ttl_ledgers);
     }
 }
@@ -632,6 +657,17 @@ impl VestingContract {
 mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, testutils::Ledger, Env};
+
+    // ── TTL constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_ledgers_is_about_one_year() {
+        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
+        // assumption or the formula ever changes, this test catches it
+        // instead of the archival-window math silently rotting again.
+        let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
+        assert_eq!(days, 365);
+    }
 
     fn latest_index() -> Option<u32> {
         None
