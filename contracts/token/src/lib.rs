@@ -522,7 +522,11 @@ impl TokenContract {
 
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         let key = DataKey::Allowance(from, spender);
-        match env.storage().temporary().get::<DataKey, AllowanceValue>(&key) {
+        match env
+            .storage()
+            .temporary()
+            .get::<DataKey, AllowanceValue>(&key)
+        {
             Some(v) if v.expiration_ledger >= env.ledger().sequence() => v.amount,
             _ => 0,
         }

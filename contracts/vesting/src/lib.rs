@@ -535,8 +535,7 @@ impl VestingContract {
         }
 
         assert!(pruned, "recipient not tracked");
-        env.events()
-            .publish((symbol_short!("prune"),), recipient);
+        env.events().publish((symbol_short!("prune"),), recipient);
     }
 
     // ── Internals ───────────────────────────────────────────────────────
