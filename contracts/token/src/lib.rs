@@ -31,9 +31,20 @@ pub enum DataKey {
     /// operation (mint, burn_admin, freeze, propose_admin) can
     /// ever succeed again — the token becomes effectively immutable.
     Locked,
+    /// Set once on the first successful `initialize` call and never removed.
+    /// Unlike `Admin` (which `revoke_admin` deletes), this is the sole
+    /// re-initialization guard, so revoking admin can never reopen `initialize`.
+    Initialized,
     AuthorizationRequired,
     AuthorizationRevocable,
     AuthorizedHolder(Address),
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct AllowanceValue {
+    pub amount: i128,
+    pub expiration_ledger: u32,
 }
 
 #[contractclient(name = "ComplianceNodeClient")]
@@ -78,10 +89,14 @@ impl TokenContract {
         authorization_revocable: bool,
         compliance_node: Option<Address>,
     ) {
-        // Prevent re-initialization
-        if env.storage().instance().has(&DataKey::Admin) {
+        // Prevent re-initialization. This must key off a flag that is never
+        // removed — `Admin` is deleted by `revoke_admin`, so checking its
+        // presence would let `initialize` become callable again once the
+        // token has been "locked".
+        if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
+        Self::_require_not_locked(&env);
 
         assert!(decimal <= 18, "decimals must be <= 18");
 
@@ -91,6 +106,7 @@ impl TokenContract {
             env.storage().instance().set(&DataKey::MaxSupply, &cap);
         }
 
+        env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Decimals, &decimal);
         env.storage().instance().set(&DataKey::Name, &name);
@@ -427,14 +443,20 @@ impl TokenContract {
             "expiration_ledger must be in the future"
         );
 
+        // Allowances live in temporary storage: expiry *is* the entry's TTL,
+        // so a lapsed allowance is simply gone rather than archived. The
+        // expiration_ledger is stored alongside the amount so `allowance()`
+        // can report 0 for a logically-expired-but-not-yet-evicted entry.
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        env.storage().persistent().set(&key, &amount);
+        let value = AllowanceValue {
+            amount,
+            expiration_ledger,
+        };
+        env.storage().temporary().set(&key, &value);
 
-        // Use the caller-supplied expiration to set the allowance TTL exactly
-        // as the SEP-41 standard requires — no silent fallback.
         let ttl_ledgers = expiration_ledger - current_ledger;
         env.storage()
-            .persistent()
+            .temporary()
             .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
 
         env.events()
@@ -451,10 +473,31 @@ impl TokenContract {
         Self::_check_authorized(&env, &to);
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        let allowance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
         assert!(allowance >= amount, "insufficient allowance");
 
-        env.storage().persistent().set(&key, &(allowance - amount));
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            env.storage().temporary().remove(&key);
+        }
 
         Self::_transfer(&env, &from, &to, amount);
 
@@ -479,7 +522,10 @@ impl TokenContract {
 
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         let key = DataKey::Allowance(from, spender);
-        env.storage().persistent().get(&key).unwrap_or(0)
+        match env.storage().temporary().get::<DataKey, AllowanceValue>(&key) {
+            Some(v) if v.expiration_ledger >= env.ledger().sequence() => v.amount,
+            _ => 0,
+        }
     }
 
     pub fn admin(env: Env) -> Address {
@@ -849,7 +895,9 @@ impl TokenContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env, IntoVal};
+    use soroban_sdk::{
+        testutils::Address as _, testutils::Events as _, testutils::Ledger as _, Env, IntoVal,
+    };
 
     fn setup() -> (Env, TokenContractClient<'static>, Address, Address) {
         let env = Env::default();
@@ -1331,6 +1379,27 @@ mod test {
         let (_, client, _, user) = setup();
         client.revoke_admin();
         client.mint(&user, &1i128);
+    }
+
+    // ── Regression test for issue #322: initialize() re-callable after revoke_admin ──
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_initialize_after_revoke_admin_panics() {
+        let (env, client, admin, _) = setup();
+        client.revoke_admin();
+        // Admin storage entry is gone, but Initialized must still block re-init.
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Attacker"),
+            &String::from_str(&env, "EVL"),
+            &1_000_000i128,
+            &None,
+            &false,
+            &false,
+            &None,
+        );
     }
 
     #[test]
@@ -1820,6 +1889,37 @@ mod test {
         // Supply a valid future expiration; the allowance should be stored correctly.
         client.approve(&admin, &spender, &500i128, &100u32);
         assert_eq!(client.allowance(&admin, &spender), 500i128);
+    }
+
+    // ── Regression tests for issue #326: allowance expiry semantics ────
+
+    #[test]
+    fn test_allowance_returns_zero_after_expiry() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &100u32);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
+
+        // Advance past expiration_ledger.
+        env.ledger().set_sequence_number(200);
+
+        // Must read back as 0, not panic with an archived-entry error.
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient allowance")]
+    fn test_transfer_from_after_expiry_reverts_cleanly() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &100u32);
+        env.ledger().set_sequence_number(200);
+
+        // Must revert with the standard "insufficient allowance" message,
+        // not an opaque archived-entry failure.
+        client.transfer_from(&spender, &admin, &user, &1i128);
     }
 
     #[test]
