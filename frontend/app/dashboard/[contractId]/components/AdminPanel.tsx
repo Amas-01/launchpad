@@ -23,6 +23,7 @@ import {
 import { PolicyCard } from "./admin/PolicyCard";
 import { MetadataCard } from "./admin/MetadataCard";
 import { SecurityCard } from "./admin/SecurityCard";
+import { AuthorizationCard } from "./admin/AuthorizationCard";
 import { DangerCard } from "./admin/DangerCard";
 
 /**
@@ -42,6 +43,12 @@ interface AdminPanelProps {
   totalSupply?: string;
   decimals: number;
   tokenSymbol?: string;
+  /**
+   * `authorization_required` / `authorization_revocable`, read once as part of
+   * TokenInfo. The Authorization card only appears when the flag is on.
+   */
+  authorizationRequired?: boolean;
+  authorizationRevocable?: boolean;
   /** Re-read holders' frozen state after a freeze/unfreeze. */
   onFrozenChanged?: () => void;
 }
@@ -66,6 +73,8 @@ export function AdminPanel({
   totalSupply,
   decimals,
   tokenSymbol,
+  authorizationRequired = false,
+  authorizationRevocable = false,
   onFrozenChanged,
 }: AdminPanelProps) {
   const { publicKey } = useWallet();
@@ -196,6 +205,14 @@ export function AdminPanel({
           locked={state.locked}
           onRevoked={state.markLocked}
         />
+
+        {authorizationRequired && (
+          <AuthorizationCard
+            admin={admin}
+            disabled={disabled}
+            revocable={authorizationRevocable}
+          />
+        )}
 
         <PolicyCard
           admin={admin}

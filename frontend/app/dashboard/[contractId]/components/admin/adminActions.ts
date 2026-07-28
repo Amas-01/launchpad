@@ -99,6 +99,8 @@ export interface AdminActionData {
   unpause: EmptyData;
   freeze: AccountData;
   unfreeze: AccountData;
+  authorize: AccountData;
+  "revoke-auth": AccountData;
   revoke: EmptyData;
   upgrade: UpgradeData;
 }
@@ -379,6 +381,33 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     successToast: {
       title: "Account unfrozen",
       message: "The account can send and burn tokens again.",
+    },
+  },
+
+  /* ── Authorization ───────────────────────────────────────────── */
+
+  authorize: {
+    label: "Authorize holder",
+    resolve: (data) => ({
+      method: "authorize_holder",
+      args: [addressToScVal(data.address)],
+    }),
+    successToast: {
+      title: "Holder authorized",
+      message: "The account can now receive and hold this token.",
+    },
+  },
+
+  "revoke-auth": {
+    label: "Revoke authorization",
+    resolve: (data) => ({
+      method: "revoke_authorization",
+      args: [addressToScVal(data.address)],
+    }),
+    successToast: {
+      title: "Authorization revoked",
+      message:
+        "The account can no longer receive this token. Its existing balance is unaffected.",
     },
   },
 

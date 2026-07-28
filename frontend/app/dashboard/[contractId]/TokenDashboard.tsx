@@ -195,6 +195,8 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
           totalSupply={tokenInfo.totalSupply}
           decimals={tokenInfo.decimals}
           tokenSymbol={tokenInfo.symbol}
+          authorizationRequired={tokenInfo.authorizationRequired}
+          authorizationRevocable={tokenInfo.authorizationRevocable}
           onFrozenChanged={refreshFrozen}
         />
       )}

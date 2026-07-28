@@ -118,8 +118,8 @@ export const StepReview = ({ control, estimatedFee, feeEstimationLoading, feeEst
                 <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-xl">
                     <p className="text-xs text-blue-200 leading-relaxed">
                         <strong>Regulated token:</strong> Authorization Required is enabled.
-                        You will need to call <code className="bg-blue-900/40 px-1 rounded">authorize_holder</code> for
-                        each address before it can receive tokens.
+                        Each address must be authorized before it can receive tokens — use the
+                        Holder Authorization card in the token&apos;s Admin Console after deploying.
                         {formData.authorizationRevocable && " Holder authorization can be revoked by the admin at any time."}
                         {formData.complianceNodeAddress && " Transfers will also be checked against the configured compliance node."}
                     </p>

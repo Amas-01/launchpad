@@ -27,10 +27,6 @@ export interface TokenAdminState {
   whaleCap: number | null;
   /** Configured compliance gating contract. */
   complianceNode: string | null;
-  /** Holders must be authorized before they can receive tokens. */
-  authorizationRequired: boolean;
-  /** The admin may revoke a holder's authorization. */
-  authorizationRevocable: boolean;
   refreshPaused: () => Promise<void>;
   refreshPendingAdmin: () => Promise<void>;
   refreshWhaleCap: () => Promise<void>;
@@ -57,8 +53,6 @@ export function useTokenAdminState(read: ReadFn): TokenAdminState {
   const [pendingAdmin, setPendingAdmin] = useState<string | null>(null);
   const [whaleCap, setWhaleCap] = useState<number | null>(null);
   const [complianceNode, setComplianceNode] = useState<string | null>(null);
-  const [authorizationRequired, setAuthorizationRequired] = useState(false);
-  const [authorizationRevocable, setAuthorizationRevocable] = useState(false);
 
   const refreshLocked = useCallback(async () => {
     setLocked((await read("is_locked")) === true);
@@ -81,29 +75,18 @@ export function useTokenAdminState(read: ReadFn): TokenAdminState {
     setComplianceNode(toAddressString(await read("compliance_node")));
   }, [read]);
 
-  const refreshAuthorization = useCallback(async () => {
-    const [required, revocable] = await Promise.all([
-      read("authorization_required"),
-      read("authorization_revocable"),
-    ]);
-    setAuthorizationRequired(required === true);
-    setAuthorizationRevocable(revocable === true);
-  }, [read]);
-
   useEffect(() => {
     refreshLocked();
     refreshPaused();
     refreshPendingAdmin();
     refreshWhaleCap();
     refreshComplianceNode();
-    refreshAuthorization();
   }, [
     refreshLocked,
     refreshPaused,
     refreshPendingAdmin,
     refreshWhaleCap,
     refreshComplianceNode,
-    refreshAuthorization,
   ]);
 
   const markLocked = useCallback(() => setLocked(true), []);
@@ -114,8 +97,6 @@ export function useTokenAdminState(read: ReadFn): TokenAdminState {
     pendingAdmin,
     whaleCap,
     complianceNode,
-    authorizationRequired,
-    authorizationRevocable,
     refreshPaused,
     refreshPendingAdmin,
     refreshWhaleCap,

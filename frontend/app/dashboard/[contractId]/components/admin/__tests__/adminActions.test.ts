@@ -79,6 +79,8 @@ describe("ADMIN_ACTIONS registry", () => {
       "unpause",
       "freeze",
       "unfreeze",
+      "authorize",
+      "revoke-auth",
       "upgrade",
     ];
     expect(Object.keys(ADMIN_ACTIONS).sort()).toEqual(expected.sort());
@@ -192,6 +194,20 @@ describe("action resolution", () => {
     expect(addressOf(unfreeze.args[0])).toBe(ALICE);
     // Both target the token itself, not a secondary contract.
     expect(freeze.contractId).toBeUndefined();
+  });
+
+  it("maps the holder authorization actions to their contract methods", async () => {
+    const ctx = makeContext();
+    const grant = await ADMIN_ACTIONS.authorize.resolve({ address: ALICE }, ctx);
+    const revoke = await ADMIN_ACTIONS["revoke-auth"].resolve(
+      { address: ALICE },
+      ctx,
+    );
+
+    expect(grant.method).toBe("authorize_holder");
+    expect(revoke.method).toBe("revoke_authorization");
+    expect(addressOf(grant.args[0])).toBe(ALICE);
+    expect(addressOf(revoke.args[0])).toBe(ALICE);
   });
 
   it("decodes the upgrade WASM hash into 32 raw bytes", async () => {
