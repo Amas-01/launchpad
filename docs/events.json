@@ -1,0 +1,142 @@
+{
+  "$schema_note": "Single source of truth for docs/events.md. Regenerate the doc after editing this file with: python3 scripts/generate_events_doc.py. Every topic name listed here must match a EXPECTED_TOPICS entry and a symbol_short! literal in the corresponding contract's src/lib.rs production code — scripts/generate_events_doc.py --check enforces that in CI. See issue #340.",
+  "token": {
+    "source": "contracts/token/src/lib.rs",
+    "events": [
+      {
+        "functions": ["initialize"],
+        "topics": ["init"],
+        "data": "admin: Address"
+      },
+      {
+        "functions": ["mint", "mint_batch", "initialize (when initial_supply > 0)"],
+        "topics": ["mint", "to: Address"],
+        "data": "amount: i128"
+      },
+      {
+        "functions": ["burn", "burn_admin", "burn_self"],
+        "topics": ["burn", "from: Address"],
+        "data": "amount: i128"
+      },
+      {
+        "functions": ["clawback"],
+        "topics": ["clawback", "from: Address"],
+        "data": "amount: i128",
+        "note": "clawback also emits a `transfer` event (from the internal `_transfer` helper it calls) in the same transaction, so a claw-backed balance change shows up as both events."
+      },
+      {
+        "functions": ["transfer", "transfer_from", "clawback"],
+        "topics": ["transfer", "from: Address", "to: Address"],
+        "data": "amount: i128",
+        "note": "transfer_from re-uses this event because the observable balance change is identical to a direct transfer; the allowance deduction is visible through the `allowance` getter instead."
+      },
+      {
+        "functions": ["approve"],
+        "topics": ["approve", "from: Address", "spender: Address"],
+        "data": "amount: i128"
+      },
+      {
+        "functions": ["revoke_admin"],
+        "topics": ["revoked"],
+        "data": "bool (always true)"
+      },
+      {
+        "functions": ["freeze_account"],
+        "topics": ["freeze", "addr: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["unfreeze_account"],
+        "topics": ["unfreeze", "addr: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["pause"],
+        "topics": ["pause"],
+        "data": "()"
+      },
+      {
+        "functions": ["unpause"],
+        "topics": ["unpause"],
+        "data": "()"
+      },
+      {
+        "functions": ["authorize_holder", "revoke_authorization"],
+        "topics": ["auth"],
+        "data": "(holder: Address, authorized: bool)",
+        "note": "Both functions publish under the same `auth` topic; the boolean in the data payload distinguishes granting authorization from revoking it."
+      },
+      {
+        "functions": ["upgrade"],
+        "topics": ["upgrade"],
+        "data": "new_wasm_hash: BytesN<32>"
+      },
+      {
+        "functions": ["set_max_balance_per_account"],
+        "topics": ["set_max_b"],
+        "data": "Option<u32>"
+      },
+      {
+        "functions": ["set_compliance_node"],
+        "topics": ["set_cnode"],
+        "data": "Option<Address>"
+      }
+    ]
+  },
+  "vesting": {
+    "source": "contracts/vesting/src/lib.rs",
+    "events": [
+      {
+        "functions": ["initialize"],
+        "topics": ["init"],
+        "data": "(admin: Address, token_contract: Address)"
+      },
+      {
+        "functions": ["propose_admin"],
+        "topics": ["prop_adm"],
+        "data": "new_admin: Address"
+      },
+      {
+        "functions": ["accept_admin"],
+        "topics": ["acc_adm"],
+        "data": "new_admin: Address"
+      },
+      {
+        "functions": ["create_schedule", "create_schedules_batch (once per schedule)"],
+        "topics": ["create", "recipient: Address"],
+        "data": "total_amount: i128"
+      },
+      {
+        "functions": ["create_schedules_batch"],
+        "topics": ["batch"],
+        "data": "(created_count: u32, total_amount: i128)",
+        "note": "Emitted once per call in addition to a `create` event per schedule in the batch."
+      },
+      {
+        "functions": ["release"],
+        "topics": ["release", "recipient: Address"],
+        "data": "releasable: i128"
+      },
+      {
+        "functions": ["revoke"],
+        "topics": ["revoke", "recipient: Address"],
+        "data": "(releasable: i128, unvested: i128)"
+      },
+      {
+        "functions": ["extend_cliff"],
+        "topics": ["clf_ext", "recipient: Address"],
+        "data": "(old_cliff: u32, new_cliff: u32)"
+      },
+      {
+        "functions": ["pause"],
+        "topics": ["pause"],
+        "data": "()"
+      },
+      {
+        "functions": ["unpause"],
+        "topics": ["unpause"],
+        "data": "()"
+      }
+    ]
+  }
+}
