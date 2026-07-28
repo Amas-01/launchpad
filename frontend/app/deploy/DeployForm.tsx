@@ -23,6 +23,7 @@ import { ArrowLeft, ArrowRight, Rocket, Wallet } from "lucide-react";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useDeployToken, type DeployTokenError } from "../hooks/useDeployToken";
+import { toBaseUnits } from "@/lib/utils";
 
 const optionalNumber = (schema: z.ZodNumber) =>
   z.preprocess((value) => {
@@ -155,9 +156,9 @@ export default function DeployForm() {
         formData.name,
         formData.symbol,
         formData.decimals,
-        BigInt(Math.round((formData.initialSupply ?? 0) * 10 ** formData.decimals)),
+        toBaseUnits(formData.initialSupply ?? 0, formData.decimals),
         formData.maxSupply != null
-          ? BigInt(Math.round(formData.maxSupply * 10 ** formData.decimals))
+          ? toBaseUnits(formData.maxSupply, formData.decimals)
           : null,
         formData.authorizationRequired ?? false,
         formData.authorizationRevocable ?? false,
@@ -440,9 +441,9 @@ export default function DeployForm() {
                       formData.name,
                       formData.symbol,
                       formData.decimals,
-                      BigInt(Math.round((formData.initialSupply ?? 0) * 10 ** formData.decimals)),
+                      toBaseUnits(formData.initialSupply ?? 0, formData.decimals),
                       formData.maxSupply != null
-                        ? BigInt(Math.round(formData.maxSupply * 10 ** formData.decimals))
+                        ? toBaseUnits(formData.maxSupply, formData.decimals)
                         : null,
                       formData.authorizationRequired ?? false,
                       formData.authorizationRevocable ?? false,
