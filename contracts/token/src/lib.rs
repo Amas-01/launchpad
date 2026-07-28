@@ -48,7 +48,7 @@ pub trait ComplianceNodeInterface {
 /// SEP-41 Token Contract — base implementation.
 ///
 /// Contributor issues layered on top:
-/// - #1  freeze_account / unfreeze_account (guard on transfer)
+/// - #1  freeze_account / unfreeze_account (blacklist: no send or receive)
 /// - #2  two-step admin transfer (propose_admin / accept_admin)
 /// - #4  max_supply cap enforcement in mint
 /// - #138 clawback() and #163 compliance-node transfer checks
@@ -162,6 +162,9 @@ impl TokenContract {
 
     /// Forcefully move `amount` tokens from `from` into the admin balance.
     /// Admin only.
+    ///
+    /// Bypasses the frozen check on `from` so tokens can be recovered from a
+    /// blacklisted account; the admin recipient must not be frozen.
     pub fn clawback(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -172,7 +175,7 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .expect("admin revoked");
-        Self::_transfer(&env, &from, &admin, amount);
+        Self::_transfer_clawback(&env, &from, &admin, amount);
 
         let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
         let from_key = DataKey::Balance(from.clone());
@@ -263,7 +266,9 @@ impl TokenContract {
         env.events().publish((symbol_short!("revoked"),), true);
     }
 
-    /// Freeze an account, preventing it from sending tokens. Admin only.
+    /// Freeze an account (blacklist): it cannot send or receive tokens. Admin only.
+    ///
+    /// Admin [`clawback`](Self::clawback) may still pull tokens from a frozen account.
     pub fn freeze_account(env: Env, addr: Address) {
         Self::_require_admin(&env);
         env.storage()
