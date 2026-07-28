@@ -23,6 +23,7 @@ import { ArrowLeft, ArrowRight, Rocket, Wallet } from "lucide-react";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useDeployToken, type DeployTokenError } from "../hooks/useDeployToken";
+import { toBaseUnits } from "@/lib/utils";
 
 const integerString = z
   .string()
@@ -190,9 +191,9 @@ export default function DeployForm() {
         formData.name,
         formData.symbol,
         formData.decimals,
-        scaleSupplyValue(formData.initialSupply, formData.decimals),
+        toBaseUnits(formData.initialSupply ?? 0, formData.decimals),
         formData.maxSupply != null
-          ? scaleSupplyValue(formData.maxSupply, formData.decimals)
+          ? toBaseUnits(formData.maxSupply, formData.decimals)
           : null,
         formData.authorizationRequired ?? false,
         formData.authorizationRevocable ?? false,
@@ -475,9 +476,9 @@ export default function DeployForm() {
                       formData.name,
                       formData.symbol,
                       formData.decimals,
-                      scaleSupplyValue(formData.initialSupply, formData.decimals),
+                      toBaseUnits(formData.initialSupply ?? 0, formData.decimals),
                       formData.maxSupply != null
-                        ? scaleSupplyValue(formData.maxSupply, formData.decimals)
+                        ? toBaseUnits(formData.maxSupply, formData.decimals)
                         : null,
                       formData.authorizationRequired ?? false,
                       formData.authorizationRevocable ?? false,
