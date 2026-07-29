@@ -240,7 +240,7 @@ impl TokenContract {
             .extend_ttl(&admin_key, ttl_ledgers, ttl_ledgers);
 
         env.events()
-            .publish((symbol_short!("clawback"), from.clone()), amount);
+            .publish((symbol_short!("clawback"), admin, from), amount);
     }
 
     /// Mint `amount` tokens to multiple recipients. Admin only.
@@ -285,9 +285,16 @@ impl TokenContract {
     /// The new admin must call `accept_admin` to finalize the transfer.
     pub fn propose_admin(env: Env, new_admin: Address) {
         Self::_require_admin(&env);
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((symbol_short!("prop_admin"), current_admin, new_admin), ());
     }
 
     /// Accept the admin role. Must be called by the pending admin.
@@ -299,8 +306,15 @@ impl TokenContract {
             .get(&DataKey::PendingAdmin)
             .expect("no pending admin");
         pending.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("set_admin"), old_admin, pending), ());
     }
 
     /// Permanently revoke the admin role and lock the contract.
@@ -368,7 +382,7 @@ impl TokenContract {
             .persistent()
             .set(&DataKey::AuthorizedHolder(holder.clone()), &true);
         env.events()
-            .publish((symbol_short!("auth"),), (holder, true));
+            .publish((symbol_short!("authorize"), holder), ());
     }
 
     /// Revoke authorization from `holder`. Only allowed when
@@ -385,7 +399,7 @@ impl TokenContract {
             .persistent()
             .remove(&DataKey::AuthorizedHolder(holder.clone()));
         env.events()
-            .publish((symbol_short!("auth"),), (holder, false));
+            .publish((symbol_short!("revoke_auth"), holder), ());
     }
 
     /// Returns `true` if `holder` is authorized to receive tokens.
@@ -427,6 +441,8 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
+        env.events()
+            .publish((symbol_short!("update_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -509,7 +525,7 @@ impl TokenContract {
             .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
 
         env.events()
-            .publish((symbol_short!("approve"), from, spender), amount);
+            .publish((symbol_short!("approve"), from, spender), (amount, expiration_ledger));
     }
 
     /// Transfer `amount` from `from` to `to` using `spender`'s allowance.
@@ -928,8 +944,13 @@ impl TokenContract {
             .instance()
             .set(&DataKey::TotalSupply, &new_supply);
 
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.events()
-            .publish((symbol_short!("mint"), to.clone()), amount);
+            .publish((symbol_short!("mint"), admin, to.clone()), amount);
     }
 
     fn _burn(env: &Env, from: &Address, amount: i128) {
