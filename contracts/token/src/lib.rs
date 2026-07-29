@@ -6,6 +6,31 @@ use soroban_sdk::{
 };
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Soroban's network-enforced ceiling on how far into the future a ledger
+/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
+/// network config; 6,312,000 ledgers on mainnet). Passing a value above
+/// this to `extend_ttl` fails the transaction.
+const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
+
+/// TTL extension applied to balance/allowance entries so a holder who
+/// never touches their tokens still keeps them live for about a year.
+///
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
+/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
+/// will accept even if the formula above or the network parameter changes.
+const TTL_LEDGERS: u32 = {
+    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
+    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
+        YEAR_LEDGERS as u32
+    } else {
+        MAX_ENTRY_TTL_LEDGERS
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
 
@@ -184,7 +209,7 @@ impl TokenContract {
         Self::_mint(&env, &to, amount);
 
         // Extend TTL for the balance key to prevent archiving
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let key = DataKey::Balance(to);
         env.storage()
             .persistent()
@@ -229,7 +254,7 @@ impl TokenContract {
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer(&env, &from, &admin, amount);
 
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from.clone());
         let admin_key = DataKey::Balance(admin.clone());
         env.storage()
@@ -256,7 +281,7 @@ impl TokenContract {
         Self::_require_admin(&env);
         assert!(to.len() == amounts.len(), "mismatching lengths");
         assert!(to.len() <= 100, "batch size exceeds maximum of 100");
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         for i in 0..to.len() {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
@@ -476,7 +501,7 @@ impl TokenContract {
 
         // Extend TTL for both balance keys to prevent archiving
         // Use a standard TTL extension (e.g., 52 weeks in ledgers)
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -567,7 +592,7 @@ impl TokenContract {
         Self::_transfer(&env, &from, &to, amount);
 
         // Extend TTL for balance keys to prevent archiving
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -1104,6 +1129,17 @@ mod test {
     use good_node::{MockComplianceNode, MockComplianceNodeClient};
     use panicking_node::PanickingComplianceNode;
     use wrong_interface::WrongInterfaceContract;
+
+    // ── TTL constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_ledgers_is_about_one_year() {
+        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
+        // assumption or the formula ever changes, this test catches it
+        // instead of the archival-window math silently rotting again.
+        let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
+        assert_eq!(days, 365);
+    }
 
     fn setup() -> (Env, TokenContractClient<'static>, Address, Address) {
         let env = Env::default();
