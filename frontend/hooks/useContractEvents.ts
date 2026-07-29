@@ -4,6 +4,7 @@ import { useNetwork } from "@/app/providers/NetworkProvider";
 import {
   type TokenActivityInfo,
   type TokenActivityType,
+  TRACKED_EVENT_TOPICS,
   toScVal,
   decodeString,
   decodeI128,
@@ -15,22 +16,8 @@ import {
   readEventTimestamp,
 } from "@/lib/stellar";
 
-// All event topic names the hook subscribes to — mirrors TRACKED_EVENT_TOPICS in stellar.ts
-const TRACKED_TOPICS = new Set([
-  "transfer",
-  "mint",
-  "burn",
-  "clawback",
-  "freeze",
-  "unfreeze",
-  "pause",
-  "unpause",
-  "authorize",
-  "unauthorize",
-  "set_admin",
-  "revoke_admin",
-  "upgrade",
-]);
+// Convert the exported array to a Set for efficient lookup
+const TRACKED_TOPICS = new Set(TRACKED_EVENT_TOPICS);
 
 interface UseContractEventsOptions {
   intervalMs?: number;
@@ -143,17 +130,30 @@ export function useContractEvents(
           switch (typePath) {
             case "mint":
               if (data) record.amount = decodeI128(data);
-              if (topics.length > 1) {
-                const toVal = toScVal(topics[1]);
+              // SEP-41: topics are ("mint", admin, to)
+              if (topics.length > 2) {
+                const adminVal = toScVal(topics[1]);
+                const toVal = toScVal(topics[2]);
+                if (adminVal) record.from = decodeAddress(adminVal);
                 if (toVal) record.to = decodeAddress(toVal);
               }
               break;
 
             case "burn":
-            case "clawback":
               if (data) record.amount = decodeI128(data);
               if (topics.length > 1) {
                 const fromVal = toScVal(topics[1]);
+                if (fromVal) record.from = decodeAddress(fromVal);
+              }
+              break;
+
+            case "clawback":
+              if (data) record.amount = decodeI128(data);
+              // SEP-41: topics are ("clawback", admin, from)
+              if (topics.length > 2) {
+                const adminVal = toScVal(topics[1]);
+                const fromVal = toScVal(topics[2]);
+                if (adminVal) record.to = decodeAddress(adminVal);
                 if (fromVal) record.from = decodeAddress(fromVal);
               }
               break;
@@ -171,18 +171,42 @@ export function useContractEvents(
             case "freeze":
             case "unfreeze":
             case "authorize":
-            case "unauthorize":
-            case "set_admin":
-            case "revoke_admin":
+            case "revoke_auth":
               if (topics.length > 1) {
                 const addrVal = toScVal(topics[1]);
                 if (addrVal) record.subject = decodeAddress(addrVal);
               }
               break;
 
+            case "prop_admin":
+              // topics are ("prop_admin", current_admin, new_admin)
+              if (topics.length > 2) {
+                const currentVal = toScVal(topics[1]);
+                const newVal = toScVal(topics[2]);
+                if (currentVal) record.from = decodeAddress(currentVal);
+                if (newVal) record.to = decodeAddress(newVal);
+              }
+              break;
+
+            case "set_admin":
+              // topics are ("set_admin", old_admin, new_admin)
+              if (topics.length > 2) {
+                const oldVal = toScVal(topics[1]);
+                const newVal = toScVal(topics[2]);
+                if (oldVal) record.from = decodeAddress(oldVal);
+                if (newVal) record.to = decodeAddress(newVal);
+              }
+              break;
+
+            case "revoked":
             case "pause":
             case "unpause":
             case "upgrade":
+            case "init":
+            case "approve":
+            case "set_max_b":
+            case "set_cnode":
+            case "update_uri":
               // no extra payload needed
               break;
 
