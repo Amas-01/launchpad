@@ -98,8 +98,14 @@ impl TokenContract {
 
     /// Initialize the token with metadata and an initial supply minted to `admin`.
     ///
-    /// `authorization_required`: when true, recipients must be explicitly authorized
-    /// by the admin before they can receive or hold tokens.
+    /// `admin.require_auth()` is enforced so the caller must prove they control
+    /// the admin address. This prevents a front-runner from setting admin to an
+    /// address they do *not* control. The frontend should **always** pass the
+    /// deployer's own public key as `admin` so that the wallet's signature
+    /// satisfies `require_auth` and the attacker cannot steal the role.
+    ///
+    /// `authorization_required`: when true, recipients must be explicitly
+    /// authorized by the admin before they can receive or hold tokens.
     ///
     /// `authorization_revocable`: when true, the admin may revoke a holder's
     /// authorization, preventing them from receiving further transfers.
@@ -115,13 +121,10 @@ impl TokenContract {
         authorization_revocable: bool,
         compliance_node: Option<Address>,
     ) {
-        // Prevent re-initialization. This must key off a flag that is never
-        // removed — `Admin` is deleted by `revoke_admin`, so checking its
-        // presence would let `initialize` become callable again once the
-        // token has been "locked".
         if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
+        admin.require_auth();
         Self::_require_not_locked(&env);
 
         assert!(decimal <= 18, "decimals must be <= 18");
