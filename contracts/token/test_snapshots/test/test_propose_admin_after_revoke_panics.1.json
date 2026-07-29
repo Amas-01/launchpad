@@ -424,6 +424,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -584,7 +587,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'admin revoked: contract is locked' from contract function 'Symbol(obj#145)'"
+                  "string": "caught panic 'admin revoked: contract is locked' from contract function 'Symbol(obj#147)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
