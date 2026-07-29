@@ -7,7 +7,7 @@ interface NumericInputProps
   label?: string;
   error?: string;
   value?: number | string;
-  onChange?: (raw: number | undefined) => void;
+  onChange?: (raw: string | undefined) => void;
   allowDecimals?: boolean;
 }
 
@@ -69,9 +69,9 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
         // Format for display
         setDisplayValue(format(stripped));
 
-        // Parse to number and call onChange
-        const parsed = stripped === "" ? undefined : parseFloat(stripped);
-        onChange?.(parsed);
+        // Preserve the exact integer string for callers.
+        const normalized = stripped === "" ? undefined : stripped;
+        onChange?.(normalized);
       },
       [allowDecimals, onChange],
     );

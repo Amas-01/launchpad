@@ -32,6 +32,14 @@ export interface TokenInfo {
   complianceNode?: string | null;
   authorizationRequired?: boolean;
   authorizationRevocable?: boolean;
+  isPaused?: boolean;
+  isLocked?: boolean;
+}
+
+/** Per-wallet authorization/freeze state for a token contract. */
+export interface WalletTokenState {
+  isAuthorized: boolean;
+  isFrozen: boolean;
 }
 
 export interface TokenHolder {
@@ -537,6 +545,22 @@ async function _fetchTokenInfo(
     // authorization checks not implemented or accessible; ignore.
   }
 
+  let isPaused = false;
+  try {
+    const pausedVal = await simulateCall(contractId, "is_paused", config);
+    isPaused = Boolean(pausedVal.b());
+  } catch {
+    // is_paused not implemented on this contract; assume not paused.
+  }
+
+  let isLocked = false;
+  try {
+    const lockedVal = await simulateCall(contractId, "is_locked", config);
+    isLocked = Boolean(lockedVal.b());
+  } catch {
+    // is_locked not implemented on this contract; assume not locked.
+  }
+
   return {
     name: decodeString(nameVal),
     symbol: decodeString(symbolVal),
@@ -556,7 +580,47 @@ async function _fetchTokenInfo(
     complianceNode,
     authorizationRequired,
     authorizationRevocable,
+    isPaused,
+    isLocked,
   };
+}
+
+/**
+ * Fetch a specific wallet's authorization/freeze state on a token contract.
+ * Guarded so contracts missing `is_authorized`/`is_frozen` degrade to the
+ * permissive defaults (authorized, not frozen).
+ */
+export async function fetchWalletTokenState(
+  contractId: string,
+  address: string,
+  config: NetworkConfig,
+): Promise<WalletTokenState> {
+  const addressScVal = new StellarSdk.Address(address).toScVal();
+
+  let isAuthorized = true;
+  try {
+    const authVal = await simulateCall(
+      contractId,
+      "is_authorized",
+      config,
+      [addressScVal],
+    );
+    isAuthorized = Boolean(authVal.b());
+  } catch {
+    // is_authorized not implemented; assume authorized.
+  }
+
+  let isFrozen = false;
+  try {
+    const frozenVal = await simulateCall(contractId, "is_frozen", config, [
+      addressScVal,
+    ]);
+    isFrozen = Boolean(frozenVal.b());
+  } catch {
+    // is_frozen not implemented; assume not frozen.
+  }
+
+  return { isAuthorized, isFrozen };
 }
 
 /**
@@ -1041,8 +1105,10 @@ export async function fetchAccountOperations(
 
       for (const event of events) {
         const decoded = decodeActivityEvent(
-          event.topic,
-          event.value,
+          // IndexedEvent.topic is unknown[]; the decoder re-parses each entry
+          // as an XDR-encoded string, so normalize before handing it over.
+          event.topic.map((t) => String(t)),
+          typeof event.value === "string" ? event.value : undefined,
           {
             id: event.id || `${event.tx_hash}-${event.ledger}`,
             txHash: event.tx_hash,

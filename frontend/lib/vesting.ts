@@ -28,6 +28,7 @@ export interface VestingInfo {
   vestedAmount: bigint;
   releasableAmount: bigint;
   currentLedger: number;
+  isPaused: boolean;
 }
 
 /* ── XDR Decoders ──────────────────────────────────────────────────── */
@@ -213,11 +214,20 @@ export async function fetchVestingInfo(
   const releasableAmount = vestedAmount - schedule.released;
   const latestLedger = await server.getLatestLedger();
 
+  let isPaused = false;
+  try {
+    const pausedVal = await simulateCall(contractId, "is_paused", []);
+    isPaused = decodeBool(pausedVal);
+  } catch {
+    // is_paused not implemented on this vesting contract; assume not paused.
+  }
+
   return {
     schedule,
     vestedAmount,
     releasableAmount,
     currentLedger: latestLedger.sequence,
+    isPaused,
   };
 }
 

@@ -11,6 +11,13 @@ import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { AlertCircle, Clock, Unlock } from "lucide-react";
 import { useToast } from "@/app/providers/ToastProvider";
 
+/** Normalize a raw schedule-index field value for preflight simulation. */
+function toScheduleIndex(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 const vestingReleaseSchema = z.object({
   vestingContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid vesting contract ID"),
   recipientAddress: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid recipient address"),
@@ -21,7 +28,11 @@ const vestingReleaseSchema = z.object({
     .optional(),
 });
 
-type VestingReleaseFormData = z.infer<typeof vestingReleaseSchema>;
+// `z.coerce.number()` parses from `unknown`, so the schema's input and output
+// types differ. React Hook Form needs both: the fields hold the raw input, the
+// submit handler receives the parsed output.
+type VestingReleaseFormInput = z.input<typeof vestingReleaseSchema>;
+type VestingReleaseFormData = z.output<typeof vestingReleaseSchema>;
 
 interface VestingReleaseFormProps {
   onSuccess?: (txHash: string) => void;
@@ -48,7 +59,7 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
     trigger,
     formState: { errors, isValid },
     watch,
-  } = useForm<VestingReleaseFormData>({
+  } = useForm<VestingReleaseFormInput, unknown, VestingReleaseFormData>({
     resolver: zodResolver(vestingReleaseSchema),
     mode: "onChange",
   });
@@ -65,7 +76,8 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
       const result = await simulator.checkVestingRelease(
         formData.vestingContractId,
         formData.recipientAddress,
-        formData.scheduleIndex,
+        // `watch()` returns the raw form input, which the schema coerces.
+        toScheduleIndex(formData.scheduleIndex),
       );
 
       setPreflightResult({
@@ -208,7 +220,8 @@ const vestingRevokeSchema = z.object({
     .optional(),
 });
 
-type VestingRevokeFormData = z.infer<typeof vestingRevokeSchema>;
+type VestingRevokeFormInput = z.input<typeof vestingRevokeSchema>;
+type VestingRevokeFormData = z.output<typeof vestingRevokeSchema>;
 
 interface VestingRevokeFormProps {
   adminAddress: string;
@@ -236,7 +249,7 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
     trigger,
     formState: { errors, isValid },
     watch,
-  } = useForm<VestingRevokeFormData>({
+  } = useForm<VestingRevokeFormInput, unknown, VestingRevokeFormData>({
     resolver: zodResolver(vestingRevokeSchema),
     mode: "onChange",
   });
@@ -254,7 +267,7 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
         formData.vestingContractId,
         formData.recipientAddress,
         adminAddress,
-        formData.scheduleIndex,
+        toScheduleIndex(formData.scheduleIndex),
       );
 
       setPreflightResult({
