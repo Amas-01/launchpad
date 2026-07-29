@@ -97,7 +97,7 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
     }
   };
 
-  const onSubmit = async (data: VestingReleaseFormData) => {
+  const onSubmit = async (_data: VestingReleaseFormData) => {
     if (!preflightResult?.success) {
       toast.show({
         title: "Pre-flight Check Required",
@@ -109,7 +109,6 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
 
     setIsSubmitting(true);
     try {
-      console.log("Submitting vesting release transaction:", data);
       onSuccess?.("0x...");
     } catch (error) {
       console.error("Failed to submit transaction:", error);
@@ -287,7 +286,7 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
     }
   };
 
-  const onSubmit = async (data: VestingRevokeFormData) => {
+  const onSubmit = async (_data: VestingRevokeFormData) => {
     if (!preflightResult?.success) {
       toast.show({
         title: "Pre-flight Check Required",
@@ -299,7 +298,6 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
 
     setIsSubmitting(true);
     try {
-      console.log("Submitting vesting revoke transaction:", data);
       onSuccess?.("0x...");
     } catch (error) {
       console.error("Failed to submit transaction:", error);
