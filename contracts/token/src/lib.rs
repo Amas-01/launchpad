@@ -565,10 +565,31 @@ impl TokenContract {
         assert!(!Self::_is_frozen(&env, &from), "account is frozen");
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        let allowance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
         assert!(allowance >= amount, "insufficient allowance");
 
-        env.storage().persistent().set(&key, &(allowance - amount));
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            env.storage().temporary().remove(&key);
+        }
 
         Self::_burn(&env, &from, amount);
     }
