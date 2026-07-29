@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useForm, Resolver } from "react-hook-form";
+import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/Button";
@@ -59,8 +59,8 @@ export function VestingReleaseForm({ onSuccess }: VestingReleaseFormProps) {
     trigger,
     formState: { errors, isValid },
     watch,
-  } = useForm<VestingReleaseFormData>({
-    resolver: zodResolver(vestingReleaseSchema) as Resolver<VestingReleaseFormData>,
+  } = useForm<VestingReleaseFormInput, unknown, VestingReleaseFormData>({
+    resolver: zodResolver(vestingReleaseSchema),
     mode: "onChange",
   });
 
@@ -249,8 +249,8 @@ export function VestingRevokeForm({ adminAddress, onSuccess }: VestingRevokeForm
     trigger,
     formState: { errors, isValid },
     watch,
-  } = useForm<VestingRevokeFormData>({
-    resolver: zodResolver(vestingRevokeSchema) as Resolver<VestingRevokeFormData>,
+  } = useForm<VestingRevokeFormInput, unknown, VestingRevokeFormData>({
+    resolver: zodResolver(vestingRevokeSchema),
     mode: "onChange",
   });
 

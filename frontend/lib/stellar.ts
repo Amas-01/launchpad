@@ -894,8 +894,8 @@ function isTrackedTopic(s: string): s is TrackedTopic {
  * Returns null for topics we don't recognise.
  */
 function decodeActivityEvent(
-  topicStrings: unknown[],
-  value: unknown,
+  topicStrings: string[],
+  value: string | undefined,
   meta: { id: string; txHash: string; ledger: number; timestamp: string },
 ): TokenActivityInfo | null {
   if (topicStrings.length === 0) return null;

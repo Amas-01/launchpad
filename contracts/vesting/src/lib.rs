@@ -690,9 +690,9 @@ mod test {
     // categories of activity. `scripts/generate_events_doc.py --check`
     // re-derives this same set directly from source and fails CI if it
     // and `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 10] = [
+    const EXPECTED_TOPICS: [&str; 11] = [
         "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
-        "unpause",
+        "unpause", "prune",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in

@@ -55,8 +55,11 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `extend_cliff` | `clf_ext` | `recipient: Address` | (old_cliff: u32, new_cliff: u32) |
 | `pause` | `pause` | — | () |
 | `unpause` | `unpause` | — | () |
+| `prune_recipient` | `prune` | — | recipient: Address |
 
 > Emitted once per call in addition to a `create` event per schedule in the batch.
+
+> Removes a fully-settled recipient from the enumeration index only; it does not touch the recipient's own schedules.
 
 ---
 

@@ -136,6 +136,12 @@
         "functions": ["unpause"],
         "topics": ["unpause"],
         "data": "()"
+      },
+      {
+        "functions": ["prune_recipient"],
+        "topics": ["prune"],
+        "data": "recipient: Address",
+        "note": "Removes a fully-settled recipient from the enumeration index only; it does not touch the recipient's own schedules."
       }
     ]
   }
