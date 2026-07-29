@@ -704,6 +704,75 @@ mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, testutils::Ledger, Env};
 
+    // ── Event topic fixture ─────────────────────────────────────────────
+    //
+    // The checked-in, single source of truth for every event topic-0 name
+    // this contract emits. `docs/events.md` is generated from
+    // `docs/events.json`, which must list exactly this set — see issue
+    // #340, where the doc drifted from the contract (documented 3 of the
+    // ~10 events this contract actually emits) and a frontend indexer was
+    // built against the stale doc instead of the contract, dropping whole
+    // categories of activity. `scripts/generate_events_doc.py --check`
+    // re-derives this same set directly from source and fails CI if it
+    // and `docs/events.json` disagree.
+    const EXPECTED_TOPICS: [&str; 11] = [
+        "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
+        "unpause", "prune",
+    ];
+
+    /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
+    /// this file's production code (everything before the test module)
+    /// exactly matches `EXPECTED_TOPICS`. Static rather than live because
+    /// scanning every `.publish(...)` call site covers events regardless
+    /// of how hard they are to trigger in a live scenario.
+    #[test]
+    fn test_emitted_topics_match_checked_in_fixture() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let (production_source, _) = SOURCE
+            .split_once("#[cfg(test)]\nmod test {")
+            .expect("could not locate test module boundary in lib.rs");
+
+        const NEEDLE: &str = "symbol_short!(\"";
+
+        // Every expected topic must actually appear as a symbol_short! literal.
+        for topic in EXPECTED_TOPICS {
+            let mut rest = production_source;
+            let mut found = false;
+            while let Some(pos) = rest.find(NEEDLE) {
+                let after = &rest[pos + NEEDLE.len()..];
+                if after.as_bytes().len() > topic.len()
+                    && after.starts_with(topic)
+                    && after.as_bytes()[topic.len()] == b'"'
+                {
+                    found = true;
+                    break;
+                }
+                rest = &after[1..];
+            }
+            assert!(
+                found,
+                "topic {topic:?} is listed in EXPECTED_TOPICS but no \
+                 symbol_short!(\"{topic}\") literal was found in the contract"
+            );
+        }
+
+        // No symbol_short! literal exists outside the expected set — i.e.
+        // nothing new was added without updating the fixture (and
+        // docs/events.json / docs/events.md alongside it).
+        let mut rest = production_source;
+        while let Some(pos) = rest.find(NEEDLE) {
+            let after = &rest[pos + NEEDLE.len()..];
+            let end = after.find('"').expect("unterminated symbol_short! literal");
+            let name = &after[..end];
+            assert!(
+                EXPECTED_TOPICS.contains(&name),
+                "topic {name:?} is emitted by the contract but missing from \
+                 EXPECTED_TOPICS (and likely docs/events.json / docs/events.md)"
+            );
+            rest = &after[end..];
+        }
+    }
+
     // ── TTL constant tests ──────────────────────────────────────────────
 
     #[test]
