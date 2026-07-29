@@ -5,11 +5,14 @@ import { useTranslations } from "next-intl";
 import { Download } from "lucide-react";
 import {
   truncateAddress,
+  fetchWalletTokenState,
   type TokenInfo,
   type TokenHolder,
   type SupplyBreakdown,
+  type WalletTokenState,
 } from "@/lib/stellar";
 import { useSoroban } from "@/hooks/useSoroban";
+import { TokenStatusBanner } from "@/components/TokenStatusBanner";
 import VestingProgress from "./VestingProgress";
 import TransactionHistory from "./TransactionHistory";
 import SupplyBreakdownChart from "@/components/charts/SupplyBreakdownChart";
@@ -19,6 +22,7 @@ import { TransferPanel } from "./components/TransferPanel";
 import { UserPanel } from "./components/UserPanel";
 import { AdminPanel } from "./components/AdminPanel";
 import { useWallet } from "@/app/hooks/useWallet";
+import { useNetwork } from "@/app/providers/NetworkProvider";
 import { HoldersTable, exportHoldersCsv } from "./components/HoldersTable";
 import { InfoCard } from "./components/InfoCard";
 import {
@@ -26,6 +30,8 @@ import {
   LoadingState,
   NotATokenState,
 } from "./components/DashboardUi";
+import { useContractRead } from "./hooks/useContractRead";
+import { useFrozenAccounts } from "./hooks/useFrozenAccounts";
 
 // ---------------------------------------------------------------------------
 // Main dashboard component
@@ -37,11 +43,26 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
   const [holders, setHolders] = useState<TokenHolder[]>([]);
   const [supplyBreakdown, setSupplyBreakdown] =
     useState<SupplyBreakdown | null>(null);
+  const [walletState, setWalletState] = useState<WalletTokenState | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { publicKey } = useWallet();
+  const { publicKey, connected } = useWallet();
+  const { networkConfig } = useNetwork();
   const { fetchTokenInfo, fetchTopHolders, fetchSupplyBreakdown } =
     useSoroban();
+
+  // Frozen state costs one simulation per holder, so only read it for the
+  // admin — they are the only viewer who can act on it.
+  const isAdmin = !!publicKey && tokenInfo?.admin === publicKey;
+  const { read } = useContractRead(contractId);
+  const { frozen: frozenAddresses, refresh: refreshFrozen } =
+    useFrozenAccounts(
+      read,
+      holders.map((h) => h.address),
+      isAdmin,
+    );
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -78,6 +99,24 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (!connected || !publicKey) {
+      setWalletState(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWalletTokenState(contractId, publicKey, networkConfig)
+      .then((state) => {
+        if (!cancelled) setWalletState(state);
+      })
+      .catch(() => {
+        if (!cancelled) setWalletState(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [contractId, publicKey, connected, networkConfig]);
+
   const isInvalidToken = error?.startsWith("Invalid token contract:") ?? false;
 
   if (loading) return <LoadingState />;
@@ -106,6 +145,8 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
           />
         </div>
       </div>
+
+      <TokenStatusBanner tokenInfo={tokenInfo} walletState={walletState} />
 
       {/* Token info grid */}
       <section aria-label={t("sections.tokenDetails")} className="mb-10">
@@ -182,6 +223,9 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
           totalSupply={tokenInfo.totalSupply}
           decimals={tokenInfo.decimals}
           tokenSymbol={tokenInfo.symbol}
+          authorizationRequired={tokenInfo.authorizationRequired}
+          authorizationRevocable={tokenInfo.authorizationRevocable}
+          onFrozenChanged={refreshFrozen}
         />
       )}
 
@@ -211,6 +255,7 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
         </div>
         <HoldersTable
           holders={holders}
+          frozenAddresses={isAdmin ? frozenAddresses : undefined}
           emptyMessage={
             contractId.startsWith("C")
               ? "This is a Soroban-native token, so Horizon cannot enumerate its holders."
@@ -252,6 +297,8 @@ export default function TokenDashboard({ contractId }: { contractId: string }) {
         contractId={contractId}
         tokenSymbol={tokenInfo.symbol}
         tokenDecimals={tokenInfo.decimals}
+        tokenInfo={tokenInfo}
+        walletState={walletState}
       />
     </div>
   );

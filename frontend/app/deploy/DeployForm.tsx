@@ -25,20 +25,45 @@ import { useToast } from "@/app/providers/ToastProvider";
 import { useDeployToken, type DeployTokenError } from "../hooks/useDeployToken";
 import { toBaseUnits } from "@/lib/utils";
 
-const optionalNumber = (schema: z.ZodNumber) =>
-  z.preprocess((value) => {
+const integerString = z
+  .string()
+  .min(1, "Initial supply is required")
+  .regex(/^[0-9]+$/, "Initial supply must be a whole number")
+  .refine((value) => {
+    try {
+      return BigInt(value) > 0n;
+    } catch {
+      return false;
+    }
+  }, { message: "Initial supply must be at least 1" })
+  .max(38, "Initial supply is too large");
+
+const optionalIntegerString = z.preprocess(
+  (value) => {
     if (value === "" || value === null || value === undefined) return undefined;
-    if (typeof value === "number" && Number.isNaN(value)) return undefined;
-    return Number(value);
-  }, schema.optional());
+    return typeof value === "string" ? value.trim() : value;
+  },
+  z
+    .string()
+    .regex(/^[0-9]+$/, "Max supply must be a whole number")
+    .refine((value) => {
+      try {
+        return BigInt(value) > 0n;
+      } catch {
+        return false;
+      }
+    }, { message: "Max supply must be at least 1" })
+    .max(38, "Max supply is too large")
+    .optional(),
+);
 
 const deploySchema = z
   .object({
     name: z.string().min(1, "Token name is required").max(32, "Name too long"),
     symbol: z.string().min(1, "Symbol is required").max(12, "Symbol too long"),
     decimals: z.number().min(0).max(14),
-    initialSupply: z.number().min(1, "Initial supply must be at least 1"),
-    maxSupply: optionalNumber(z.number().min(1, "Max supply must be at least 1")),
+    initialSupply: integerString,
+    maxSupply: optionalIntegerString,
     adminAddress: z
       .string()
       .regex(/^[GC][A-Z2-7]{55}$/, "Invalid Stellar address or contract ID"),
@@ -58,10 +83,14 @@ const deploySchema = z
     twitter: z.string().optional(),
     discord: z.string().optional(),
   })
-  .refine((data) => !data.maxSupply || data.initialSupply <= data.maxSupply, {
-    message: "Initial supply cannot exceed maximum supply",
-    path: ["initialSupply"],
-  });
+  .refine(
+    (data) =>
+      data.maxSupply == null || BigInt(data.initialSupply) <= BigInt(data.maxSupply),
+    {
+      message: "Initial supply cannot exceed maximum supply",
+      path: ["initialSupply"],
+    },
+  );
 
 export type DeployFormData = z.infer<typeof deploySchema>;
 
@@ -101,7 +130,8 @@ export default function DeployForm() {
     mode: "onChange",
     defaultValues: {
       decimals: 7,
-      initialSupply: 0,
+      initialSupply: "",
+      maxSupply: undefined,
       name: "",
       symbol: "",
       adminAddress: publicKey ?? "",
@@ -140,6 +170,11 @@ export default function DeployForm() {
         estimateFee();
       }
     }
+  };
+
+  const scaleSupplyValue = (value: string, decimals: number) => {
+    if (decimals === 0) return BigInt(value);
+    return BigInt(value + "0".repeat(decimals));
   };
 
   const estimateFee = async () => {
@@ -200,8 +235,8 @@ export default function DeployForm() {
         name: data.name,
         symbol: data.symbol,
         decimals: data.decimals,
-        initialSupply: String(data.initialSupply),
-        maxSupply: data.maxSupply != null ? String(data.maxSupply) : undefined,
+        initialSupply: data.initialSupply,
+        maxSupply: data.maxSupply != null ? data.maxSupply : undefined,
         adminAddress: data.adminAddress,
         authorizationRequired: data.authorizationRequired ?? false,
         authorizationRevocable: data.authorizationRevocable ?? false,
