@@ -1123,7 +1123,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           </h2>
         </div>
         {lastTxHash && (
-          
+          <a
             href={`https://stellar.expert/explorer/${networkConfig.network}/tx/${lastTxHash}`}
             target="_blank"
             rel="noopener noreferrer"
@@ -1194,7 +1194,7 @@ export function AdminPanel({ contractId, maxSupply, totalSupply, decimals, token
           maxSupply === "N/A" ||
           (totalSupply &&
             totalSupply !== "N/A" &&
-            parseFloat(totalSupply.replace(/,/g, "")) 
+            parseFloat(totalSupply.replace(/,/g, "")) <
               parseFloat(maxSupply.replace(/,/g, "")))) && (
           <div className="glass-card p-6 flex flex-col hover:border-stellar-500/30 transition-all duration-300 group">
             <div className="flex items-center justify-between mb-6">
