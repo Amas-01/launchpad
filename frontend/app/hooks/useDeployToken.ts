@@ -317,6 +317,7 @@ async function initializeContract(
         authorizationRequiredScVal,
         authorizationRevocableScVal,
         complianceNodeScVal,
+        StellarSdk.xdr.ScVal.scvVoid(),
       ),
     )
     .setTimeout(30)
