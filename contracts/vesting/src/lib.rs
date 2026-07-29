@@ -12,6 +12,14 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, E
 /// this to `extend_ttl` fails the transaction.
 const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
 
+/// Largest schedule amount that can be linearly interpolated without an
+/// `i128` overflow for any valid pair of `u32` ledger sequence numbers.
+///
+/// `_vested_amount` multiplies this amount by the elapsed ledger count. A
+/// schedule can span up to `u32::MAX` ledgers, so keeping the amount at or
+/// below this ceiling makes that intermediate multiplication safe.
+const MAX_VESTING_AMOUNT: i128 = i128::MAX / u32::MAX as i128;
+
 /// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
 /// us a more precise target (e.g. it's already in the past): about a year.
 ///
@@ -144,7 +152,7 @@ impl VestingContract {
             .expect("not initialized");
         admin.require_auth();
 
-        assert!(total_amount > 0, "total_amount must be positive");
+        Self::_validate_total_amount(total_amount);
         assert!(
             end_ledger > cliff_ledger,
             "end_ledger must be after cliff_ledger"
@@ -225,7 +233,7 @@ impl VestingContract {
         for i in 0..schedules.len() {
             let input = schedules.get(i).expect("index out of bounds");
 
-            assert!(input.total_amount > 0, "total_amount must be positive");
+            Self::_validate_total_amount(input.total_amount);
             assert!(
                 input.end_ledger > input.cliff_ledger,
                 "end_ledger must be after cliff_ledger"
@@ -585,6 +593,14 @@ impl VestingContract {
         }
     }
 
+    fn _validate_total_amount(total_amount: i128) {
+        assert!(total_amount > 0, "total_amount must be positive");
+        assert!(
+            total_amount <= MAX_VESTING_AMOUNT,
+            "total_amount exceeds vesting limit"
+        );
+    }
+
     fn _schedule_key(recipient: &Address, index: u32) -> DataKey {
         DataKey::Schedule(recipient.clone(), index)
     }
@@ -668,7 +684,11 @@ impl VestingContract {
         // Linear interpolation between cliff and end
         let elapsed = (current - schedule.cliff_ledger) as i128;
         let duration = (schedule.end_ledger - schedule.cliff_ledger) as i128;
-        schedule.total_amount * elapsed / duration
+        schedule
+            .total_amount
+            .checked_mul(elapsed)
+            .expect("vesting amount multiplication overflow")
+            / duration
     }
 
     fn _recipient_count(env: &Env) -> u32 {
@@ -937,6 +957,37 @@ mod test {
 
         env.ledger().set_sequence_number(150);
         assert_eq!(vested_amount_latest(&client, &recipient), 500);
+    }
+
+    #[test]
+    fn test_vested_amount_is_safe_for_large_amounts_and_long_durations() {
+        let env = Env::default();
+        let recipient = Address::generate(&env);
+        let total_amount = MAX_VESTING_AMOUNT;
+
+        // Exercise the largest valid amount over several long ledger spans.
+        // Each result must remain within the schedule allocation, proving the
+        // interpolation intermediate does not wrap.
+        for end_ledger in [1_000_000u32, u32::MAX - 1, u32::MAX] {
+            let schedule = VestingSchedule {
+                recipient: recipient.clone(),
+                total_amount,
+                cliff_ledger: 0,
+                end_ledger,
+                released: 0,
+                revoked: false,
+            };
+            env.ledger().set_sequence_number(end_ledger - 1);
+            let vested = VestingContract::_vested_amount(&env, &schedule);
+            assert!(vested > 0);
+            assert!(vested <= total_amount);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "total_amount exceeds vesting limit")]
+    fn test_total_amount_above_vesting_limit_is_rejected() {
+        VestingContract::_validate_total_amount(MAX_VESTING_AMOUNT + 1);
     }
 
     #[test]
