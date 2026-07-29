@@ -466,9 +466,16 @@ impl TokenContract {
 
     /// Approve `spender` to spend up to `amount` on behalf of `from`.
     ///
-    /// `expiration_ledger` must be strictly greater than the current ledger
-    /// sequence. The allowance TTL is derived from this value, so callers
-    /// must supply a valid future ledger (SEP-41 requirement).
+    /// When `amount > 0`, `expiration_ledger` must be strictly greater than
+    /// the current ledger sequence. The allowance is stored in temporary
+    /// storage and its TTL is clamped to `env.storage().max_ttl()` to avoid
+    /// exceeding the network-enforced ceiling.
+    ///
+    /// When `amount == 0`, the call is treated as a **revocation**: the
+    /// allowance entry is removed from storage and `expiration_ledger` is
+    /// ignored. This is the canonical, wallet-emitted way to revoke an
+    /// allowance (SEP-41 §4.1) and works regardless of the value passed for
+    /// `expiration_ledger`.
     pub fn approve(
         env: Env,
         from: Address,
@@ -479,27 +486,28 @@ impl TokenContract {
         from.require_auth();
         assert!(amount >= 0, "amount must be non-negative");
 
-        let current_ledger = env.ledger().sequence();
-        assert!(
-            expiration_ledger > current_ledger,
-            "expiration_ledger must be in the future"
-        );
-
-        // Allowances live in temporary storage: expiry *is* the entry's TTL,
-        // so a lapsed allowance is simply gone rather than archived. The
-        // expiration_ledger is stored alongside the amount so `allowance()`
-        // can report 0 for a logically-expired-but-not-yet-evicted entry.
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        let value = AllowanceValue {
-            amount,
-            expiration_ledger,
-        };
-        env.storage().temporary().set(&key, &value);
 
-        let ttl_ledgers = expiration_ledger - current_ledger;
-        env.storage()
-            .temporary()
-            .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+        if amount == 0 {
+            env.storage().temporary().remove(&key);
+        } else {
+            let current_ledger = env.ledger().sequence();
+            assert!(
+                expiration_ledger > current_ledger,
+                "expiration_ledger must be in the future"
+            );
+
+            let value = AllowanceValue {
+                amount,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+
+            let ttl_ledgers = (expiration_ledger - current_ledger).min(env.storage().max_ttl());
+            env.storage()
+                .temporary()
+                .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+        }
 
         env.events()
             .publish((symbol_short!("approve"), from, spender), amount);
@@ -2088,6 +2096,31 @@ mod test {
         // Must revert with the standard "insufficient allowance" message,
         // not an opaque archived-entry failure.
         client.transfer_from(&spender, &admin, &user, &1i128);
+    }
+
+    #[test]
+    fn test_approve_zero_allows_revocation() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        // First set a valid allowance
+        client.approve(&admin, &spender, &100i128, &100u32);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
+
+        // Now revoke it with 0 amount and 0 expiration
+        client.approve(&admin, &spender, &0i128, &0u32);
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+    }
+
+    #[test]
+    fn test_approve_clamped_ttl() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        // Approve with u32::MAX expiration_ledger (very large, exceeds network max_ttl)
+        // Clamping should prevent panic.
+        client.approve(&admin, &spender, &100i128, &u32::MAX);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
     }
 
     #[test]
