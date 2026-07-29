@@ -315,6 +315,10 @@ impl TokenContract {
     /// Holders can still `transfer`, `approve`, `transfer_from`, `burn`,
     /// and `burn_self`. The token becomes trustless / immutable.
     ///
+    /// Any max-balance-per-account cap set via
+    /// [`set_max_balance_per_account`](Self::set_max_balance_per_account) is
+    /// also deactivated — the cap is only enforced while an admin exists.
+    ///
     /// **This action is irreversible.**
     pub fn revoke_admin(env: Env) {
         Self::_require_admin(&env);
@@ -661,6 +665,10 @@ impl TokenContract {
     ///
     /// If set to `p`, then for any transfer/mint to a non-admin recipient:
     /// `balance(recipient) <= total_supply * p / 100`.
+    ///
+    /// The cap is only enforced while an admin exists. After
+    /// [`revoke_admin`](Self::revoke_admin) removes the admin the cap becomes
+    /// inactive so the token remains fully transferable.
     pub fn max_balance_per_account(env: Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::MaxBalancePerAccount)
     }
@@ -670,6 +678,10 @@ impl TokenContract {
     ///
     /// - `None` disables whale protection
     /// - `Some(p)` enables it, where `p` must be between 1 and 100 (inclusive)
+    ///
+    /// The cap is only enforced while an admin exists. After
+    /// [`revoke_admin`](Self::revoke_admin) removes the admin the cap becomes
+    /// inactive so the token remains fully transferable.
     pub fn set_max_balance_per_account(env: Env, max_balance_per_account: Option<u32>) {
         Self::_require_admin(&env);
 
@@ -817,11 +829,13 @@ impl TokenContract {
             return;
         };
 
-        let admin: Address = env
+        let Some(admin) = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
+            .get::<DataKey, Address>(&DataKey::Admin)
+        else {
+            return; // contract is locked; cap no longer enforced
+        };
 
         if to == &admin {
             return;
@@ -1600,17 +1614,30 @@ mod test {
 
     #[test]
     fn test_holder_actions_still_work_after_revoke() {
-        let (_, client, admin, user) = setup();
+        let (env, client, admin, user) = setup();
         // Move some tokens to the user before locking.
         client.transfer(&admin, &user, &1_000i128);
+
+        // Set a max-balance cap — then revoke (which must deactivate the cap).
+        client.set_max_balance_per_account(&Some(50u32));
         client.revoke_admin();
 
         // Transfers, approvals and self-burn must still work.
         client.transfer(&user, &admin, &200i128);
         assert_eq!(client.balance(&user), 800i128);
 
-        client.burn_self(&user, &100i128);
+        // User-to-user transfer also exercises the cap path with no admin present.
+        let user2 = Address::generate(&env);
+        client.transfer(&user, &user2, &100i128);
         assert_eq!(client.balance(&user), 700i128);
+        assert_eq!(client.balance(&user2), 100i128);
+
+        client.approve(&user, &user2, &50i128, &100);
+        client.transfer_from(&user2, &user, &admin, &50i128);
+        assert_eq!(client.balance(&user), 650i128);
+
+        client.burn_self(&user, &100i128);
+        assert_eq!(client.balance(&user), 550i128);
     }
 
     #[test]
