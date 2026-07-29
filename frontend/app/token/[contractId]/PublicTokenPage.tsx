@@ -20,6 +20,7 @@ import {
 import { useSoroban } from "@/hooks/useSoroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { useWallet } from "@/app/hooks/useWallet";
+import { useToast } from "@/app/providers/ToastProvider";
 import { TokenStatusBanner } from "@/components/TokenStatusBanner";
 import InvalidTokenContract from "../../components/InvalidTokenContract";
 
@@ -69,6 +70,7 @@ function ShareButton({
   tokenInfo: TokenInfo | null;
 }) {
   const [copied, setCopied] = useState(false);
+  const toast = useToast();
 
   const handleShare = useCallback(async () => {
     const url = window.location.href;
@@ -86,8 +88,14 @@ function ShareButton({
           url: url,
         });
       } catch (err) {
-        console.log(err);
-        // User cancelled or error occurred
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        toast.show({
+          title: "Share failed",
+          message: err instanceof Error ? err.message : "Could not open share dialog",
+          variant: "error",
+        });
       }
     } else {
       // Fallback to copying URL
@@ -99,7 +107,7 @@ function ShareButton({
         // Clipboard API may be unavailable
       }
     }
-  }, [tokenInfo]);
+  }, [tokenInfo, toast]);
 
   return (
     <button

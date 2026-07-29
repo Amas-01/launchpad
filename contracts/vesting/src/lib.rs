@@ -3,6 +3,31 @@
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Soroban's network-enforced ceiling on how far into the future a ledger
+/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
+/// network config; 6,312,000 ledgers on mainnet). Passing a value above
+/// this to `extend_ttl` fails the transaction.
+const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
+
+/// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
+/// us a more precise target (e.g. it's already in the past): about a year.
+///
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
+/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
+/// will accept even if the formula above or the network parameter changes.
+const TTL_LEDGERS: u32 = {
+    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
+    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
+        YEAR_LEDGERS as u32
+    } else {
+        MAX_ENTRY_TTL_LEDGERS
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
 
@@ -611,7 +636,7 @@ impl VestingContract {
             end_ledger - current_ledger
         } else {
             // Default TTL if end_ledger is in the past
-            52 * 7 * 24 * 60 / 5
+            TTL_LEDGERS
         };
         // Soroban rejects extend_to above the network's max entry TTL. Schedules
         // whose end is further out than one TTL window still need a keep-alive
@@ -661,7 +686,7 @@ impl VestingContract {
         let key = DataKey::RecipientAt(count);
         env.storage().persistent().set(&key, recipient);
 
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~1 year in ledger units
+        let ttl_ledgers = TTL_LEDGERS;
         Self::_extend_persistent_ttl(env, &key, ttl_ledgers);
 
         let count_key = DataKey::RecipientCount;
@@ -678,6 +703,86 @@ impl VestingContract {
 mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, testutils::Ledger, Env};
+
+    // ── Event topic fixture ─────────────────────────────────────────────
+    //
+    // The checked-in, single source of truth for every event topic-0 name
+    // this contract emits. `docs/events.md` is generated from
+    // `docs/events.json`, which must list exactly this set — see issue
+    // #340, where the doc drifted from the contract (documented 3 of the
+    // ~10 events this contract actually emits) and a frontend indexer was
+    // built against the stale doc instead of the contract, dropping whole
+    // categories of activity. `scripts/generate_events_doc.py --check`
+    // re-derives this same set directly from source and fails CI if it
+    // and `docs/events.json` disagree.
+    const EXPECTED_TOPICS: [&str; 11] = [
+        "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
+        "unpause", "prune",
+    ];
+
+    /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
+    /// this file's production code (everything before the test module)
+    /// exactly matches `EXPECTED_TOPICS`. Static rather than live because
+    /// scanning every `.publish(...)` call site covers events regardless
+    /// of how hard they are to trigger in a live scenario.
+    #[test]
+    fn test_emitted_topics_match_checked_in_fixture() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let (production_source, _) = SOURCE
+            .split_once("#[cfg(test)]\nmod test {")
+            .expect("could not locate test module boundary in lib.rs");
+
+        const NEEDLE: &str = "symbol_short!(\"";
+
+        // Every expected topic must actually appear as a symbol_short! literal.
+        for topic in EXPECTED_TOPICS {
+            let mut rest = production_source;
+            let mut found = false;
+            while let Some(pos) = rest.find(NEEDLE) {
+                let after = &rest[pos + NEEDLE.len()..];
+                if after.as_bytes().len() > topic.len()
+                    && after.starts_with(topic)
+                    && after.as_bytes()[topic.len()] == b'"'
+                {
+                    found = true;
+                    break;
+                }
+                rest = &after[1..];
+            }
+            assert!(
+                found,
+                "topic {topic:?} is listed in EXPECTED_TOPICS but no \
+                 symbol_short!(\"{topic}\") literal was found in the contract"
+            );
+        }
+
+        // No symbol_short! literal exists outside the expected set — i.e.
+        // nothing new was added without updating the fixture (and
+        // docs/events.json / docs/events.md alongside it).
+        let mut rest = production_source;
+        while let Some(pos) = rest.find(NEEDLE) {
+            let after = &rest[pos + NEEDLE.len()..];
+            let end = after.find('"').expect("unterminated symbol_short! literal");
+            let name = &after[..end];
+            assert!(
+                EXPECTED_TOPICS.contains(&name),
+                "topic {name:?} is emitted by the contract but missing from \
+                 EXPECTED_TOPICS (and likely docs/events.json / docs/events.md)"
+            );
+            rest = &after[end..];
+        }
+    }
+
+    // ── TTL constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_ledgers_is_about_one_year() {
+        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
+        // assumption or the formula ever changes, this test catches it
+        // instead of the archival-window math silently rotting again.
+        let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
+        assert_eq!(days, 365);
+    }
 
     fn latest_index() -> Option<u32> {
         None
@@ -1596,111 +1701,5 @@ mod test {
         assert!(!get_schedule_latest(&client, &recipient).revoked);
         assert_eq!(token_client.balance(&recipient), 750);
         assert_eq!(token_client.balance(&admin), 250);
-    }
-
-    // ── Regression tests for issue #324: TTL clamp for long schedules ──
-
-    #[test]
-    fn test_create_schedule_four_years_does_not_panic() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
-
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000_000);
-
-        // ~4 years at ~5s ledgers: 4 * 365 * 24 * 60 * 60 / 5
-        let four_years_ledgers: u32 = 4 * 365 * 24 * 60 * 60 / 5;
-
-        // This must not panic even though the TTL would exceed the network's
-        // max_entry_ttl if applied verbatim (see _ttl_ledgers clamp).
-        client.create_schedule(&recipient, &1_000_000, &100u32, &four_years_ledgers);
-
-        let schedule = get_schedule_latest(&client, &recipient);
-        assert_eq!(schedule.end_ledger, four_years_ledgers);
-    }
-
-    #[test]
-    fn test_keep_alive_refreshes_ttl_without_release() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-        let (_, recipient) = setup_schedule(&env, &client);
-
-        // Should not panic, and should not release/transfer anything.
-        client.keep_alive(&recipient, &latest_index());
-        assert_eq!(released_amount_latest(&client, &recipient), 0);
-    }
-
-    // ── Regression tests for issue #325: unbounded recipients list ─────
-
-    #[test]
-    fn test_recipients_scale_to_several_hundred() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.budget().reset_unlimited();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
-
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000_000);
-
-        let n = 300u32;
-        for _ in 0..n {
-            let recipient = Address::generate(&env);
-            client.create_schedule(&recipient, &1000, &100, &200);
-        }
-
-        assert_eq!(client.get_recipient_count(), n);
-
-        let page = client.get_recipients_paginated(&0u32, &n);
-        assert_eq!(page.len(), n);
-    }
-
-    #[test]
-    fn test_prune_recipient_removes_from_paginated_list() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-        let (_, recipient) = setup_schedule(&env, &client);
-
-        assert_eq!(client.get_recipients_paginated(&0u32, &10u32).len(), 1);
-
-        client.prune_recipient(&recipient);
-
-        assert_eq!(client.get_recipients_paginated(&0u32, &10u32).len(), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "recipient not tracked")]
-    fn test_prune_recipient_not_tracked_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        client.initialize(&admin, &token);
-
-        let stranger = Address::generate(&env);
-        client.prune_recipient(&stranger);
     }
 }

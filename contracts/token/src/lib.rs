@@ -6,6 +6,31 @@ use soroban_sdk::{
 };
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Soroban's network-enforced ceiling on how far into the future a ledger
+/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
+/// network config; 6,312,000 ledgers on mainnet). Passing a value above
+/// this to `extend_ttl` fails the transaction.
+const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
+
+/// TTL extension applied to balance/allowance entries so a holder who
+/// never touches their tokens still keeps them live for about a year.
+///
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
+/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
+/// will accept even if the formula above or the network parameter changes.
+const TTL_LEDGERS: u32 = {
+    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
+    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
+        YEAR_LEDGERS as u32
+    } else {
+        MAX_ENTRY_TTL_LEDGERS
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
 
@@ -98,8 +123,14 @@ impl TokenContract {
 
     /// Initialize the token with metadata and an initial supply minted to `admin`.
     ///
-    /// `authorization_required`: when true, recipients must be explicitly authorized
-    /// by the admin before they can receive or hold tokens.
+    /// `admin.require_auth()` is enforced so the caller must prove they control
+    /// the admin address. This prevents a front-runner from setting admin to an
+    /// address they do *not* control. The frontend should **always** pass the
+    /// deployer's own public key as `admin` so that the wallet's signature
+    /// satisfies `require_auth` and the attacker cannot steal the role.
+    ///
+    /// `authorization_required`: when true, recipients must be explicitly
+    /// authorized by the admin before they can receive or hold tokens.
     ///
     /// `authorization_revocable`: when true, the admin may revoke a holder's
     /// authorization, preventing them from receiving further transfers.
@@ -115,13 +146,10 @@ impl TokenContract {
         authorization_revocable: bool,
         compliance_node: Option<Address>,
     ) {
-        // Prevent re-initialization. This must key off a flag that is never
-        // removed — `Admin` is deleted by `revoke_admin`, so checking its
-        // presence would let `initialize` become callable again once the
-        // token has been "locked".
         if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
+        admin.require_auth();
         Self::_require_not_locked(&env);
 
         assert!(decimal <= 18, "decimals must be <= 18");
@@ -181,7 +209,7 @@ impl TokenContract {
         Self::_mint(&env, &to, amount);
 
         // Extend TTL for the balance key to prevent archiving
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let key = DataKey::Balance(to);
         env.storage()
             .persistent()
@@ -226,7 +254,7 @@ impl TokenContract {
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer(&env, &from, &admin, amount);
 
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from.clone());
         let admin_key = DataKey::Balance(admin.clone());
         env.storage()
@@ -237,7 +265,7 @@ impl TokenContract {
             .extend_ttl(&admin_key, ttl_ledgers, ttl_ledgers);
 
         env.events()
-            .publish((symbol_short!("clawback"), from.clone()), amount);
+            .publish((symbol_short!("clawback"), admin, from), amount);
     }
 
     /// Mint `amount` tokens to multiple recipients. Admin only.
@@ -253,7 +281,7 @@ impl TokenContract {
         Self::_require_admin(&env);
         assert!(to.len() == amounts.len(), "mismatching lengths");
         assert!(to.len() <= 100, "batch size exceeds maximum of 100");
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         for i in 0..to.len() {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
@@ -282,9 +310,16 @@ impl TokenContract {
     /// The new admin must call `accept_admin` to finalize the transfer.
     pub fn propose_admin(env: Env, new_admin: Address) {
         Self::_require_admin(&env);
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((symbol_short!("prop_admin"), current_admin, new_admin), ());
     }
 
     /// Accept the admin role. Must be called by the pending admin.
@@ -296,8 +331,15 @@ impl TokenContract {
             .get(&DataKey::PendingAdmin)
             .expect("no pending admin");
         pending.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("set_admin"), old_admin, pending), ());
     }
 
     /// Permanently revoke the admin role and lock the contract.
@@ -311,6 +353,10 @@ impl TokenContract {
     ///
     /// Holders can still `transfer`, `approve`, `transfer_from`, `burn`,
     /// and `burn_self`. The token becomes trustless / immutable.
+    ///
+    /// Any max-balance-per-account cap set via
+    /// [`set_max_balance_per_account`](Self::set_max_balance_per_account) is
+    /// also deactivated — the cap is only enforced while an admin exists.
     ///
     /// **This action is irreversible.**
     pub fn revoke_admin(env: Env) {
@@ -361,7 +407,7 @@ impl TokenContract {
             .persistent()
             .set(&DataKey::AuthorizedHolder(holder.clone()), &true);
         env.events()
-            .publish((symbol_short!("auth"),), (holder, true));
+            .publish((symbol_short!("authorize"), holder), ());
     }
 
     /// Revoke authorization from `holder`. Only allowed when
@@ -378,7 +424,7 @@ impl TokenContract {
             .persistent()
             .remove(&DataKey::AuthorizedHolder(holder.clone()));
         env.events()
-            .publish((symbol_short!("auth"),), (holder, false));
+            .publish((symbol_short!("revoke_auth"), holder), ());
     }
 
     /// Returns `true` if `holder` is authorized to receive tokens.
@@ -420,6 +466,8 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
+        env.events()
+            .publish((symbol_short!("update_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -453,7 +501,7 @@ impl TokenContract {
 
         // Extend TTL for both balance keys to prevent archiving
         // Use a standard TTL extension (e.g., 52 weeks in ledgers)
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -483,8 +531,10 @@ impl TokenContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        Self::_check_paused(&env);
         from.require_auth();
         assert!(amount >= 0, "amount must be non-negative");
+        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
 
@@ -510,7 +560,7 @@ impl TokenContract {
         }
 
         env.events()
-            .publish((symbol_short!("approve"), from, spender), amount);
+            .publish((symbol_short!("approve"), from, spender), (amount, expiration_ledger));
     }
 
     /// Transfer `amount` from `from` to `to` using `spender`'s allowance.
@@ -552,7 +602,7 @@ impl TokenContract {
         Self::_transfer(&env, &from, &to, amount);
 
         // Extend TTL for balance keys to prevent archiving
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -561,6 +611,45 @@ impl TokenContract {
         env.storage()
             .persistent()
             .extend_ttl(&to_key, ttl_ledgers, ttl_ledgers);
+    }
+
+    /// Burn `amount` tokens from `from` using `spender`'s allowance.
+    /// Refuses to run when `from` is frozen so a holder cannot dodge a
+    /// freeze by having an approved spender destroy their tokens.
+    pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        Self::_check_paused(&env);
+        spender.require_auth();
+        assert!(amount > 0, "amount must be positive");
+        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
+        assert!(allowance >= amount, "insufficient allowance");
+
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            env.storage().temporary().remove(&key);
+        }
+
+        Self::_burn(&env, &from, amount);
     }
 
     // ── Read-only getters ───────────────────────────────────────────────
@@ -666,6 +755,10 @@ impl TokenContract {
     ///
     /// If set to `p`, then for any transfer/mint to a non-admin recipient:
     /// `balance(recipient) <= total_supply * p / 100`.
+    ///
+    /// The cap is only enforced while an admin exists. After
+    /// [`revoke_admin`](Self::revoke_admin) removes the admin the cap becomes
+    /// inactive so the token remains fully transferable.
     pub fn max_balance_per_account(env: Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::MaxBalancePerAccount)
     }
@@ -675,6 +768,10 @@ impl TokenContract {
     ///
     /// - `None` disables whale protection
     /// - `Some(p)` enables it, where `p` must be between 1 and 100 (inclusive)
+    ///
+    /// The cap is only enforced while an admin exists. After
+    /// [`revoke_admin`](Self::revoke_admin) removes the admin the cap becomes
+    /// inactive so the token remains fully transferable.
     pub fn set_max_balance_per_account(env: Env, max_balance_per_account: Option<u32>) {
         Self::_require_admin(&env);
 
@@ -822,11 +919,13 @@ impl TokenContract {
             return;
         };
 
-        let admin: Address = env
+        let Some(admin) = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
+            .get::<DataKey, Address>(&DataKey::Admin)
+        else {
+            return; // contract is locked; cap no longer enforced
+        };
 
         if to == &admin {
             return;
@@ -919,8 +1018,13 @@ impl TokenContract {
             .instance()
             .set(&DataKey::TotalSupply, &new_supply);
 
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin revoked");
         env.events()
-            .publish((symbol_short!("mint"), to.clone()), amount);
+            .publish((symbol_short!("mint"), admin, to.clone()), amount);
     }
 
     fn _burn(env: &Env, from: &Address, amount: i128) {
@@ -1074,6 +1178,104 @@ mod test {
     use good_node::{MockComplianceNode, MockComplianceNodeClient};
     use panicking_node::PanickingComplianceNode;
     use wrong_interface::WrongInterfaceContract;
+
+    // ── Event topic fixture ─────────────────────────────────────────────
+    //
+    // The checked-in, single source of truth for every event topic-0 name
+    // this contract emits. `docs/events.md` is generated from
+    // `docs/events.json`, which must list exactly this set — see issue
+    // #340, where the doc silently drifted from the contract (documented
+    // 7 events, contract emitted 15, including a `set_admin` event that
+    // never existed) and a frontend indexer was then built against the
+    // stale doc instead of the contract, dropping whole categories of
+    // activity. `scripts/generate_events_doc.py --check` re-derives this
+    // same set directly from source and fails CI if it and
+    // `docs/events.json` disagree.
+    const EXPECTED_TOPICS: [&str; 15] = [
+        "init",
+        "mint",
+        "burn",
+        "clawback",
+        "transfer",
+        "approve",
+        "revoked",
+        "freeze",
+        "unfreeze",
+        "pause",
+        "unpause",
+        "auth",
+        "upgrade",
+        "set_max_b",
+        "set_cnode",
+    ];
+
+    /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
+    /// this file's production code (everything before the test module)
+    /// exactly matches `EXPECTED_TOPICS`. This is a static check rather
+    /// than a live-invocation one because at least one event (`upgrade`)
+    /// can only be reached by an invocation that succeeds, which requires
+    /// real WASM bytes to be uploaded first — impractical for a unit
+    /// test — so scanning the source for every `.publish(...)` call site
+    /// is the only way to cover every event, including ones that are hard
+    /// to trigger live.
+    #[test]
+    fn test_emitted_topics_match_checked_in_fixture() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let (production_source, _) = SOURCE
+            .split_once("#[cfg(test)]\nmod test {")
+            .expect("could not locate test module boundary in lib.rs");
+
+        const NEEDLE: &str = "symbol_short!(\"";
+
+        // Every expected topic must actually appear as a symbol_short! literal.
+        for topic in EXPECTED_TOPICS {
+            let mut rest = production_source;
+            let mut found = false;
+            while let Some(pos) = rest.find(NEEDLE) {
+                let after = &rest[pos + NEEDLE.len()..];
+                if after.as_bytes().len() > topic.len()
+                    && after.starts_with(topic)
+                    && after.as_bytes()[topic.len()] == b'"'
+                {
+                    found = true;
+                    break;
+                }
+                rest = &after[1..];
+            }
+            assert!(
+                found,
+                "topic {topic:?} is listed in EXPECTED_TOPICS but no \
+                 symbol_short!(\"{topic}\") literal was found in the contract"
+            );
+        }
+
+        // No symbol_short! literal exists outside the expected set — i.e.
+        // nothing new was added without updating the fixture (and
+        // docs/events.json / docs/events.md alongside it).
+        let mut rest = production_source;
+        while let Some(pos) = rest.find(NEEDLE) {
+            let after = &rest[pos + NEEDLE.len()..];
+            let end = after.find('"').expect("unterminated symbol_short! literal");
+            let name = &after[..end];
+            assert!(
+                EXPECTED_TOPICS.contains(&name),
+                "topic {name:?} is emitted by the contract but missing from \
+                 EXPECTED_TOPICS (and likely docs/events.json / docs/events.md)"
+            );
+            rest = &after[end..];
+        }
+    }
+
+    // ── TTL constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_ledgers_is_about_one_year() {
+        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
+        // assumption or the formula ever changes, this test catches it
+        // instead of the archival-window math silently rotting again.
+        let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
+        assert_eq!(days, 365);
+    }
 
     fn setup() -> (Env, TokenContractClient<'static>, Address, Address) {
         let env = Env::default();
@@ -1448,6 +1650,71 @@ mod test {
         client.transfer_from(&spender, &admin, &user, &11i128);
     }
 
+    // ── burn_from tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_burn_from_happy_path() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100_0000000i128, &1000u32);
+        let supply_before = client.total_supply();
+
+        client.burn_from(&spender, &admin, &60_0000000i128);
+
+        assert_eq!(client.allowance(&admin, &spender), 40_0000000i128);
+        assert_eq!(
+            client.balance(&admin),
+            1_000_000_0000000i128 - 60_0000000i128
+        );
+        assert_eq!(client.total_supply(), supply_before - 60_0000000i128);
+        assert_eq!(client.total_burned(), 60_0000000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient allowance")]
+    fn test_burn_from_exceeds_allowance() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &10i128, &1000u32);
+        client.burn_from(&spender, &admin, &11i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_burn_from_blocked_when_frozen() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        client.transfer(&admin, &user, &1_000i128);
+        client.approve(&user, &spender, &1_000i128, &1000u32);
+        client.freeze_account(&user);
+
+        client.burn_from(&spender, &user, &500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_burn_from_rejects_zero() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &1000u32);
+        client.burn_from(&spender, &admin, &0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_burn_from_blocked_when_paused() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &1000u32);
+        client.pause();
+        client.burn_from(&spender, &admin, &10i128);
+    }
+
     #[test]
     fn test_propose_and_accept_admin() {
         let (_, client, _, user) = setup();
@@ -1605,17 +1872,30 @@ mod test {
 
     #[test]
     fn test_holder_actions_still_work_after_revoke() {
-        let (_, client, admin, user) = setup();
+        let (env, client, admin, user) = setup();
         // Move some tokens to the user before locking.
         client.transfer(&admin, &user, &1_000i128);
+
+        // Set a max-balance cap — then revoke (which must deactivate the cap).
+        client.set_max_balance_per_account(&Some(50u32));
         client.revoke_admin();
 
         // Transfers, approvals and self-burn must still work.
         client.transfer(&user, &admin, &200i128);
         assert_eq!(client.balance(&user), 800i128);
 
-        client.burn_self(&user, &100i128);
+        // User-to-user transfer also exercises the cap path with no admin present.
+        let user2 = Address::generate(&env);
+        client.transfer(&user, &user2, &100i128);
         assert_eq!(client.balance(&user), 700i128);
+        assert_eq!(client.balance(&user2), 100i128);
+
+        client.approve(&user, &user2, &50i128, &100);
+        client.transfer_from(&user2, &user, &admin, &50i128);
+        assert_eq!(client.balance(&user), 650i128);
+
+        client.burn_self(&user, &100i128);
+        assert_eq!(client.balance(&user), 550i128);
     }
 
     #[test]
@@ -2098,30 +2378,45 @@ mod test {
         client.transfer_from(&spender, &admin, &user, &1i128);
     }
 
-    #[test]
-    fn test_approve_zero_allows_revocation() {
-        let (env, client, admin, _) = setup();
-        let spender = Address::generate(&env);
+  #[test]
+fn test_approve_zero_allows_revocation() {
+    let (env, client, admin, _) = setup();
+    let spender = Address::generate(&env);
+    // First set a valid allowance
+    client.approve(&admin, &spender, &100i128, &100u32);
+    assert_eq!(client.allowance(&admin, &spender), 100i128);
+    // Now revoke it with 0 amount and 0 expiration
+    client.approve(&admin, &spender, &0i128, &0u32);
+    assert_eq!(client.allowance(&admin, &spender), 0i128);
+}
 
-        // First set a valid allowance
-        client.approve(&admin, &spender, &100i128, &100u32);
-        assert_eq!(client.allowance(&admin, &spender), 100i128);
+#[test]
+fn test_approve_clamped_ttl() {
+    let (env, client, admin, _) = setup();
+    let spender = Address::generate(&env);
+    // Approve with u32::MAX expiration_ledger (very large, exceeds network max_ttl)
+    // Clamping should prevent panic.
+    client.approve(&admin, &spender, &100i128, &u32::MAX);
+    assert_eq!(client.allowance(&admin, &spender), 100i128);
+}
 
-        // Now revoke it with 0 amount and 0 expiration
-        client.approve(&admin, &spender, &0i128, &0u32);
-        assert_eq!(client.allowance(&admin, &spender), 0i128);
-    }
+#[test]
+#[should_panic(expected = "contract is paused")]
+fn test_approve_blocked_when_paused() {
+    let (env, client, admin, _) = setup();
+    let spender = Address::generate(&env);
+    client.pause();
+    client.approve(&admin, &spender, &100i128, &1000u32);
+}
 
-    #[test]
-    fn test_approve_clamped_ttl() {
-        let (env, client, admin, _) = setup();
-        let spender = Address::generate(&env);
-
-        // Approve with u32::MAX expiration_ledger (very large, exceeds network max_ttl)
-        // Clamping should prevent panic.
-        client.approve(&admin, &spender, &100i128, &u32::MAX);
-        assert_eq!(client.allowance(&admin, &spender), 100i128);
-    }
+#[test]
+#[should_panic(expected = "account is frozen")]
+fn test_approve_blocked_when_frozen() {
+    let (env, client, _, user) = setup();
+    let spender = Address::generate(&env);
+    client.freeze_account(&user);
+    client.approve(&user, &spender, &100i128, &1000u32);
+}
 
     #[test]
     fn test_pause_unpause_events() {
