@@ -3,6 +3,31 @@
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Soroban's network-enforced ceiling on how far into the future a ledger
+/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
+/// network config; 6,312,000 ledgers on mainnet). Passing a value above
+/// this to `extend_ttl` fails the transaction.
+const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
+
+/// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
+/// us a more precise target (e.g. it's already in the past): about a year.
+///
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
+/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
+/// will accept even if the formula above or the network parameter changes.
+const TTL_LEDGERS: u32 = {
+    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
+    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
+        YEAR_LEDGERS as u32
+    } else {
+        MAX_ENTRY_TTL_LEDGERS
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
 
@@ -15,7 +40,8 @@ pub enum DataKey {
     IsPaused,
     Schedule(Address, u32),
     ScheduleCount(Address),
-    Recipients,
+    RecipientCount,
+    RecipientAt(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -191,7 +217,6 @@ impl VestingContract {
             .get(&DataKey::TokenContract)
             .expect("not initialized");
 
-        let current_ledger = env.ledger().sequence();
         let mut total_amount: i128 = 0;
         let mut assigned_indexes = Vec::new(&env);
         let mut next_indexes = Map::new(&env);
@@ -239,12 +264,9 @@ impl VestingContract {
             let key = Self::_schedule_key(&input.recipient, schedule_index);
             env.storage().persistent().set(&key, &schedule);
 
-            // Extend TTL for the schedule
-            let ttl_ledgers = if input.end_ledger > current_ledger {
-                input.end_ledger - current_ledger
-            } else {
-                52 * 7 * 24 * 60 / 5
-            };
+            // Extend TTL for the schedule (clamped to the network maximum, see
+            // `_ttl_ledgers`)
+            let ttl_ledgers = Self::_ttl_ledgers(&env, input.end_ledger);
             Self::_extend_persistent_ttl(&env, &key, ttl_ledgers);
             Self::_set_schedule_count(&env, &input.recipient, schedule_index + 1, ttl_ledgers);
 
@@ -285,7 +307,10 @@ impl VestingContract {
 
         // Extend TTL for the schedule to prevent archiving
         // saturating_sub prevents u32 underflow when the schedule has fully vested (current_ledger > end_ledger)
-        let remaining_ledgers = schedule.end_ledger.saturating_sub(env.ledger().sequence());
+        let remaining_ledgers = schedule
+            .end_ledger
+            .saturating_sub(env.ledger().sequence())
+            .min(env.storage().max_ttl());
         if remaining_ledgers > 0 {
             env.storage()
                 .persistent()
@@ -305,6 +330,28 @@ impl VestingContract {
 
         env.events()
             .publish((symbol_short!("release"), recipient), releasable);
+    }
+
+    /// Refresh a schedule's storage TTL without releasing tokens.
+    ///
+    /// Schedules whose remaining duration exceeds the network's maximum
+    /// entry TTL (roughly 180 days) have their storage TTL clamped at
+    /// creation time (see `_ttl_ledgers`). For such long-dated grants,
+    /// call this at least once per TTL window to keep the entry from
+    /// being archived between claims. Can be called by anyone.
+    pub fn keep_alive(env: Env, recipient: Address, index: Option<u32>) {
+        Self::_check_paused(&env);
+        let (key, schedule) = Self::_load_schedule(&env, &recipient, index);
+
+        let remaining_ledgers = schedule
+            .end_ledger
+            .saturating_sub(env.ledger().sequence())
+            .min(env.storage().max_ttl());
+        if remaining_ledgers > 0 {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, remaining_ledgers, remaining_ledgers);
+        }
     }
 
     /// Admin-only: revoke a schedule, send vested portion to recipient,
@@ -456,26 +503,20 @@ impl VestingContract {
             .expect("not initialized")
     }
 
-    /// Return all recipients who have vesting schedules.
-    pub fn get_recipients(env: Env) -> Vec<Address> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Recipients)
-            .unwrap_or(Vec::new(&env))
+    /// Return the number of recipients tracked (including any pruned slots).
+    pub fn get_recipient_count(env: Env) -> u32 {
+        Self::_recipient_count(&env)
     }
 
     /// Return paginated list of recipients with vesting schedules.
     ///
     /// `start` — zero-based offset into the recipients list.
     /// `limit` — maximum number of recipients to return.
+    ///
+    /// Pruned slots (see `prune_recipient`) are omitted from the result, so
+    /// a page may contain fewer than `limit` entries even if more remain.
     pub fn get_recipients_paginated(env: Env, start: u32, limit: u32) -> Vec<Address> {
-        let all_recipients = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Recipients)
-            .unwrap_or(Vec::new(&env));
-
-        let total = all_recipients.len();
+        let total = Self::_recipient_count(&env);
 
         if start >= total {
             return Vec::new(&env);
@@ -486,12 +527,40 @@ impl VestingContract {
         let mut paginated = Vec::new(&env);
         let mut i = start;
         while i < end {
-            if let Some(recipient) = all_recipients.get(i) {
+            if let Some(recipient) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::RecipientAt(i))
+            {
                 paginated.push_back(recipient);
             }
             i += 1;
         }
         paginated
+    }
+
+    /// Admin-only: remove a fully-settled recipient from the enumeration
+    /// index. Does not touch the recipient's schedules — it only prunes the
+    /// enumeration slot(s) so `get_recipients_paginated` stops listing them.
+    pub fn prune_recipient(env: Env, recipient: Address) {
+        Self::_require_admin(&env);
+
+        let total = Self::_recipient_count(&env);
+        let mut i = 0u32;
+        let mut pruned = false;
+        while i < total {
+            let key = DataKey::RecipientAt(i);
+            if let Some(stored) = env.storage().persistent().get::<DataKey, Address>(&key) {
+                if stored == recipient {
+                    env.storage().persistent().remove(&key);
+                    pruned = true;
+                }
+            }
+            i += 1;
+        }
+
+        assert!(pruned, "recipient not tracked");
+        env.events().publish((symbol_short!("prune"),), recipient);
     }
 
     // ── Internals ───────────────────────────────────────────────────────
@@ -563,12 +632,16 @@ impl VestingContract {
 
     fn _ttl_ledgers(env: &Env, end_ledger: u32) -> u32 {
         let current_ledger = env.ledger().sequence();
-        if end_ledger > current_ledger {
+        let desired = if end_ledger > current_ledger {
             end_ledger - current_ledger
         } else {
             // Default TTL if end_ledger is in the past
-            52 * 7 * 24 * 60 / 5
-        }
+            TTL_LEDGERS
+        };
+        // Soroban rejects extend_to above the network's max entry TTL. Schedules
+        // whose end is further out than one TTL window still need a keep-alive
+        // (via `release` or `keep_alive`) at least once per window to stay live.
+        desired.min(env.storage().max_ttl())
     }
 
     fn _extend_persistent_ttl(env: &Env, key: &DataKey, ttl_ledgers: u32) {
@@ -598,29 +671,27 @@ impl VestingContract {
         schedule.total_amount * elapsed / duration
     }
 
-    fn _add_recipient(env: &Env, recipient: &Address) {
-        let mut recipients = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Recipients)
-            .unwrap_or(Vec::new(env));
-
-        // Check if recipient is already in the list
-        for r in recipients.iter() {
-            if r == *recipient {
-                return; // Already tracked, skip
-            }
-        }
-
-        // Add new recipient
-        recipients.push_back(recipient.clone());
+    fn _recipient_count(env: &Env) -> u32 {
         env.storage()
             .persistent()
-            .set(&DataKey::Recipients, &recipients);
+            .get(&DataKey::RecipientCount)
+            .unwrap_or(0)
+    }
 
-        // Extend TTL for the recipients list
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~1 year in ledger units
-        Self::_extend_persistent_ttl(env, &DataKey::Recipients, ttl_ledgers);
+    fn _add_recipient(env: &Env, recipient: &Address) {
+        // `_add_recipient` is only called when `schedule_index == 0`, i.e. the
+        // caller has already established this is the recipient's first
+        // schedule with this contract, so no linear scan is needed here.
+        let count = Self::_recipient_count(env);
+        let key = DataKey::RecipientAt(count);
+        env.storage().persistent().set(&key, recipient);
+
+        let ttl_ledgers = TTL_LEDGERS;
+        Self::_extend_persistent_ttl(env, &key, ttl_ledgers);
+
+        let count_key = DataKey::RecipientCount;
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::_extend_persistent_ttl(env, &count_key, ttl_ledgers);
     }
 }
 
@@ -632,6 +703,86 @@ impl VestingContract {
 mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, testutils::Ledger, Env};
+
+    // ── Event topic fixture ─────────────────────────────────────────────
+    //
+    // The checked-in, single source of truth for every event topic-0 name
+    // this contract emits. `docs/events.md` is generated from
+    // `docs/events.json`, which must list exactly this set — see issue
+    // #340, where the doc drifted from the contract (documented 3 of the
+    // ~10 events this contract actually emits) and a frontend indexer was
+    // built against the stale doc instead of the contract, dropping whole
+    // categories of activity. `scripts/generate_events_doc.py --check`
+    // re-derives this same set directly from source and fails CI if it
+    // and `docs/events.json` disagree.
+    const EXPECTED_TOPICS: [&str; 11] = [
+        "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
+        "unpause", "prune",
+    ];
+
+    /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
+    /// this file's production code (everything before the test module)
+    /// exactly matches `EXPECTED_TOPICS`. Static rather than live because
+    /// scanning every `.publish(...)` call site covers events regardless
+    /// of how hard they are to trigger in a live scenario.
+    #[test]
+    fn test_emitted_topics_match_checked_in_fixture() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let (production_source, _) = SOURCE
+            .split_once("#[cfg(test)]\nmod test {")
+            .expect("could not locate test module boundary in lib.rs");
+
+        const NEEDLE: &str = "symbol_short!(\"";
+
+        // Every expected topic must actually appear as a symbol_short! literal.
+        for topic in EXPECTED_TOPICS {
+            let mut rest = production_source;
+            let mut found = false;
+            while let Some(pos) = rest.find(NEEDLE) {
+                let after = &rest[pos + NEEDLE.len()..];
+                if after.as_bytes().len() > topic.len()
+                    && after.starts_with(topic)
+                    && after.as_bytes()[topic.len()] == b'"'
+                {
+                    found = true;
+                    break;
+                }
+                rest = &after[1..];
+            }
+            assert!(
+                found,
+                "topic {topic:?} is listed in EXPECTED_TOPICS but no \
+                 symbol_short!(\"{topic}\") literal was found in the contract"
+            );
+        }
+
+        // No symbol_short! literal exists outside the expected set — i.e.
+        // nothing new was added without updating the fixture (and
+        // docs/events.json / docs/events.md alongside it).
+        let mut rest = production_source;
+        while let Some(pos) = rest.find(NEEDLE) {
+            let after = &rest[pos + NEEDLE.len()..];
+            let end = after.find('"').expect("unterminated symbol_short! literal");
+            let name = &after[..end];
+            assert!(
+                EXPECTED_TOPICS.contains(&name),
+                "topic {name:?} is emitted by the contract but missing from \
+                 EXPECTED_TOPICS (and likely docs/events.json / docs/events.md)"
+            );
+            rest = &after[end..];
+        }
+    }
+
+    // ── TTL constant tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_ledgers_is_about_one_year() {
+        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
+        // assumption or the formula ever changes, this test catches it
+        // instead of the archival-window math silently rotting again.
+        let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
+        assert_eq!(days, 365);
+    }
 
     fn latest_index() -> Option<u32> {
         None

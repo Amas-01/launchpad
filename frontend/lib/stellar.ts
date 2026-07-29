@@ -32,6 +32,14 @@ export interface TokenInfo {
   complianceNode?: string | null;
   authorizationRequired?: boolean;
   authorizationRevocable?: boolean;
+  isPaused?: boolean;
+  isLocked?: boolean;
+}
+
+/** Per-wallet authorization/freeze state for a token contract. */
+export interface WalletTokenState {
+  isAuthorized: boolean;
+  isFrozen: boolean;
 }
 
 export interface TokenHolder {
@@ -537,6 +545,22 @@ async function _fetchTokenInfo(
     // authorization checks not implemented or accessible; ignore.
   }
 
+  let isPaused = false;
+  try {
+    const pausedVal = await simulateCall(contractId, "is_paused", config);
+    isPaused = Boolean(pausedVal.b());
+  } catch {
+    // is_paused not implemented on this contract; assume not paused.
+  }
+
+  let isLocked = false;
+  try {
+    const lockedVal = await simulateCall(contractId, "is_locked", config);
+    isLocked = Boolean(lockedVal.b());
+  } catch {
+    // is_locked not implemented on this contract; assume not locked.
+  }
+
   return {
     name: decodeString(nameVal),
     symbol: decodeString(symbolVal),
@@ -556,7 +580,47 @@ async function _fetchTokenInfo(
     complianceNode,
     authorizationRequired,
     authorizationRevocable,
+    isPaused,
+    isLocked,
   };
+}
+
+/**
+ * Fetch a specific wallet's authorization/freeze state on a token contract.
+ * Guarded so contracts missing `is_authorized`/`is_frozen` degrade to the
+ * permissive defaults (authorized, not frozen).
+ */
+export async function fetchWalletTokenState(
+  contractId: string,
+  address: string,
+  config: NetworkConfig,
+): Promise<WalletTokenState> {
+  const addressScVal = new StellarSdk.Address(address).toScVal();
+
+  let isAuthorized = true;
+  try {
+    const authVal = await simulateCall(
+      contractId,
+      "is_authorized",
+      config,
+      [addressScVal],
+    );
+    isAuthorized = Boolean(authVal.b());
+  } catch {
+    // is_authorized not implemented; assume authorized.
+  }
+
+  let isFrozen = false;
+  try {
+    const frozenVal = await simulateCall(contractId, "is_frozen", config, [
+      addressScVal,
+    ]);
+    isFrozen = Boolean(frozenVal.b());
+  } catch {
+    // is_frozen not implemented; assume not frozen.
+  }
+
+  return { isAuthorized, isFrozen };
 }
 
 /**
@@ -803,7 +867,8 @@ export async function fetchVestingSchedule(
  * Uses cursor-based pagination to walk past the Soroban RPC retention window.
  */
 /** All event topic names the indexer and live-poll hooks subscribe to. */
-const TRACKED_EVENT_TOPICS = [
+export const TRACKED_EVENT_TOPICS = [
+  "init",
   "transfer",
   "mint",
   "burn",
@@ -813,10 +878,15 @@ const TRACKED_EVENT_TOPICS = [
   "pause",
   "unpause",
   "authorize",
-  "unauthorize",
-  "set_admin",
-  "revoke_admin",
+  "revoke_auth",
+  "revoked",
   "upgrade",
+  "approve",
+  "set_max_b",
+  "set_cnode",
+  "prop_admin",
+  "set_admin",
+  "update_uri",
 ] as const;
 
 type TrackedTopic = (typeof TRACKED_EVENT_TOPICS)[number];
@@ -862,17 +932,30 @@ function decodeActivityEvent(
   switch (typePath) {
     case "mint": {
       if (data) base.amount = decodeI128(data);
-      if (topicStrings.length > 1) {
-        const toVal = toScVal(topicStrings[1]);
+      // SEP-41: topics are ("mint", admin, to)
+      if (topicStrings.length > 2) {
+        const adminVal = toScVal(topicStrings[1]);
+        const toVal = toScVal(topicStrings[2]);
+        if (adminVal) base.from = decodeAddress(adminVal);
         if (toVal) base.to = decodeAddress(toVal);
       }
       break;
     }
-    case "burn":
-    case "clawback": {
+    case "burn": {
       if (data) base.amount = decodeI128(data);
       if (topicStrings.length > 1) {
         const fromVal = toScVal(topicStrings[1]);
+        if (fromVal) base.from = decodeAddress(fromVal);
+      }
+      break;
+    }
+    case "clawback": {
+      if (data) base.amount = decodeI128(data);
+      // SEP-41: topics are ("clawback", admin, from)
+      if (topicStrings.length > 2) {
+        const adminVal = toScVal(topicStrings[1]);
+        const fromVal = toScVal(topicStrings[2]);
+        if (adminVal) base.to = decodeAddress(adminVal);
         if (fromVal) base.from = decodeAddress(fromVal);
       }
       break;
@@ -890,7 +973,7 @@ function decodeActivityEvent(
     case "freeze":
     case "unfreeze":
     case "authorize":
-    case "unauthorize": {
+    case "revoke_auth": {
       // topic[1] = account address being acted on
       if (topicStrings.length > 1) {
         const addrVal = toScVal(topicStrings[1]);
@@ -898,19 +981,36 @@ function decodeActivityEvent(
       }
       break;
     }
-    case "set_admin":
-    case "revoke_admin": {
-      // topic[1] = new/old admin address
-      if (topicStrings.length > 1) {
-        const addrVal = toScVal(topicStrings[1]);
-        if (addrVal) base.subject = decodeAddress(addrVal);
+    case "prop_admin": {
+      // topics are ("prop_admin", current_admin, new_admin)
+      if (topicStrings.length > 2) {
+        const currentVal = toScVal(topicStrings[1]);
+        const newVal = toScVal(topicStrings[2]);
+        if (currentVal) base.from = decodeAddress(currentVal);
+        if (newVal) base.to = decodeAddress(newVal);
       }
       break;
     }
+    case "set_admin": {
+      // topics are ("set_admin", old_admin, new_admin)
+      if (topicStrings.length > 2) {
+        const oldVal = toScVal(topicStrings[1]);
+        const newVal = toScVal(topicStrings[2]);
+        if (oldVal) base.from = decodeAddress(oldVal);
+        if (newVal) base.to = decodeAddress(newVal);
+      }
+      break;
+    }
+    case "revoked":
     case "pause":
     case "unpause":
     case "upgrade":
-      // No address payload; the event itself is the signal
+    case "init":
+    case "approve":
+    case "set_max_b":
+    case "set_cnode":
+    case "update_uri":
+      // No address payload or special handling needed for activity feed
       break;
     default:
       break;
@@ -963,14 +1063,20 @@ export async function fetchTransactionHistory(
 
     item.amount = decodeI128(data);
 
-    if (typePath === "mint" && event.topic.length > 1) {
-      const to = toScVal(event.topic[1]);
+    if (typePath === "mint" && event.topic.length > 2) {
+      // SEP-41: topics are ("mint", admin, to)
+      const admin = toScVal(event.topic[1]);
+      const to = toScVal(event.topic[2]);
+      if (admin) item.from = decodeAddress(admin);
       if (to) item.to = decodeAddress(to);
-    } else if (
-      (typePath === "burn" || typePath === "clawback") &&
-      event.topic.length > 1
-    ) {
+    } else if (typePath === "burn" && event.topic.length > 1) {
       const from = toScVal(event.topic[1]);
+      if (from) item.from = decodeAddress(from);
+    } else if (typePath === "clawback" && event.topic.length > 2) {
+      // SEP-41: topics are ("clawback", admin, from)
+      const admin = toScVal(event.topic[1]);
+      const from = toScVal(event.topic[2]);
+      if (admin) item.to = decodeAddress(admin);
       if (from) item.from = decodeAddress(from);
     } else if (typePath === "transfer" && event.topic.length > 2) {
       const from = toScVal(event.topic[1]);
@@ -1041,8 +1147,10 @@ export async function fetchAccountOperations(
 
       for (const event of events) {
         const decoded = decodeActivityEvent(
-          event.topic,
-          event.value,
+          // IndexedEvent.topic is unknown[]; the decoder re-parses each entry
+          // as an XDR-encoded string, so normalize before handing it over.
+          event.topic.map((t) => String(t)),
+          typeof event.value === "string" ? event.value : undefined,
           {
             id: event.id || `${event.tx_hash}-${event.ledger}`,
             txHash: event.tx_hash,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
-import { ArrowUpDown } from "lucide-react";
+import { ArrowUpDown, Snowflake } from "lucide-react";
 import { type TokenHolder } from "@/lib/stellar";
 import { ExplorerLink } from "@/components/ui/ExplorerLink";
 
@@ -30,10 +30,18 @@ export function exportHoldersCsv(
 export function HoldersTable({
   holders,
   emptyMessage = "No holder data available.",
+  frozenAddresses,
 }: {
   holders: TokenHolder[];
   emptyMessage?: string;
+  /**
+   * Addresses the token contract reports as frozen. When provided, a Status
+   * column appears so an admin can see who is already quarantined without
+   * probing `is_frozen` one address at a time.
+   */
+  frozenAddresses?: Set<string>;
 }) {
+  const showStatus = frozenAddresses !== undefined;
   const [sortField, setSortField] = useState<SortField>("balance");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [searchQuery, setSearchQuery] = useState("");
@@ -228,6 +236,14 @@ export function HoldersTable({
                         <ArrowUpDown className="h-3 w-3" />
                       </span>
                     </th>
+                    {showStatus && (
+                      <th
+                        scope="col"
+                        className={`${thClass} text-right cursor-default`}
+                      >
+                        Status
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -265,6 +281,18 @@ export function HoldersTable({
                           </span>
                         </div>
                       </td>
+                      {showStatus && (
+                        <td className="px-4 py-3 text-right">
+                          {frozenAddresses.has(holder.address) ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
+                              <Snowflake className="h-3 w-3" aria-hidden="true" />
+                              Frozen
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-gray-500">Active</span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

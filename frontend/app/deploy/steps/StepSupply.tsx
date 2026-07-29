@@ -26,6 +26,7 @@ export const StepSupply = ({ control, errors }: StepProps) => {
                         placeholder={t("initialSupplyPlaceholder")}
                         value={field.value}
                         onChange={field.onChange}
+                        allowDecimals={false}
                         error={errors.initialSupply?.message as string}
                     />
                 )}
@@ -40,6 +41,7 @@ export const StepSupply = ({ control, errors }: StepProps) => {
                         placeholder={t("maxSupplyPlaceholder")}
                         value={field.value ?? ""}
                         onChange={field.onChange}
+                        allowDecimals={false}
                         error={errors.maxSupply?.message as string}
                     />
                 )}

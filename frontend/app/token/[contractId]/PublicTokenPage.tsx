@@ -12,11 +12,16 @@ import {
 } from "lucide-react";
 import {
   truncateAddress,
+  fetchWalletTokenState,
   type TokenInfo,
   type TokenHolder,
+  type WalletTokenState,
 } from "@/lib/stellar";
 import { useSoroban } from "@/hooks/useSoroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
+import { useWallet } from "@/app/hooks/useWallet";
+import { useToast } from "@/app/providers/ToastProvider";
+import { TokenStatusBanner } from "@/components/TokenStatusBanner";
 import InvalidTokenContract from "../../components/InvalidTokenContract";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +70,7 @@ function ShareButton({
   tokenInfo: TokenInfo | null;
 }) {
   const [copied, setCopied] = useState(false);
+  const toast = useToast();
 
   const handleShare = useCallback(async () => {
     const url = window.location.href;
@@ -82,8 +88,14 @@ function ShareButton({
           url: url,
         });
       } catch (err) {
-        console.log(err);
-        // User cancelled or error occurred
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        toast.show({
+          title: "Share failed",
+          message: err instanceof Error ? err.message : "Could not open share dialog",
+          variant: "error",
+        });
       }
     } else {
       // Fallback to copying URL
@@ -95,7 +107,7 @@ function ShareButton({
         // Clipboard API may be unavailable
       }
     }
-  }, [tokenInfo]);
+  }, [tokenInfo, toast]);
 
   return (
     <button
@@ -320,8 +332,10 @@ export default function PublicTokenPage({
 }) {
   const { fetchTokenInfo, fetchTopHolders, validateTokenContract } = useSoroban();
   const { networkConfig } = useNetwork();
+  const { publicKey, connected } = useWallet();
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
   const [holders, setHolders] = useState<TokenHolder[]>([]);
+  const [walletState, setWalletState] = useState<WalletTokenState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isValidToken, setIsValidToken] = useState<boolean | null>(null);
@@ -372,6 +386,24 @@ export default function PublicTokenPage({
     loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    if (!connected || !publicKey) {
+      setWalletState(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWalletTokenState(contractId, publicKey, networkConfig)
+      .then((state) => {
+        if (!cancelled) setWalletState(state);
+      })
+      .catch(() => {
+        if (!cancelled) setWalletState(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [contractId, publicKey, connected, networkConfig]);
+
   if (loading) return <LoadingState />;
   
   // Show invalid token component if validation failed
@@ -414,6 +446,8 @@ export default function PublicTokenPage({
           <ShareButton contractId={contractId} tokenInfo={tokenInfo} />
         </div>
       </div>
+
+      <TokenStatusBanner tokenInfo={tokenInfo} walletState={walletState} />
 
       {/* Token info grid */}
       <section aria-label="Token details" className="mb-10">

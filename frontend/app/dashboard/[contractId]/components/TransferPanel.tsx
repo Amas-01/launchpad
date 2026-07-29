@@ -22,6 +22,8 @@ import {
   xdr,
   Address,
 } from "@stellar/stellar-sdk";
+import { getTokenActionBlockedReason } from "@/components/TokenStatusBanner";
+import type { TokenInfo, WalletTokenState } from "@/lib/stellar";
 
 /* ── Validation Schema ────────────────────────────────────────── */
 
@@ -72,13 +74,20 @@ interface TransferPanelProps {
   contractId: string;
   tokenSymbol: string;
   tokenDecimals: number;
+  tokenInfo?: Pick<TokenInfo, "isPaused">;
+  walletState?: WalletTokenState | null;
 }
 
 export function TransferPanel({
   contractId,
   tokenSymbol,
   tokenDecimals,
+  tokenInfo,
+  walletState,
 }: TransferPanelProps) {
+  const blockedReason = tokenInfo
+    ? getTokenActionBlockedReason(tokenInfo, walletState)
+    : null;
   const { signTransaction, publicKey, connected } = useWallet();
   const { networkConfig } = useNetwork();
 
@@ -163,6 +172,11 @@ export function TransferPanel({
   const handleTransfer = async (data: TransferData) => {
     if (!publicKey || !connected) {
       setError("Please connect your wallet first");
+      return;
+    }
+
+    if (blockedReason) {
+      setError(blockedReason);
       return;
     }
 
@@ -379,6 +393,13 @@ export function TransferPanel({
             disabled={loading}
           />
 
+          {blockedReason && !error && (
+            <div className="flex items-start gap-2 p-3 bg-orange-500/10 border border-orange-500/20 rounded-lg">
+              <AlertCircle className="h-4 w-4 text-orange-400 mt-0.5 shrink-0" />
+              <p className="text-sm text-orange-300">{blockedReason}</p>
+            </div>
+          )}
+
           {error && (
             <div className="flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
               <AlertCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
@@ -399,7 +420,7 @@ export function TransferPanel({
             type="submit"
             className="w-full mt-4 shadow-lg shadow-stellar-500/20"
             isLoading={loading}
-            disabled={loading || checkingBalance}
+            disabled={loading || checkingBalance || !!blockedReason}
           >
             {success ? (
               <span className="flex items-center gap-2">
