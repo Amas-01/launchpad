@@ -14,6 +14,12 @@ interface StepProps {
     feeEstimationError?: string | null;
 }
 
+const formatIntegerString = (value?: string | number) => {
+    if (value === undefined || value === null || value === "") return undefined;
+    const str = typeof value === "number" ? String(value) : value;
+    return str.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+};
+
 const SummaryItem = ({ label, value }: { label: string; value: string | number | undefined }) => (
     <div className="flex justify-between py-2 border-b border-white/5">
         <span className="text-gray-400 text-sm">{label}</span>
@@ -56,8 +62,14 @@ export const StepReview = ({ control, estimatedFee, feeEstimationLoading, feeEst
                 <SummaryItem label="Token Name" value={formData.name} />
                 <SummaryItem label="Symbol" value={formData.symbol} />
                 <SummaryItem label="Decimals" value={formData.decimals} />
-                <SummaryItem label="Initial Supply" value={formData.initialSupply !== undefined ? new Intl.NumberFormat('en-US').format(formData.initialSupply) : undefined} />
-                <SummaryItem label="Max Supply" value={formData.maxSupply !== undefined ? new Intl.NumberFormat('en-US').format(formData.maxSupply) : "Unlimited"} />
+                <SummaryItem
+                    label="Initial Supply"
+                    value={formatIntegerString(formData.initialSupply)}
+                />
+                <SummaryItem
+                    label="Max Supply"
+                    value={formData.maxSupply !== undefined ? formatIntegerString(formData.maxSupply) : "Unlimited"}
+                />
                 <SummaryItem label="Admin Type" value={adminModeLabel} />
                 <SummaryItem label="Admin Address" value={formData.adminAddress} />
                 <SummaryItem label="Compliance Node" value={formData.complianceNodeAddress || "None"} />
@@ -106,8 +118,8 @@ export const StepReview = ({ control, estimatedFee, feeEstimationLoading, feeEst
                 <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-xl">
                     <p className="text-xs text-blue-200 leading-relaxed">
                         <strong>Regulated token:</strong> Authorization Required is enabled.
-                        You will need to call <code className="bg-blue-900/40 px-1 rounded">authorize_holder</code> for
-                        each address before it can receive tokens.
+                        Each address must be authorized before it can receive tokens — use the
+                        Holder Authorization card in the token&apos;s Admin Console after deploying.
                         {formData.authorizationRevocable && " Holder authorization can be revoked by the admin at any time."}
                         {formData.complianceNodeAddress && " Transfers will also be checked against the configured compliance node."}
                     </p>

@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    String,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, BytesN, Env, String,
 };
 
 // ---------------------------------------------------------------------------
@@ -31,9 +31,46 @@ pub enum DataKey {
     /// operation (mint, burn_admin, freeze, propose_admin) can
     /// ever succeed again — the token becomes effectively immutable.
     Locked,
+    /// Set once on the first successful `initialize` call and never removed.
+    /// Unlike `Admin` (which `revoke_admin` deletes), this is the sole
+    /// re-initialization guard, so revoking admin can never reopen `initialize`.
+    Initialized,
     AuthorizationRequired,
     AuthorizationRevocable,
     AuthorizedHolder(Address),
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct AllowanceValue {
+    pub amount: i128,
+    pub expiration_ledger: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Typed contract errors.
+///
+/// Only the compliance-node paths use these today. Every cross-contract call
+/// into a compliance node is made with the generated `try_` variant so a
+/// misbehaving, archived, or non-existent node surfaces as one of these codes
+/// instead of letting a raw host error escape and revert the whole invocation
+/// with an opaque failure.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum TokenError {
+    /// The configured compliance node answered `can_trade` with `false`.
+    ComplianceRejected = 1,
+    /// The configured compliance node could not be called, or did not return a
+    /// `bool`. The token fails closed: value-moving operations are blocked
+    /// until an admin repoints or clears the node.
+    ComplianceNodeUnavailable = 2,
+    /// The address passed to `set_compliance_node` did not answer a `can_trade`
+    /// probe, so it was rejected rather than stored.
+    InvalidComplianceNode = 3,
 }
 
 #[contractclient(name = "ComplianceNodeClient")]
@@ -78,10 +115,14 @@ impl TokenContract {
         authorization_revocable: bool,
         compliance_node: Option<Address>,
     ) {
-        // Prevent re-initialization
-        if env.storage().instance().has(&DataKey::Admin) {
+        // Prevent re-initialization. This must key off a flag that is never
+        // removed — `Admin` is deleted by `revoke_admin`, so checking its
+        // presence would let `initialize` become callable again once the
+        // token has been "locked".
+        if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
+        Self::_require_not_locked(&env);
 
         assert!(decimal <= 18, "decimals must be <= 18");
 
@@ -91,6 +132,7 @@ impl TokenContract {
             env.storage().instance().set(&DataKey::MaxSupply, &cap);
         }
 
+        env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Decimals, &decimal);
         env.storage().instance().set(&DataKey::Name, &name);
@@ -127,10 +169,15 @@ impl TokenContract {
     // ── Admin actions ───────────────────────────────────────────────────
 
     /// Mint `amount` tokens to `to`. Admin only.
+    ///
+    /// Subject to the compliance node: issuance is a value-moving path, so a
+    /// node that rejects `to` blocks the mint. See [`Self::_check_compliance`]
+    /// for the scope of the policy.
     pub fn mint(env: Env, to: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
         assert!(amount > 0, "amount must be positive");
+        Self::_check_compliance_issue(&env, &to);
         Self::_mint(&env, &to, amount);
 
         // Extend TTL for the balance key to prevent archiving
@@ -162,6 +209,10 @@ impl TokenContract {
 
     /// Forcefully move `amount` tokens from `from` into the admin balance.
     /// Admin only.
+    ///
+    /// Subject to the compliance node: this moves value between two holder
+    /// addresses, so the node sees it as `from` → admin like any other
+    /// transfer. See [`Self::_check_compliance`] for the scope of the policy.
     pub fn clawback(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -172,6 +223,7 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .expect("admin revoked");
+        Self::_check_compliance(&env, &from, &admin);
         Self::_transfer(&env, &from, &admin, amount);
 
         let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
@@ -191,6 +243,11 @@ impl TokenContract {
     /// Mint `amount` tokens to multiple recipients. Admin only.
     ///
     /// Maximum batch size is 100 to stay within Soroban's compute budget.
+    ///
+    /// Each recipient is checked against the compliance node individually, so
+    /// one rejected recipient reverts the whole batch. Note that a compliance
+    /// node makes the effective batch limit smaller in practice, because every
+    /// entry adds a cross-contract call to the invocation's budget.
     pub fn mint_batch(env: Env, to: soroban_sdk::Vec<Address>, amounts: soroban_sdk::Vec<i128>) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -201,6 +258,7 @@ impl TokenContract {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
             assert!(amount > 0, "amount must be positive");
+            Self::_check_compliance_issue(&env, &recipient);
             Self::_mint(&env, &recipient, amount);
             let key = DataKey::Balance(recipient);
             env.storage()
@@ -427,14 +485,20 @@ impl TokenContract {
             "expiration_ledger must be in the future"
         );
 
+        // Allowances live in temporary storage: expiry *is* the entry's TTL,
+        // so a lapsed allowance is simply gone rather than archived. The
+        // expiration_ledger is stored alongside the amount so `allowance()`
+        // can report 0 for a logically-expired-but-not-yet-evicted entry.
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        env.storage().persistent().set(&key, &amount);
+        let value = AllowanceValue {
+            amount,
+            expiration_ledger,
+        };
+        env.storage().temporary().set(&key, &value);
 
-        // Use the caller-supplied expiration to set the allowance TTL exactly
-        // as the SEP-41 standard requires — no silent fallback.
         let ttl_ledgers = expiration_ledger - current_ledger;
         env.storage()
-            .persistent()
+            .temporary()
             .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
 
         env.events()
@@ -451,10 +515,31 @@ impl TokenContract {
         Self::_check_authorized(&env, &to);
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
-        let allowance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
         assert!(allowance >= amount, "insufficient allowance");
 
-        env.storage().persistent().set(&key, &(allowance - amount));
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            env.storage().temporary().remove(&key);
+        }
 
         Self::_transfer(&env, &from, &to, amount);
 
@@ -479,7 +564,14 @@ impl TokenContract {
 
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         let key = DataKey::Allowance(from, spender);
-        env.storage().persistent().get(&key).unwrap_or(0)
+        match env
+            .storage()
+            .temporary()
+            .get::<DataKey, AllowanceValue>(&key)
+        {
+            Some(v) if v.expiration_ledger >= env.ledger().sequence() => v.amount,
+            _ => 0,
+        }
     }
 
     pub fn admin(env: Env) -> Address {
@@ -599,14 +691,30 @@ impl TokenContract {
     /// Set, update, or remove the optional compliance node address.
     /// Admin only. Pass `None` to remove the compliance node.
     ///
-    /// When setting a compliance node, the provided address must implement
-    /// the `ComplianceNodeInterface` trait with a `can_trade` function.
-    /// No validation is performed on-chain, so ensure the address points to
-    /// a valid compliance contract before setting it.
+    /// The candidate address is **probed before it is stored**: the contract
+    /// calls `can_trade` on it once with its own address on both sides and
+    /// rejects the address with [`TokenError::InvalidComplianceNode`] unless
+    /// the call succeeds and returns a `bool`. The probe's answer is ignored —
+    /// only its callability matters. This is what stops the common bricking
+    /// mistake of pointing the token at a non-contract address, at a contract
+    /// without `can_trade`, or at the token's own address (which fails as
+    /// re-entry).
+    ///
+    /// Clearing the node (`None`) never probes anything, so an admin can always
+    /// recover from a node that has since been archived or has started failing.
     pub fn set_compliance_node(env: Env, node: Option<Address>) {
         Self::_require_admin(&env);
 
         if let Some(addr) = node.clone() {
+            let probe = env.current_contract_address();
+            let client = ComplianceNodeClient::new(&env, &addr);
+            match client.try_can_trade(&probe, &probe) {
+                // Either answer is fine; the node only has to be callable.
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => {
+                    panic_with_error!(&env, TokenError::InvalidComplianceNode)
+                }
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::ComplianceNode, &addr);
@@ -726,6 +834,26 @@ impl TokenContract {
             "max balance per account exceeded"
         );
     }
+    /// Ask the configured compliance node whether `from` → `to` is permitted.
+    ///
+    /// No-op when no node is configured. When one is configured the call is
+    /// made with `try_can_trade`, so a node that panics, has been archived, no
+    /// longer exists, or answers with a non-`bool` is contained and reported as
+    /// [`TokenError::ComplianceNodeUnavailable`] rather than letting a raw host
+    /// error escape.
+    ///
+    /// The policy is **fail closed**: an unreachable node blocks value-moving
+    /// operations. Recovery is always available because `set_compliance_node`
+    /// can clear the node while an admin exists.
+    ///
+    /// # Policy scope
+    ///
+    /// | Operation | Checked | Why |
+    /// | --- | --- | --- |
+    /// | `transfer`, `transfer_from` | yes | holder-to-holder value movement |
+    /// | `mint`, `mint_batch` | yes | issuance into a recipient the node may reject |
+    /// | `clawback` | yes | forced holder-to-admin value movement |
+    /// | `burn`, `burn_admin`, `burn_self` | no | destroys tokens; there is no recipient to gate, and gating burns would let a failing node trap holders' balances |
     fn _check_compliance(env: &Env, from: &Address, to: &Address) {
         let compliance_node: Option<Address> = env
             .storage()
@@ -733,13 +861,25 @@ impl TokenContract {
             .get(&DataKey::ComplianceNode)
             .unwrap_or(None);
 
-        if let Some(node) = compliance_node {
-            let client = ComplianceNodeClient::new(env, &node);
-            assert!(
-                client.can_trade(&from.clone(), &to.clone()),
-                "trade blocked by compliance node"
-            );
+        let Some(node) = compliance_node else {
+            return;
+        };
+
+        let client = ComplianceNodeClient::new(env, &node);
+        match client.try_can_trade(from, to) {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => panic_with_error!(env, TokenError::ComplianceRejected),
+            // `Ok(Err(_))` → the node returned something that is not a `bool`.
+            // `Err(_)`     → the node panicked, is missing, or is not a contract.
+            Ok(Err(_)) | Err(_) => panic_with_error!(env, TokenError::ComplianceNodeUnavailable),
         }
+    }
+
+    /// Compliance check for issuance. Minting has no sending holder, so the
+    /// token contract itself stands in as `from` and the recipient is `to`.
+    fn _check_compliance_issue(env: &Env, to: &Address) {
+        let issuer = env.current_contract_address();
+        Self::_check_compliance(env, &issuer, to);
     }
 
     fn _mint(env: &Env, to: &Address, amount: i128) {
@@ -849,7 +989,83 @@ impl TokenContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::Events as _, Env, IntoVal};
+    use soroban_sdk::{
+        testutils::Address as _, testutils::Events as _, testutils::Ledger as _, Env, IntoVal,
+    };
+
+    // ── Mock compliance nodes ───────────────────────────────────────────
+    //
+    // The repo had no compliance-node implementation anywhere, so the
+    // cross-contract paths in `_check_compliance` / `set_compliance_node`
+    // were untestable. These three cover the behaviours that matter:
+    // a well-behaved allow/deny node, a node that panics, and a contract
+    // that exists but has no `can_trade` at all.
+
+    // Each mock lives in its own module: `#[contractimpl]` emits per-function
+    // items whose names are derived from the method name, so two `can_trade`
+    // implementations cannot share a module.
+
+    /// A well-behaved node. Allows every trade unless a denied address has
+    /// been registered via `deny`, in which case trades touching that address
+    /// are rejected.
+    pub mod good_node {
+        use soroban_sdk::{contract, contractimpl, Address, Env};
+
+        #[contract]
+        pub struct MockComplianceNode;
+
+        #[contractimpl]
+        impl MockComplianceNode {
+            pub fn deny(env: Env, addr: Address) {
+                env.storage().instance().set(&addr, &true);
+            }
+
+            pub fn can_trade(env: Env, from: Address, to: Address) -> bool {
+                let denied = |a: &Address| -> bool {
+                    env.storage()
+                        .instance()
+                        .get::<Address, bool>(a)
+                        .unwrap_or(false)
+                };
+                !denied(&from) && !denied(&to)
+            }
+        }
+    }
+
+    /// A node whose `can_trade` always panics — stands in for an upgraded,
+    /// broken, or budget-exhausting node.
+    pub mod panicking_node {
+        use soroban_sdk::{contract, contractimpl, Address, Env};
+
+        #[contract]
+        pub struct PanickingComplianceNode;
+
+        #[contractimpl]
+        impl PanickingComplianceNode {
+            pub fn can_trade(_env: Env, _from: Address, _to: Address) -> bool {
+                panic!("compliance node exploded");
+            }
+        }
+    }
+
+    /// A contract that exists but does not implement `can_trade`.
+    pub mod wrong_interface {
+        use soroban_sdk::{contract, contractimpl, Env};
+
+        #[contract]
+        pub struct WrongInterfaceContract;
+
+        #[contractimpl]
+        impl WrongInterfaceContract {
+            pub fn unrelated(_env: Env) -> bool {
+                true
+            }
+        }
+    }
+
+    use good_node::{MockComplianceNode, MockComplianceNodeClient};
+    use panicking_node::PanickingComplianceNode;
+    use wrong_interface::WrongInterfaceContract;
 
     // ── Event topic fixture ─────────────────────────────────────────────
     //
@@ -1420,6 +1636,27 @@ mod test {
         client.mint(&user, &1i128);
     }
 
+    // ── Regression test for issue #322: initialize() re-callable after revoke_admin ──
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_initialize_after_revoke_admin_panics() {
+        let (env, client, admin, _) = setup();
+        client.revoke_admin();
+        // Admin storage entry is gone, but Initialized must still block re-init.
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Attacker"),
+            &String::from_str(&env, "EVL"),
+            &1_000_000i128,
+            &None,
+            &false,
+            &false,
+            &None,
+        );
+    }
+
     #[test]
     #[should_panic(expected = "admin revoked: contract is locked")]
     fn test_burn_admin_after_revoke_panics() {
@@ -1909,6 +2146,37 @@ mod test {
         assert_eq!(client.allowance(&admin, &spender), 500i128);
     }
 
+    // ── Regression tests for issue #326: allowance expiry semantics ────
+
+    #[test]
+    fn test_allowance_returns_zero_after_expiry() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &100u32);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
+
+        // Advance past expiration_ledger.
+        env.ledger().set_sequence_number(200);
+
+        // Must read back as 0, not panic with an archived-entry error.
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient allowance")]
+    fn test_transfer_from_after_expiry_reverts_cleanly() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &100u32);
+        env.ledger().set_sequence_number(200);
+
+        // Must revert with the standard "insufficient allowance" message,
+        // not an opaque archived-entry failure.
+        client.transfer_from(&spender, &admin, &user, &1i128);
+    }
+
     #[test]
     fn test_pause_unpause_events() {
         let (env, client, _admin, _) = setup();
@@ -1944,16 +2212,162 @@ mod test {
         );
     }
 
+    // ── Compliance node containment (#327) ──────────────────────────────
+
+    fn register_good_node(env: &Env) -> Address {
+        env.register_contract(None, MockComplianceNode)
+    }
+
     #[test]
     fn test_set_and_remove_compliance_node() {
         let (env, client, _, _) = setup();
-        let node = Address::generate(&env);
+        let node = register_good_node(&env);
 
         client.set_compliance_node(&Some(node.clone()));
         assert_eq!(client.compliance_node(), Some(node.clone()));
 
         client.set_compliance_node(&None);
         assert_eq!(client.compliance_node(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_set_compliance_node_rejects_non_contract_address() {
+        let (env, client, _, _) = setup();
+        // A plain account address is not a contract, so the probe fails and the
+        // address is refused instead of silently bricking every transfer.
+        client.set_compliance_node(&Some(Address::generate(&env)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_set_compliance_node_rejects_contract_without_can_trade() {
+        let (env, client, _, _) = setup();
+        let wrong = env.register_contract(None, WrongInterfaceContract);
+        client.set_compliance_node(&Some(wrong));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_set_compliance_node_rejects_the_token_itself() {
+        let (_, client, _, _) = setup();
+        // The simplest form of the bricking mistake: pointing the token at
+        // itself. The probe re-enters and fails, so it never gets stored.
+        let own = client.address.clone();
+        client.set_compliance_node(&Some(own));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_set_compliance_node_rejects_panicking_node() {
+        let (env, client, _, _) = setup();
+        let node = env.register_contract(None, PanickingComplianceNode);
+        client.set_compliance_node(&Some(node));
+    }
+
+    #[test]
+    fn test_compliance_node_allows_and_blocks_transfers() {
+        let (env, client, admin, user) = setup();
+        let node = register_good_node(&env);
+        let node_client = MockComplianceNodeClient::new(&env, &node);
+
+        client.set_compliance_node(&Some(node.clone()));
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
+
+        node_client.deny(&user);
+        let err = client.try_transfer(&admin, &user, &1_000i128);
+        assert!(err.is_err());
+        assert_eq!(client.balance(&user), 1_000i128);
+    }
+
+    #[test]
+    fn test_broken_compliance_node_is_contained_and_recoverable() {
+        let (env, client, admin, user) = setup();
+
+        // Register a good node, then swap its WASM out from under the token by
+        // pointing at a fresh address that stopped behaving. Simulating the
+        // real hazard: the stored node was valid at set time and is not now.
+        let node = register_good_node(&env);
+        client.set_compliance_node(&Some(node.clone()));
+
+        // Re-register the same contract id with the panicking implementation.
+        env.register_contract(&node, PanickingComplianceNode);
+
+        // Transfers fail closed with a typed error, not a raw host error.
+        let err = client.try_transfer(&admin, &user, &1_000i128);
+        assert_eq!(err, Err(Ok(TokenError::ComplianceNodeUnavailable.into())));
+
+        // ...and the admin can always recover by clearing the node.
+        client.set_compliance_node(&None);
+        assert_eq!(client.compliance_node(), None);
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
+    }
+
+    #[test]
+    fn test_compliance_node_rejection_is_typed() {
+        let (env, client, admin, user) = setup();
+        let node = register_good_node(&env);
+        MockComplianceNodeClient::new(&env, &node).deny(&user);
+        client.set_compliance_node(&Some(node));
+
+        assert_eq!(
+            client.try_transfer(&admin, &user, &1_000i128),
+            Err(Ok(TokenError::ComplianceRejected.into()))
+        );
+    }
+
+    #[test]
+    fn test_compliance_node_gates_mint() {
+        let (env, client, _admin, user) = setup();
+        let node = register_good_node(&env);
+        let node_client = MockComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+
+        client.mint(&user, &500i128);
+        assert_eq!(client.balance(&user), 500i128);
+
+        // A rejected recipient can no longer be minted into.
+        node_client.deny(&user);
+        assert_eq!(
+            client.try_mint(&user, &500i128),
+            Err(Ok(TokenError::ComplianceRejected.into()))
+        );
+        assert_eq!(client.balance(&user), 500i128);
+    }
+
+    #[test]
+    fn test_compliance_node_gates_clawback() {
+        let (env, client, admin, user) = setup();
+        client.transfer(&admin, &user, &1_000i128);
+
+        let node = register_good_node(&env);
+        let node_client = MockComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+
+        node_client.deny(&user);
+        assert_eq!(
+            client.try_clawback(&user, &1_000i128),
+            Err(Ok(TokenError::ComplianceRejected.into()))
+        );
+        assert_eq!(client.balance(&user), 1_000i128);
+    }
+
+    #[test]
+    fn test_compliance_node_does_not_gate_burn() {
+        let (env, client, admin, user) = setup();
+        client.transfer(&admin, &user, &1_000i128);
+
+        let node = register_good_node(&env);
+        let node_client = MockComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+        node_client.deny(&user);
+
+        // Documented policy: burns are out of scope, so a denied holder can
+        // still destroy their own tokens rather than having them trapped.
+        client.burn(&user, &400i128);
+        assert_eq!(client.balance(&user), 600i128);
     }
 
     #[test]
