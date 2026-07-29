@@ -111,7 +111,6 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
       );
 
       // Sign
-      console.log(`Signing burn tx for ${contractId}`);
       const signedTxXdr = await signTransaction(xdr, {
         networkPassphrase: networkConfig.passphrase,
       });
@@ -121,7 +120,6 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
       }
 
       // Submit
-      console.log("Submitting burn transaction...");
       const txHash = await submitTransaction(signedTxXdr);
 
       setLastTxHash(txHash);

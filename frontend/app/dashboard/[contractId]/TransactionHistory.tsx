@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { Download, FileText, Table as TableIcon, Loader2, AlertCircle, ChevronDown } from "lucide-react";
+import { Download, FileText, Loader2, AlertCircle, ChevronDown } from "lucide-react";
 import {
     formatTokenAmount,
     truncateAddress,
@@ -10,7 +10,6 @@ import {
 import { useSoroban } from "@/hooks/useSoroban";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
-import * as XLSX from "xlsx";
 
 interface TransactionHistoryProps {
     contractId: string;
@@ -140,41 +139,6 @@ export default function TransactionHistory({
         setShowExportOptions(false);
     };
 
-    const exportExcel = () => {
-        const exportData = prepareExportData();
-
-        const worksheetData = [
-            ["Token Transaction Report", "", "", "", "", "", ""],
-            ["Symbol", symbol, "", "", "", "", ""],
-            ["Contract ID", contractId, "", "", "", "", ""],
-            ["Generated", new Date().toLocaleString(), "", "", "", "", ""],
-            ["", "", "", "", "", "", ""],
-            ["Summary Statistics", "", "", "", "", "", ""],
-            ["Total Minted", `${stats.totalMinted} ${symbol}`, "", "", "", "", ""],
-            ["Total Recipients", stats.totalRecipients, "", "", "", "", ""],
-            ["", "", "", "", "", "", ""],
-            ["Type", "From", "To", "Amount", "Ledger", "Transaction ID", "Timestamp"]
-        ];
-
-        exportData.forEach(tx => {
-            worksheetData.push([
-                tx.type,
-                tx.from,
-                tx.to,
-                `${tx.amount} ${symbol}`,
-                tx.ledger,
-                tx.transactionId,
-                tx.timestamp
-            ]);
-        });
-
-        const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, "History");
-        XLSX.writeFile(workbook, `${symbol}_transaction_history.xlsx`);
-        setShowExportOptions(false);
-    };
-
     const exportCSV = () => {
         const exportData = prepareExportData();
 
@@ -266,13 +230,6 @@ export default function TransactionHistory({
                             >
                                 <FileText className="h-4 w-4 text-red-400" />
                                 Export as PDF
-                            </button>
-                            <button
-                                onClick={exportExcel}
-                                className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-gray-300 transition-colors hover:bg-white/5 hover:text-white"
-                            >
-                                <TableIcon className="h-4 w-4 text-green-400" />
-                                Export as Excel
                             </button>
                             <button
                                 onClick={exportCSV}
