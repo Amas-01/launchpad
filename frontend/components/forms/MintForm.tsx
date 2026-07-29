@@ -96,7 +96,7 @@ export function MintForm({ adminAddress, onSuccess }: MintFormProps) {
     }
   };
 
-  const onSubmit = async (data: MintFormData) => {
+  const onSubmit = async (_data: MintFormData) => {
     if (!preflightResult?.success) {
       toast.show({
         title: "Pre-flight Check Required",
@@ -108,7 +108,6 @@ export function MintForm({ adminAddress, onSuccess }: MintFormProps) {
 
     setIsSubmitting(true);
     try {
-      console.log("Submitting mint transaction:", data);
       onSuccess?.("0x...");
     } catch (error) {
       console.error("Failed to submit transaction:", error);

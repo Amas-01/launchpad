@@ -146,7 +146,7 @@ export async function fetchIndexedEvents(
   
   // If Mercury is not configured, use Soroban RPC fallback
   if (!mercury) {
-    console.log(
+    console.warn(
       "Mercury indexer not configured. Using Soroban RPC fallback (history may be limited to recent ledgers)."
     );
     return fetchEventsFromRpc(contractId, config, options);
