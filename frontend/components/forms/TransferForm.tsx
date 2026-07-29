@@ -84,7 +84,7 @@ export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
     }
   };
 
-  const onSubmit = async (data: TransferFormData) => {
+  const onSubmit = async (_data: TransferFormData) => {
     if (!preflightResult?.success) {
       toast.show({
         title: "Pre-flight Check Required",
@@ -96,7 +96,6 @@ export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
 
     setIsSubmitting(true);
     try {
-      console.log("Submitting transfer transaction:", data);
       onSuccess?.("0x...");
     } catch (error) {
       console.error("Failed to submit transaction:", error);

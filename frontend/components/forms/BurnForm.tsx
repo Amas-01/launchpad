@@ -84,7 +84,7 @@ export function BurnForm({ adminAddress, onSuccess }: BurnFormProps) {
     }
   };
 
-  const onSubmit = async (data: BurnFormData) => {
+  const onSubmit = async (_data: BurnFormData) => {
     if (!preflightResult?.success) {
       toast.show({
         title: "Pre-flight Check Required",
@@ -96,7 +96,6 @@ export function BurnForm({ adminAddress, onSuccess }: BurnFormProps) {
 
     setIsSubmitting(true);
     try {
-      console.log("Submitting burn transaction:", data);
       onSuccess?.("0x...");
     } catch (error) {
       console.error("Failed to submit transaction:", error);

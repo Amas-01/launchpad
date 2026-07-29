@@ -12,6 +12,7 @@ const eslintConfig = defineConfig([
       "react-hooks/static-components": "off",
       "react-hooks/preserve-manual-memoization": "off",
       "react-hooks/incompatible-library": "off",
+      "no-console": ["error", { "allow": ["warn", "error"] }],
     },
   },
   // Override default ignores of eslint-config-next.
