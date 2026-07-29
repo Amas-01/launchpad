@@ -33,6 +33,14 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
+
       - name: Build WASM
         run: cargo build --target wasm32-unknown-unknown --release
 
@@ -106,6 +114,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
       - name: Lint
         run: npm run lint
