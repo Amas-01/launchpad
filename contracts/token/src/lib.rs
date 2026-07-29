@@ -524,8 +524,10 @@ impl TokenContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        Self::_check_paused(&env);
         from.require_auth();
         assert!(amount >= 0, "amount must be non-negative");
+        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
 
         let current_ledger = env.ledger().sequence();
         assert!(
@@ -2175,6 +2177,24 @@ mod test {
         // Must revert with the standard "insufficient allowance" message,
         // not an opaque archived-entry failure.
         client.transfer_from(&spender, &admin, &user, &1i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_approve_blocked_when_paused() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        client.pause();
+        client.approve(&admin, &spender, &100i128, &1000u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_approve_blocked_when_frozen() {
+        let (env, client, _, user) = setup();
+        let spender = Address::generate(&env);
+        client.freeze_account(&user);
+        client.approve(&user, &spender, &100i128, &1000u32);
     }
 
     #[test]
