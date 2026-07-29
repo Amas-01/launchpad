@@ -605,6 +605,45 @@ impl TokenContract {
             .extend_ttl(&to_key, ttl_ledgers, ttl_ledgers);
     }
 
+    /// Burn `amount` tokens from `from` using `spender`'s allowance.
+    /// Refuses to run when `from` is frozen so a holder cannot dodge a
+    /// freeze by having an approved spender destroy their tokens.
+    pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        Self::_check_paused(&env);
+        spender.require_auth();
+        assert!(amount > 0, "amount must be positive");
+        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
+        assert!(allowance >= amount, "insufficient allowance");
+
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            env.storage().temporary().remove(&key);
+        }
+
+        Self::_burn(&env, &from, amount);
+    }
+
     // ── Read-only getters ───────────────────────────────────────────────
 
     pub fn balance(env: Env, id: Address) -> i128 {
@@ -1514,6 +1553,71 @@ mod test {
 
         client.approve(&admin, &spender, &10i128, &1000u32);
         client.transfer_from(&spender, &admin, &user, &11i128);
+    }
+
+    // ── burn_from tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_burn_from_happy_path() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100_0000000i128, &1000u32);
+        let supply_before = client.total_supply();
+
+        client.burn_from(&spender, &admin, &60_0000000i128);
+
+        assert_eq!(client.allowance(&admin, &spender), 40_0000000i128);
+        assert_eq!(
+            client.balance(&admin),
+            1_000_000_0000000i128 - 60_0000000i128
+        );
+        assert_eq!(client.total_supply(), supply_before - 60_0000000i128);
+        assert_eq!(client.total_burned(), 60_0000000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient allowance")]
+    fn test_burn_from_exceeds_allowance() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &10i128, &1000u32);
+        client.burn_from(&spender, &admin, &11i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_burn_from_blocked_when_frozen() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        client.transfer(&admin, &user, &1_000i128);
+        client.approve(&user, &spender, &1_000i128, &1000u32);
+        client.freeze_account(&user);
+
+        client.burn_from(&spender, &user, &500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_burn_from_rejects_zero() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &1000u32);
+        client.burn_from(&spender, &admin, &0i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_burn_from_blocked_when_paused() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+
+        client.approve(&admin, &spender, &100i128, &1000u32);
+        client.pause();
+        client.burn_from(&spender, &admin, &10i128);
     }
 
     #[test]
