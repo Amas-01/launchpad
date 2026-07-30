@@ -9,6 +9,7 @@ import {
   Loader2,
   Share2,
   ExternalLink,
+  Lock,
 } from "lucide-react";
 import {
   truncateAddress,
@@ -22,6 +23,7 @@ import { useNetwork } from "@/app/providers/NetworkProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import { useToast } from "@/app/providers/ToastProvider";
 import { TokenStatusBanner } from "@/components/TokenStatusBanner";
+import { ContractVerificationBadge } from "@/components/ui/ContractVerificationBadge";
 import InvalidTokenContract from "../../components/InvalidTokenContract";
 
 // ---------------------------------------------------------------------------
@@ -448,6 +450,23 @@ export default function PublicTokenPage({
       </div>
 
       <TokenStatusBanner tokenInfo={tokenInfo} walletState={walletState} />
+
+      {/* Contract verification */}
+      <section aria-label="Contract verification" className="mb-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <ContractVerificationBadge
+            contractId={contractId}
+            networkConfig={networkConfig}
+            isLocked={tokenInfo.isLocked}
+          />
+          {tokenInfo.isLocked && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2.5 py-0.5 text-xs font-medium text-green-400">
+              <Lock className="h-3 w-3" />
+              Immutable
+            </span>
+          )}
+        </div>
+      </section>
 
       {/* Token info grid */}
       <section aria-label="Token details" className="mb-10">

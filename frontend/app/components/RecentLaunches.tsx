@@ -6,6 +6,7 @@ import { Loader2, TrendingUp, ArrowRight } from "lucide-react";
 import Link from "next/link";
 import type { RecentToken } from "@/lib/recentTokens";
 import { truncateAddress } from "@/lib/stellar";
+import { ContractVerificationBadge } from "@/components/ui/ContractVerificationBadge";
 import { EmptyState } from "@/components/ui/EmptyState";
 
 function timeAgo(iso: string): string {
@@ -102,10 +103,17 @@ export function RecentLaunches() {
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-stellar-500/10 text-sm font-bold text-stellar-400">
                   {token.symbol.slice(0, 2)}
                 </div>
-                <div className="min-w-0">
-                  <h3 className="truncate font-semibold text-white">
-                    {token.name}
-                  </h3>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="truncate font-semibold text-white">
+                      {token.name}
+                    </h3>
+                    <ContractVerificationBadge
+                      contractId={token.contractId}
+                      networkConfig={networkConfig}
+                      compact
+                    />
+                  </div>
                   <p className="text-xs text-gray-400">{token.symbol}</p>
                 </div>
               </div>

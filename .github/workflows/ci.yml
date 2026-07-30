@@ -47,13 +47,67 @@ jobs:
       - name: Build WASM
         run: cargo build --target wasm32-unknown-unknown --release
 
-      - name: Report WASM Size
+      - name: Compute WASM hashes & validate manifest
+        run: |
+          MANIFEST="contracts/wasm-manifest.json"
+          WASM_DIR="target/wasm32-unknown-unknown/release"
+          PASS=true
+
+          compute_hash() {
+            sha256sum "$1" | cut -d' ' -f1
+          }
+
+          # Build a lookup of expected hashes from manifest
+          echo "::group::WASM Hash Verification"
+          for wasm in "$WASM_DIR"/*.wasm; do
+            name=$(basename "$wasm" .wasm)
+            # Crate names in manifest: soroban_token -> token, soroban_vesting -> vesting
+            crate_name="${name//_token/}"
+            crate_name="${crate_name//_vesting/}"
+            # Map soroban-token -> token, soroban-vesting -> vesting
+            manifest_key=""
+            case "$name" in
+              *token*) manifest_key="token" ;;
+              *vesting*) manifest_key="vesting" ;;
+              *) manifest_key="$name" ;;
+            esac
+
+            actual_hash=$(compute_hash "$wasm")
+            echo "WASM: $name ($manifest_key)"
+            echo "  Hash: $actual_hash"
+
+            # Get expected hash from manifest
+            expected_hash=$(python3 -c "import json; m=json.load(open('$MANIFEST')); v=m.get('$manifest_key',{}).get('versions',{}); latest=v.get(m.get('$manifest_key',{}).get('latest',''),{}); print(latest.get('wasm_hash',''))" 2>/dev/null || echo "")
+
+            if [ -n "$expected_hash" ]; then
+              echo "  Expected: $expected_hash"
+              if [ "$actual_hash" = "$expected_hash" ]; then
+                echo "  ✅ Match"
+              else
+                echo "  ❌ Mismatch"
+                PASS=false
+              fi
+            else
+              echo "  ⚠️  No expected hash in manifest — add one manually"
+            fi
+          done
+          echo "::endgroup::"
+
+          if [ "$PASS" = "false" ]; then
+            echo "WASM hashes do not match manifest. Did the contract code change?"
+            echo "Run: sha256sum target/wasm32-unknown-unknown/release/*.wasm"
+            echo "Then update contracts/wasm-manifest.json with the new hashes."
+            exit 1
+          fi
+
+      - name: Report WASM Size & Hashes
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
+            const crypto = require('crypto');
             const wasmDir = 'target/wasm32-unknown-unknown/release';
             
             if (!fs.existsSync(wasmDir)) {
@@ -64,11 +118,14 @@ jobs:
             const files = fs.readdirSync(wasmDir);
             const wasmFiles = files.filter(f => f.endsWith('.wasm'));
             
-            let message = '### 📦 WASM Size Report\n\n| Contract | Size |\n| :--- | :--- |\n';
+            let message = '### 📦 WASM Report\n\n| Contract | Size | SHA256 Hash |\n| :--- | ---: | :--- |\n';
             for (const file of wasmFiles) {
-              const stats = fs.statSync(path.join(wasmDir, file));
+              const filePath = path.join(wasmDir, file);
+              const stats = fs.statSync(filePath);
               const size = (stats.size / 1024).toFixed(2);
-              message += `| \`${file}\` | ${size} KB |\n`;
+              const buf = fs.readFileSync(filePath);
+              const hash = crypto.createHash('sha256').update(buf).digest('hex');
+              message += `| \`${file}\` | ${size} KB | \`${hash}\` |\n`;
             }
             
             // Post result as PR comment
@@ -79,7 +136,7 @@ jobs:
             });
             
             const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && comment.body.includes('WASM Size Report')
+              comment.user.type === 'Bot' && comment.body.includes('WASM Report')
             );
             
             if (botComment) {
