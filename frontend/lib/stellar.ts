@@ -863,6 +863,36 @@ export async function fetchVestingSchedule(
 }
 
 /**
+ * Fetch the vested amount for a recipient's schedule directly from the
+ * contract's `vested_amount` getter.
+ *
+ * This is the authoritative value — prefer it over any client-side
+ * replication of the vesting formula. The on-chain formula is the source
+ * of truth and may change (see issues #356, #357).
+ */
+export async function fetchVestedAmount(
+  vestingContractId: string,
+  recipient: string,
+  config: NetworkConfig,
+  scheduleIndex?: number,
+): Promise<string> {
+  const resolved = await resolveVestingScheduleIndex({
+    vestingContractId,
+    recipient,
+    config,
+    scheduleIndex,
+  });
+  const recipientScVal = new StellarSdk.Address(recipient).toScVal();
+  const result = await simulateCall(
+    vestingContractId,
+    "vested_amount",
+    config,
+    [recipientScVal, toU32ScVal(resolved.scheduleIndex)],
+  );
+  return decodeI128(result);
+}
+
+/**
  * Fetch transaction history (events) for a token contract via the Mercury indexer.
  * Uses cursor-based pagination to walk past the Soroban RPC retention window.
  */
