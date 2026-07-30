@@ -5,9 +5,10 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
-  fetchScheduleCount,
+  fetchAllVestingSchedules,
   fetchVestingInfo,
   buildReleaseTx,
+  buildReleaseAllTx,
   submitTx,
   formatTokenAmount,
   truncateAddress,
@@ -51,16 +52,17 @@ export function ClaimVesting() {
     setLoading(true);
 
     try {
-      const count = await fetchScheduleCount(trimmed, publicKey);
+      // Use get_all_schedules (single contract call, not N+1)
+      const allSchedules = await fetchAllVestingSchedules(trimmed, publicKey);
 
-      if (count === 0) {
+      if (allSchedules.length === 0) {
         setError("No vesting schedule found for your wallet on this contract.");
         return;
       }
 
-      // Fetch all schedules in parallel
-      const infos = await Promise.all(
-        Array.from({ length: count }, (_, i) =>
+      // Build VestingInfo for each schedule
+      const infos: VestingInfo[] = await Promise.all(
+        allSchedules.map((_, i) =>
           fetchVestingInfo(trimmed, publicKey, i),
         ),
       );
@@ -136,6 +138,42 @@ export function ClaimVesting() {
     [connected, publicKey, schedules, contractId, signTransaction, toast],
   );
 
+  /* ── Release all unlocked tokens across all schedules ──────────────── */
+  const [releasingAll, setReleasingAll] = useState(false);
+
+  const handleReleaseAll = useCallback(async () => {
+    if (!connected || !publicKey) return;
+    setReleasingAll(true);
+    try {
+      const xdr = await buildReleaseAllTx(contractId.trim(), publicKey, publicKey);
+      const signedXdr = await signTransaction(xdr);
+      await submitTx(signedXdr);
+      toast.show({
+        title: "Success",
+        message: "All tokens released successfully!",
+        variant: "success",
+      });
+      // Refresh all schedules
+      const allSchedules = await fetchAllVestingSchedules(contractId.trim(), publicKey);
+      const infos: VestingInfo[] = await Promise.all(
+        allSchedules.map((_, i) =>
+          fetchVestingInfo(contractId.trim(), publicKey, i),
+        ),
+      );
+      setSchedules(infos);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : "Release transaction failed";
+      toast.show({
+        title: "Release Failed",
+        message: msg,
+        variant: "error",
+      });
+    } finally {
+      setReleasingAll(false);
+    }
+  }, [connected, publicKey, contractId, signTransaction, toast]);
+
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
     <>
@@ -203,6 +241,19 @@ export function ClaimVesting() {
               onRelease={() => handleRelease(idx)}
             />
           ))}
+
+          {/* ── Release all button (when multiple schedules) ──────────── */}
+          {schedules.length > 1 && (
+            <Button
+              onClick={handleReleaseAll}
+              isLoading={releasingAll}
+              disabled={releasingAll || releasingIndex !== null}
+              className="w-full mt-4"
+              variant="secondary"
+            >
+              Release All Schedules
+            </Button>
+          )}
         </div>
       )}
     </>
