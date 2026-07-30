@@ -1024,7 +1024,7 @@ impl TokenContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin revoked");
+            .unwrap_or_else(|| env.current_contract_address());
         env.events()
             .publish((symbol_short!("mint"), admin, to.clone()), amount);
     }
