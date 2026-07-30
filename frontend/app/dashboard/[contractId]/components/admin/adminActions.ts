@@ -1,5 +1,5 @@
 import { rpc, Address, xdr } from "@stellar/stellar-sdk";
-import { addressToScVal, i128ToScVal, nativeToScVal } from "@/lib/soroban";
+import { addressToScVal, i128ToScVal, nativeToScVal, daysToLedgers } from "@/lib/soroban";
 import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 import type { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import type { BatchMintEntry } from "@/lib/batch";
@@ -30,8 +30,6 @@ import type {
  * Adding a capability means adding one entry here plus the UI that calls it.
  */
 
-/** Soroban ledgers per day, assuming 5-second ledgers. */
-const LEDGERS_PER_DAY = 17280;
 
 type Simulator = ReturnType<typeof useTransactionSimulator>;
 
@@ -125,7 +123,7 @@ function indexToScVal(scheduleIndex: string): xdr.ScVal {
 /** "N days from now" as an absolute ledger sequence. */
 async function ledgerInDays(server: rpc.Server, days: string | number) {
   const { sequence } = await server.getLatestLedger();
-  return sequence + Math.round(Number(days) * LEDGERS_PER_DAY);
+  return daysToLedgers(days, sequence);
 }
 
 type AdminActionRegistry = {
@@ -236,8 +234,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Vesting",
     resolve: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
 
       return {
         contractId: data.vestingContract,
@@ -252,8 +249,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     },
     preflight: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
       return ctx.simulator.checkCreateSchedule(
         data.vestingContract,
         data.recipient,

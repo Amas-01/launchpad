@@ -8,6 +8,14 @@ import {
 
 export { nativeToScVal, scValToNative };
 
+/** Soroban ledgers per day, assuming 5-second ledgers. */
+export const LEDGERS_PER_DAY = 17280;
+
+export function daysToLedgers(days: number | string, currentLedger?: number): number {
+  const ledgers = Math.round(Number(days) * LEDGERS_PER_DAY);
+  return currentLedger !== undefined ? currentLedger + ledgers : ledgers;
+}
+
 /**
  * Build a Soroban invocation transaction.
  */
