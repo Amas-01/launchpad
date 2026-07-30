@@ -38,6 +38,7 @@ pub enum DataKey {
     PendingAdmin,
     TokenContract,
     IsPaused,
+    TotalCommitted,
     Schedule(Address, u32),
     ScheduleCount(Address),
     RecipientCount,
@@ -62,6 +63,14 @@ pub struct ScheduleInput {
     pub total_amount: i128,
     pub cliff_ledger: u32,
     pub end_ledger: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct Solvency {
+    pub token_balance: i128,
+    pub total_committed: i128,
+    pub solvent: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +172,8 @@ impl VestingContract {
         // Atomically transfer tokens from admin to this contract
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
+        Self::_increase_total_committed(&env, total_amount);
+        Self::_assert_solvent(&env, &token_addr);
 
         let schedule = VestingSchedule {
             recipient: recipient.clone(),
@@ -245,6 +256,8 @@ impl VestingContract {
         // Phase 2: Transfer total amount from admin to contract in one transaction
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
+        Self::_increase_total_committed(&env, total_amount);
+        Self::_assert_solvent(&env, &token_addr);
 
         // Phase 3: Create all schedules
         let mut created_count: u32 = 0;
@@ -304,6 +317,7 @@ impl VestingContract {
 
         schedule.released += releasable;
         env.storage().persistent().set(&key, &schedule);
+        Self::_decrease_total_committed(&env, releasable);
 
         // Extend TTL for the schedule to prevent archiving
         // saturating_sub prevents u32 underflow when the schedule has fully vested (current_ledger > end_ledger)
@@ -367,11 +381,13 @@ impl VestingContract {
         let vested = Self::_vested_amount(&env, &schedule);
         let releasable = vested - schedule.released;
         let unvested = schedule.total_amount - vested;
+        let committed = schedule.total_amount - schedule.released;
 
         // Update schedule state
         schedule.revoked = true;
         schedule.released = vested; // All vested tokens are now accounted for as released (or being released)
         env.storage().persistent().set(&key, &schedule);
+        Self::_decrease_total_committed(&env, committed);
 
         let token_addr: Address = env
             .storage()
@@ -452,6 +468,28 @@ impl VestingContract {
     pub fn released_amount(env: Env, recipient: Address, index: Option<u32>) -> i128 {
         let (_, schedule) = Self::_load_schedule(&env, &recipient, index);
         schedule.released
+    }
+
+    /// Total tokens still committed to active vesting schedules.
+    pub fn total_committed(env: Env) -> i128 {
+        Self::_total_committed(&env)
+    }
+
+    /// Compare the vesting contract's live token balance to outstanding grants.
+    pub fn solvency(env: Env) -> Solvency {
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenContract)
+            .expect("not initialized");
+        let total_committed = Self::_total_committed(&env);
+        let token_balance = Self::_token_balance(&env, &token_addr);
+
+        Solvency {
+            token_balance,
+            total_committed,
+            solvent: token_balance >= total_committed,
+        }
     }
 
     /// Returns `true` if the contract is currently paused.
@@ -600,6 +638,42 @@ impl VestingContract {
         let key = DataKey::ScheduleCount(recipient.clone());
         env.storage().persistent().set(&key, &count);
         Self::_extend_persistent_ttl(env, &key, ttl_ledgers);
+    }
+
+    fn _total_committed(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalCommitted)
+            .unwrap_or(0)
+    }
+
+    fn _set_total_committed(env: &Env, amount: i128) {
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCommitted, &amount);
+    }
+
+    fn _increase_total_committed(env: &Env, amount: i128) {
+        let total = Self::_total_committed(env)
+            .checked_add(amount)
+            .expect("total committed overflow");
+        Self::_set_total_committed(env, total);
+    }
+
+    fn _decrease_total_committed(env: &Env, amount: i128) {
+        Self::_set_total_committed(env, Self::_total_committed(env).saturating_sub(amount));
+    }
+
+    fn _token_balance(env: &Env, token_addr: &Address) -> i128 {
+        let token_client = soroban_sdk::token::Client::new(env, token_addr);
+        token_client.balance(&env.current_contract_address())
+    }
+
+    fn _assert_solvent(env: &Env, token_addr: &Address) {
+        assert!(
+            Self::_token_balance(env, token_addr) >= Self::_total_committed(env),
+            "vesting contract underfunded"
+        );
     }
 
     fn _resolve_schedule_index(env: &Env, recipient: &Address, index: Option<u32>) -> u32 {
@@ -911,6 +985,108 @@ mod test {
         assert_eq!(schedule.end_ledger, 200);
         assert_eq!(schedule.released, 0);
         assert!(!schedule.revoked);
+    }
+
+    #[test]
+    fn test_total_committed_tracks_schedule_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &5_000);
+
+        assert_eq!(client.total_committed(), 0);
+
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        assert_eq!(client.total_committed(), 1_000);
+        assert_eq!(token_client.balance(&contract_id), 1_000);
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 1_000,
+                total_committed: 1_000,
+                solvent: true,
+            }
+        );
+
+        env.ledger().set_sequence_number(150);
+        release_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 500);
+        assert_eq!(token_client.balance(&contract_id), 500);
+
+        client.create_schedule(&other, &300, &200, &300);
+        assert_eq!(client.total_committed(), 800);
+        assert_eq!(token_client.balance(&contract_id), 800);
+
+        revoke_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 300);
+        assert_eq!(token_client.balance(&contract_id), 300);
+    }
+
+    #[test]
+    fn test_solvency_reports_external_token_drain() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &1_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
+
+        // Models any token-side admin action that drains already committed funds
+        // from the vesting contract, such as clawback on a clawbackable token.
+        token_client.transfer(&contract_id, &admin, &400);
+
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 600,
+                total_committed: 1_000,
+                solvent: false,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "vesting contract underfunded")]
+    fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &2_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        token_client.transfer(&contract_id, &admin, &400);
+
+        client.create_schedule(&other, &100, &100, &200);
     }
 
     #[test]
