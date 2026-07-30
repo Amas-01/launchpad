@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/Input";
 import { AlertCircle, Wallet, RefreshCw } from "lucide-react";
 import type { AllowanceInfo } from "@/components/ui/AllowanceCard";
 import {
-  buildApproveTransaction,
+  buildRevokeAllowanceTransaction,
   fetchApprovedSpendersFromEvents,
   fetchCurrentLedger,
   fetchTokenDecimals,
@@ -102,12 +102,10 @@ export function AllowancesPage({
       return;
     }
 
-    const xdr = await buildApproveTransaction({
+    const xdr = await buildRevokeAllowanceTransaction({
       tokenContractId: contractId,
       ownerAddress: publicKey,
       spenderAddress,
-      amount: BigInt(0),
-      expirationLedger: 1000,
       config: networkConfig,
     });
 

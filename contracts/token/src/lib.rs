@@ -540,6 +540,10 @@ impl TokenContract {
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
 
+        // NOTE: frontend clients (buildRevokeAllowanceArgs) pass expiration_ledger = 0
+        // when revoking an allowance.  The 0 is safe because the branch below ignores
+        // expiration_ledger when amount == 0.  Do NOT add an assertion on
+        // expiration_ledger here without also updating the frontend.
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
