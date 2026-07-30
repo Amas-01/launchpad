@@ -23,29 +23,32 @@ Built for founders, DAOs, and developers who need a clean interface to launch to
 | Layer | Tech |
 |---|---|
 | Smart Contracts | Rust + Soroban SDK |
-| Frontend | Next.js 14 + TypeScript |
+| Frontend | Next.js 16 (16.1.6) + React 19 + TypeScript |
 | Styling | Tailwind CSS |
 | Wallet | Freighter API |
 | RPC | Stellar Horizon + Soroban RPC |
-| Testing | Soroban CLI + Jest + Playwright |
+| Testing | Soroban CLI + Jest |
 
 ---
 
 ## 📁 Project Structure
-
-```
 soroban-token-launchpad/
 ├── contracts/
 │   ├── token/              # SEP-41 token contract (Rust)
 │   └── vesting/            # Vesting schedule contract (Rust)
 ├── frontend/
 │   ├── app/                # Next.js app router pages
+│   │   ├── allowances/     # Allowance management route
+│   │   ├── api/            # Internal API handlers
+│   │   ├── claim/          # Claiming portal route
+│   │   └── my-account/     # Account management route
 │   ├── components/         # UI components
 │   ├── hooks/              # Stellar/Soroban React hooks
-│   └── lib/                # Contract clients & utilities
+│   ├── lib/                # Contract clients & utilities
+│   └── messages/           # Localization & message catalogs
 ├── scripts/                # Deploy & keygen scripts
 └── docs/                   # Architecture & event schema docs
-```
+
 
 ---
 
@@ -54,43 +57,29 @@ soroban-token-launchpad/
 ### Prerequisites
 
 - Node.js 18+
-- Rust + `soroban-cli`
+- Rust + `stellar-cli`
 - Freighter browser extension
 
 ### Install
 
 ```bash
-git clone https://github.com/your-org/soroban-token-launchpad
-cd soroban-token-launchpad
+git clone [https://github.com/soropad/launchpad.git](https://github.com/soropad/launchpad.git)
+cd launchpad/frontend
 npm install
-```
-
-### Run locally
-
-```bash
+Run locally
+Bash
 # Build contracts
-cd contracts && soroban contract build
+cd contracts && stellar contract build
 
 # Start frontend
 cd frontend && npm run dev
-```
-
-### Deploy to testnet
-
-```bash
+Deploy to testnet
+Bash
 npm run deploy:testnet
-```
+🤝 Contributing
+Contributions are welcome! Many issues are tagged good first issue and available through the Stellar Wave Program on Drips.
 
----
+See CONTRIBUTING.md for setup and PR guidelines.
 
-## 🤝 Contributing
-
-Contributions are welcome! Many issues are tagged `good first issue` and available through the [Stellar Wave Program on Drips](https://www.drips.network/wave).
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup and PR guidelines.
-
----
-
-## 📄 License
-
+📄 License
 MIT
