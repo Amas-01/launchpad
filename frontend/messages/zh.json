@@ -190,7 +190,7 @@
       "noData": "暂无持有人数据。",
       "sorobanNote": "Soroban 原生代币需要索引器才能完整枚举持有人。",
       "sorobanEmpty": "这是 Soroban 原生代币，Horizon 无法枚举其持有人。",
-      "noMatching": "未找到匹配 "{query}" 的持有人",
+      "noMatching": "未找到匹配 \"{query}\" 的持有人",
       "foundOf": "找到 {filtered} / {holders} 个持有人",
       "frozen": "已冻结",
       "active": "活跃",
@@ -293,6 +293,7 @@
     "successTitle": "成功",
     "successMessage": "计划 {index}：代币释放成功！",
     "releaseFailed": "释放失败",
+    "genericReleaseError": "释放交易失败",
     "vestingProgressAria": "计划 {index} 的归属进度"
   },
   "myAccount": {

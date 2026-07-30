@@ -227,6 +227,7 @@ function ScheduleCard({
   releasing: boolean;
   onRelease: () => void;
 }) {
+  const t = useTranslations("claim");
   const { schedule } = info;
 
   const progressPct =

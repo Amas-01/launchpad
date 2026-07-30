@@ -182,6 +182,7 @@ function HoldersTable({
   holders: TokenHolder[];
   emptyMessage?: string;
 }) {
+  const t = useTranslations("token");
   const [sortField, setSortField] = useState<SortField>("balance");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 

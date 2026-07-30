@@ -190,7 +190,7 @@
       "noData": "Aucune donnée de détenteur disponible.",
       "sorobanNote": "Les tokens natifs de Soroban nécessitent un indexeur pour l'énumération complète des détenteurs.",
       "sorobanEmpty": "Ceci est un token natif de Soroban, donc Horizon ne peut pas énumérer ses détenteurs.",
-      "noMatching": "Aucun détenteur trouvé correspondant à "{query}"",
+      "noMatching": "Aucun détenteur trouvé correspondant à \"{query}\"",
       "foundOf": "{filtered} trouvés sur {holders} détenteurs",
       "frozen": "Gelé",
       "active": "Actif",
@@ -293,6 +293,7 @@
     "successTitle": "Succès",
     "successMessage": "Calendrier {index} : tokens libérés avec succès !",
     "releaseFailed": "Échec de la Libération",
+    "genericReleaseError": "Échec de la transaction de libération",
     "vestingProgressAria": "Progression du vesting pour le calendrier {index}"
   },
   "myAccount": {

@@ -293,6 +293,7 @@
     "successTitle": "Éxito",
     "successMessage": "Calendario {index}: ¡tokens liberados exitosamente!",
     "releaseFailed": "Error al Liberar",
+    "genericReleaseError": "Error en la transacción de liberación",
     "vestingProgressAria": "Progreso de vesting para el calendario {index}"
   },
   "myAccount": {
