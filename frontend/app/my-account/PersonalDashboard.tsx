@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useTranslations } from "next-intl";
 import {
   AlertCircle,
   Flame,
@@ -39,6 +40,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 // ---------------------------------------------------------------------------
 
 export default function PersonalDashboard() {
+  const t = useTranslations("myAccount");
   const { connected, publicKey, connect, signTransaction } = useWallet();
   const {
     fetchVestingSchedule,
@@ -109,7 +111,7 @@ export default function PersonalDashboard() {
       setImportContractId("");
       loadTrackedTokens();
     } catch {
-      setImportError("Could not find token. Check the contract ID.");
+      setImportError(t("importError"));
     } finally {
       setImportLoading(false);
     }
