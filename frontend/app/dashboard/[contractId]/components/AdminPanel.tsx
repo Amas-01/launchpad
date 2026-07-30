@@ -16,6 +16,7 @@ import { MintCard } from "./admin/MintCard";
 import { SupplyCard } from "./admin/SupplyCard";
 import { VestingCard } from "./admin/VestingCard";
 import { ManageVestingCard } from "./admin/ManageVestingCard";
+import { VestingDashboard } from "./admin/VestingDashboard";
 import {
   TransferAdminCard,
   RevokeAdminCard,
@@ -181,6 +182,13 @@ export function AdminPanel({
 
         <VestingCard admin={admin} disabled={disabled} />
         <ManageVestingCard admin={admin} disabled={disabled} />
+
+        {/* ── Vesting Dashboard ── */}
+        <VestingDashboard
+          tokenContractId={contractId}
+          decimals={decimals}
+          read={admin.read}
+        />
 
         <TransferAdminCard
           admin={admin}
