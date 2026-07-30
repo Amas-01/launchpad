@@ -15,7 +15,9 @@ interface RpcEvent {
   value?: string;
 }
 
-const LOOKBACK_LEDGERS = 17280; // ~24 hours at ~5s per ledger
+// Fallback lookback when the RPC's actual retention window can't be probed
+// (e.g. getHealth() unsupported or unreachable) — the previous fixed window.
+const FALLBACK_LOOKBACK_LEDGERS = 17280; // ~24 hours at ~5s per ledger
 const MAX_CANDIDATES = 20;
 const MAX_RESULTS = 12;
 
@@ -32,6 +34,28 @@ async function safeGetEvents(
   }
 }
 
+/**
+ * Resolve the oldest ledger the RPC can still serve events for, so the launch
+ * feed can widen its lookback to the RPC's actual retention window instead of
+ * a self-imposed 24h cutoff. Falls back to `FALLBACK_LOOKBACK_LEDGERS` behind
+ * `latestLedger` when `getHealth` is unsupported or unreachable, so a launch
+ * feed request never hard-fails on a probe failure.
+ */
+async function resolveStartLedger(
+  rpc: StellarSdk.rpc.Server,
+  latestLedger: number,
+): Promise<number> {
+  try {
+    const health = await rpc.getHealth();
+    if (typeof health.oldestLedger === "number" && health.oldestLedger > 0) {
+      return Math.max(1, health.oldestLedger);
+    }
+  } catch {
+    // getHealth unsupported/unreachable — degrade to the fixed fallback below.
+  }
+  return Math.max(1, latestLedger - FALLBACK_LOOKBACK_LEDGERS);
+}
+
 export async function fetchRecentTokens(
   config: NetworkConfig,
 ): Promise<RecentToken[]> {
@@ -44,7 +68,7 @@ export async function fetchRecentTokens(
   if (!getEvents) return [];
 
   const { sequence: latestLedger } = await rpc.getLatestLedger();
-  const startLedger = Math.max(1, latestLedger - LOOKBACK_LEDGERS);
+  const startLedger = await resolveStartLedger(rpc, latestLedger);
 
   const initTopic = StellarSdk.xdr.ScVal.scvSymbol("init").toXDR("base64");
   const initEvents = await safeGetEvents(getEvents, {
@@ -60,7 +84,12 @@ export async function fetchRecentTokens(
     }
   }
 
-  const candidates = Array.from(seen.entries()).slice(0, MAX_CANDIDATES);
+  // Sort by ledger descending *before* truncating, so a window with more than
+  // MAX_CANDIDATES launches keeps the newest ones rather than whichever
+  // MAX_CANDIDATES the RPC happened to return first.
+  const candidates = Array.from(seen.entries())
+    .sort(([, a], [, b]) => (b.ledger ?? 0) - (a.ledger ?? 0))
+    .slice(0, MAX_CANDIDATES);
   if (candidates.length === 0) return [];
 
   const tokens: RecentToken[] = [];
@@ -88,13 +117,25 @@ export async function fetchRecentTokens(
   const ids = tokens.map((t) => t.contractId);
   const scores = new Map<string, number>();
 
+  const batches: string[][] = [];
   for (let i = 0; i < ids.length; i += 5) {
-    const batch = ids.slice(i, i + 5);
-    const events = await safeGetEvents(getEvents, {
-      startLedger,
-      filters: [{ type: "contract", contractIds: batch }],
-      pagination: { limit: 1000 },
-    });
+    batches.push(ids.slice(i, i + 5));
+  }
+
+  // Batches are independent RPC calls — run them concurrently instead of one
+  // round trip at a time, so a full candidate-set refresh is a single wave of
+  // requests rather than four serial ones.
+  const batchResults = await Promise.all(
+    batches.map((batch) =>
+      safeGetEvents(getEvents, {
+        startLedger,
+        filters: [{ type: "contract", contractIds: batch }],
+        pagination: { limit: 1000 },
+      }),
+    ),
+  );
+
+  for (const events of batchResults) {
     for (const evt of events) {
       if (evt.contractId) {
         scores.set(evt.contractId, (scores.get(evt.contractId) ?? 0) + 1);
