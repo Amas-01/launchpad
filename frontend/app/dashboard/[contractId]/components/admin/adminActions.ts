@@ -11,6 +11,7 @@ import type {
   ManageVestingData,
   MetadataUriData,
   UpgradeData,
+  VestingUpgradeData,
   WhaleCapData,
   ComplianceNodeData,
   AccountData,
@@ -103,6 +104,7 @@ export interface AdminActionData {
   "revoke-auth": AccountData;
   revoke: EmptyData;
   upgrade: UpgradeData;
+  "vesting-upgrade": VestingUpgradeData;
 }
 
 export type AdminActionKey = keyof AdminActionData;
@@ -413,7 +415,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   /* ── Danger ──────────────────────────────────────────────────── */
 
-  upgrade: {
+   upgrade: {
     label: "Upgrade contract",
     resolve: (data) => ({
       method: "upgrade",
@@ -424,6 +426,21 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
       title: "Contract upgraded",
       message:
         "The contract WASM has been replaced. All holders are now on the new logic.",
+    },
+  },
+
+  "vesting-upgrade": {
+    label: "Upgrade vesting contract",
+    resolve: (data) => ({
+      contractId: data.vestingContract,
+      method: "upgrade",
+      args: [xdr.ScVal.scvBytes(Buffer.from(data.wasmHash, "hex"))],
+    }),
+    preflight: "none",
+    successToast: {
+      title: "Vesting contract upgraded",
+      message:
+        "The vesting contract WASM has been replaced. All vesting schedules are now on the new logic.",
     },
   },
 };

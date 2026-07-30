@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Vec};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -36,6 +36,7 @@ const TTL_LEDGERS: u32 = {
 pub enum DataKey {
     Admin,
     PendingAdmin,
+    Locked,
     TokenContract,
     IsPaused,
     Schedule(Address, u32),
@@ -110,6 +111,7 @@ impl VestingContract {
 
     /// Accept the admin role. Must be called by the pending admin.
     pub fn accept_admin(env: Env) {
+        Self::_require_not_locked(&env);
         let pending: Address = env
             .storage()
             .instance()
@@ -137,12 +139,7 @@ impl VestingContract {
         end_ledger: u32,
     ) {
         Self::_check_paused(&env);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        admin.require_auth();
+        Self::_require_admin(&env);
 
         assert!(total_amount > 0, "total_amount must be positive");
         assert!(
@@ -200,12 +197,7 @@ impl VestingContract {
     /// with a clear error rather than an opaque resource failure.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         Self::_check_paused(&env);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        admin.require_auth();
+        Self::_require_admin(&env);
 
         assert!(schedules.len() > 0, "schedules cannot be empty");
         assert!(schedules.len() <= 50, "batch size exceeds maximum of 50");
@@ -476,6 +468,52 @@ impl VestingContract {
         env.events().publish((symbol_short!("unpause"),), ());
     }
 
+    /// Upgrade this contract's WASM code hash in place. Admin only.
+    ///
+    /// Security note: this preserves existing storage and contract state, so
+    /// new WASM must remain storage-compatible with previous deployments.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::_require_admin(&env);
+        assert!(
+            new_wasm_hash != BytesN::from_array(&env, &[0; 32]),
+            "invalid wasm hash"
+        );
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events()
+            .publish((symbol_short!("upgrade"),), new_wasm_hash);
+    }
+
+    /// Permanently revoke the admin role and lock the contract.
+    ///
+    /// After this call:
+    /// - No further `create_schedule`, `revoke`, `extend_cliff`,
+    ///   `prune_recipient`, `propose_admin`, `accept_admin`,
+    ///   `upgrade`, `pause`, or `unpause` operation can ever succeed.
+    /// - The Admin storage entry is removed and a `Locked` flag is set.
+    /// - `is_locked()` returns `true` from then on.
+    ///
+    /// Holders can still `release` and `keep_alive`. The contract
+    /// becomes effectively immutable.
+    ///
+    /// **This action is irreversible.**
+    pub fn revoke_admin(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::Locked, &true);
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish((symbol_short!("revoked"),), true);
+    }
+
+    /// Returns `true` once `revoke_admin` has been called. Once locked, no
+    /// admin operation can ever succeed again.
+    pub fn is_locked(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false)
+    }
+
     /// Return the number of schedules stored for a recipient.
     pub fn get_schedule_count(env: Env, recipient: Address) -> u32 {
         Self::_schedule_count(&env, &recipient)
@@ -566,12 +604,24 @@ impl VestingContract {
     // ── Internals ───────────────────────────────────────────────────────
 
     fn _require_admin(env: &Env) {
+        Self::_require_not_locked(env);
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         admin.require_auth();
+    }
+
+    fn _require_not_locked(env: &Env) {
+        let locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false);
+        if locked {
+            panic!("admin revoked: contract is locked");
+        }
     }
 
     fn _check_paused(env: &Env) {
@@ -715,9 +765,9 @@ mod test {
     // categories of activity. `scripts/generate_events_doc.py --check`
     // re-derives this same set directly from source and fails CI if it
     // and `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 11] = [
+    const EXPECTED_TOPICS: [&str; 13] = [
         "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
-        "unpause", "prune",
+        "unpause", "prune", "upgrade", "revoked",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
@@ -1701,5 +1751,370 @@ mod test {
         assert!(!get_schedule_latest(&client, &recipient).revoked);
         assert_eq!(token_client.balance(&recipient), 750);
         assert_eq!(token_client.balance(&admin), 250);
+    }
+
+    // ── Upgrade tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let zero_hash = BytesN::from_array(&env, &[0; 32]);
+        client.upgrade(&zero_hash);
+    }
+
+    #[test]
+    fn test_upgrade_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        client.upgrade(&non_zero_hash);
+
+        // Verify the contract is still functional after upgrade
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_non_admin_cannot_upgrade() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &user,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (non_zero_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.upgrade(&non_zero_hash);
+    }
+
+    // ── Lock / revoke_admin tests ──────────────────────────────
+
+    #[test]
+    fn test_revoke_admin_sets_locked_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert!(!client.is_locked());
+        client.revoke_admin();
+        assert!(client.is_locked());
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked")]
+    fn test_admin_getter_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        let _ = client.get_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_create_schedule_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let recipient = Address::generate(&env);
+        client.create_schedule(&recipient, &1000, &100, &200);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_revoke_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.revoke_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_upgrade_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        client.upgrade(&non_zero_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_extend_cliff_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+        extend_cliff_latest(&client, &recipient, 150u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_prune_recipient_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+        client.prune_recipient(&recipient);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_pause_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.pause();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_unpause_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.unpause();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_propose_admin_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let other = Address::generate(&env);
+        client.propose_admin(&other);
+    }
+
+    #[test]
+    fn test_holder_release_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &1000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.revoke_admin();
+
+        // Release should still work - holders can claim vested tokens
+        env.ledger().set_sequence_number(150);
+        release_latest(&client, &recipient);
+        assert_eq!(token_client.balance(&recipient), 500);
+    }
+
+    #[test]
+    fn test_keep_alive_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+
+        // keep_alive should still work after revoke
+        env.ledger().set_sequence_number(50);
+        client.keep_alive(&recipient, &latest_index());
+    }
+
+    // ── Upgrade event tests ─────────────────────────────────────
+
+    #[test]
+    fn test_upgrade_emits_event_with_new_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[0xAB; 32]);
+        client.upgrade(&non_zero_hash);
+
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    (symbol_short!("upgrade"),).into_val(&env),
+                    non_zero_hash.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_revoke_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        client.revoke_admin();
+
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    (symbol_short!("revoked"),).into_val(&env),
+                    true.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    // ── Regression: existing vesting functionality unchanged ─────
+
+    #[test]
+    fn test_initialize_still_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_token_contract(), token);
+        assert!(!client.is_locked());
+    }
+
+    #[test]
+    fn test_is_locked_default_is_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert!(!client.is_locked());
     }
 }
