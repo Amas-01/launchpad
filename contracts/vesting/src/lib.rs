@@ -121,6 +121,12 @@ impl VestingContract {
         env.events().publish((symbol_short!("acc_adm"),), pending);
     }
 
+    /// Cancel a proposed admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+    }
+
     /// Create a cliff + linear vesting schedule for `recipient`.
     ///
     /// `cliff_ledger` — ledger number when tokens start unlocking.
@@ -493,6 +499,12 @@ impl VestingContract {
             .instance()
             .get(&DataKey::Admin)
             .expect("not initialized")
+    }
+
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no transfer is in progress.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     /// Returns the token contract address managed by this vesting contract.
@@ -911,6 +923,33 @@ mod test {
         assert_eq!(schedule.end_ledger, 200);
         assert_eq!(schedule.released, 0);
         assert!(!schedule.revoked);
+    }
+
+    #[test]
+    fn test_pending_admin_getter_and_cancel() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.initialize(&admin, &token);
+
+        assert_eq!(client.pending_admin(), None);
+
+        client.propose_admin(&proposed);
+        assert_eq!(client.pending_admin(), Some(proposed.clone()));
+
+        client.cancel_admin_proposal();
+        assert_eq!(client.pending_admin(), None);
+
+        client.propose_admin(&proposed);
+        client.accept_admin();
+        assert_eq!(client.pending_admin(), None);
     }
 
     #[test]

@@ -31,6 +31,11 @@ export interface VestingInfo {
   isPaused: boolean;
 }
 
+export interface VestingAdminState {
+  admin: string | null;
+  pendingAdmin: string | null;
+}
+
 /* ── XDR Decoders ──────────────────────────────────────────────────── */
 
 function decodeI128(val: StellarSdk.xdr.ScVal): bigint {
@@ -93,6 +98,18 @@ function toU32ScVal(value: number): StellarSdk.xdr.ScVal {
     throw new Error("Invalid u32 value");
   }
   return StellarSdk.nativeToScVal(BigInt(value), { type: "u32" });
+}
+
+async function fetchOptionalAddress(
+  contractId: string,
+  method: string,
+): Promise<string | null> {
+  try {
+    const result = await simulateCall(contractId, method);
+    return decodeAddress(result);
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchScheduleCount(
@@ -229,6 +246,18 @@ export async function fetchVestingInfo(
     currentLedger: latestLedger.sequence,
     isPaused,
   };
+}
+
+/** Fetch the vesting contract's admin and any pending admin proposal. */
+export async function fetchVestingAdminState(
+  contractId: string,
+): Promise<VestingAdminState> {
+  const [admin, pendingAdmin] = await Promise.all([
+    fetchOptionalAddress(contractId, "get_admin"),
+    fetchOptionalAddress(contractId, "pending_admin"),
+  ]);
+
+  return { admin, pendingAdmin };
 }
 
 /**

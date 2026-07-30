@@ -2,15 +2,17 @@
 
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
+  fetchVestingAdminState,
   fetchScheduleCount,
   fetchVestingInfo,
   buildReleaseTx,
   submitTx,
   formatTokenAmount,
-  truncateAddress,
+  type VestingAdminState,
   type VestingInfo,
 } from "@/lib/vesting";
 
@@ -24,6 +26,7 @@ export function ClaimVesting() {
   const [contractId, setContractId] = useState("");
   // One VestingInfo entry per schedule index
   const [schedules, setSchedules] = useState<VestingInfo[]>([]);
+  const [adminState, setAdminState] = useState<VestingAdminState | null>(null);
   const [loading, setLoading] = useState(false);
   // Track which schedule index is currently releasing
   const [releasingIndex, setReleasingIndex] = useState<number | null>(null);
@@ -48,13 +51,25 @@ export function ClaimVesting() {
 
     setError(null);
     setSchedules([]);
+    setAdminState(null);
     setLoading(true);
 
     try {
-      const count = await fetchScheduleCount(trimmed, publicKey);
+      const [count, vestingAdmin] = await Promise.all([
+        fetchScheduleCount(trimmed, publicKey),
+        fetchVestingAdminState(trimmed),
+      ]);
+      setAdminState(vestingAdmin);
 
       if (count === 0) {
-        setError("No vesting schedule found for your wallet on this contract.");
+        if (
+          vestingAdmin.pendingAdmin === publicKey ||
+          vestingAdmin.admin === publicKey
+        ) {
+          setError(null);
+        } else {
+          setError("No vesting schedule found for your wallet on this contract.");
+        }
         return;
       }
 
@@ -191,6 +206,14 @@ export function ClaimVesting() {
               </p>
             )}
           </div>
+
+          {adminState?.pendingAdmin && (
+            <PendingAdminBanner
+              pendingAdmin={adminState.pendingAdmin}
+              connectedWallet={publicKey}
+              nonPendingMessage="The current admin can cancel the proposal from the contract's admin section."
+            />
+          )}
 
           {/* ── One card per schedule ─────────────────────────────────── */}
           {schedules.map((info, idx) => (
