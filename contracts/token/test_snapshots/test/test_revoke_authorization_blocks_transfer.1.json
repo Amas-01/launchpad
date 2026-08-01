@@ -166,7 +166,7 @@
             },
             "ext": "v0"
           },
-          4095
+          6307200
         ]
       ],
       [
@@ -214,7 +214,7 @@
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -262,7 +262,7 @@
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -634,6 +634,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -723,19 +726,13 @@
           "v0": {
             "topics": [
               {
-                "symbol": "auth"
+                "symbol": "authorize"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
               }
             ],
-            "data": {
-              "vec": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
+            "data": "void"
           }
         }
       },
@@ -886,19 +883,13 @@
           "v0": {
             "topics": [
               {
-                "symbol": "auth"
+                "symbol": "rev_auth"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
               }
             ],
-            "data": {
-              "vec": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "bool": false
-                }
-              ]
-            }
+            "data": "void"
           }
         }
       },
