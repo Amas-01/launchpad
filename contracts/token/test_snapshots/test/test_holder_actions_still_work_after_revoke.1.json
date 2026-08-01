@@ -312,7 +312,7 @@
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -360,7 +360,7 @@
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -408,7 +408,7 @@
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -954,6 +954,9 @@
             "topics": [
               {
                 "symbol": "mint"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -1627,10 +1630,17 @@
               }
             ],
             "data": {
-              "i128": {
-                "hi": 0,
-                "lo": 50
-              }
+              "vec": [
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 50
+                  }
+                },
+                {
+                  "u32": 100
+                }
+              ]
             }
           }
         }

@@ -376,6 +376,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -495,7 +498,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'mismatching lengths' from contract function 'Symbol(obj#97)'"
+                  "string": "caught panic 'mismatching lengths' from contract function 'Symbol(obj#99)'"
                 },
                 {
                   "vec": [
