@@ -30,6 +30,9 @@ const TTL_LEDGERS: u32 = {
     }
 };
 
+/// Maximum lifetime for an admin transfer proposal before it becomes invalid.
+const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -39,6 +42,7 @@ const TTL_LEDGERS: u32 = {
 pub enum DataKey {
     Admin,
     PendingAdmin,
+    PendingAdminExpiry,
     ComplianceNode,
     Name,
     Symbol,
@@ -383,21 +387,52 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .expect("admin revoked");
+        assert!(new_admin != current_admin, "cannot propose current admin");
+
+        let expiry_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminExpiry, &expiry_ledger);
         env.events()
             .publish((symbol_short!("prop_adm"), current_admin, new_admin), ());
+    }
+
+    /// Cancel a pending admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+        env.events().publish((symbol_short!("cncl_adm"),), ());
     }
 
     /// Accept the admin role. Must be called by the pending admin.
     pub fn accept_admin(env: Env) {
         Self::_require_not_locked(&env);
+        Self::_check_paused(&env);
+
         let pending: Address = env
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
-            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NoPendingAdmin));
+            .expect("no pending admin");
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        assert!(
+            env.ledger().sequence() < expiry_ledger,
+            "pending admin proposal expired"
+        );
+
         pending.require_auth();
         let old_admin: Address = env
             .storage()
@@ -406,6 +441,9 @@ impl TokenContract {
             .expect("admin revoked");
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
         env.events()
             .publish((symbol_short!("set_admin"), old_admin, pending), ());
     }
@@ -432,6 +470,9 @@ impl TokenContract {
         env.storage().instance().set(&DataKey::Locked, &true);
         env.storage().instance().remove(&DataKey::Admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
         env.events().publish((symbol_short!("revoked"),), true);
     }
 
@@ -538,8 +579,7 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
-        env.events()
-            .publish((symbol_short!("upd_uri"),), uri);
+        env.events().publish((symbol_short!("update_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -635,8 +675,10 @@ impl TokenContract {
                 .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
         }
 
-        env.events()
-            .publish((symbol_short!("approve"), from, spender), (amount, expiration_ledger));
+        env.events().publish(
+            (symbol_short!("approve"), from, spender),
+            (amount, expiration_ledger),
+        );
     }
 
     /// Transfer `amount` from `from` to `to` using `spender`'s allowance.
@@ -771,9 +813,22 @@ impl TokenContract {
     /// Returns the address proposed via `propose_admin` that has not yet
     /// accepted the role, or `None` when no two-step transfer is in
     /// progress. The entry is written by `propose_admin` and cleared by
-    /// `accept_admin` / `revoke_admin`, so this getter lets both the
-    /// outgoing admin and the proposed admin observe the pending state.
+    /// `accept_admin`, `cancel_admin_proposal`, or `revoke_admin`; if the
+    /// proposal has expired it is also cleared so stale state does not linger.
     pub fn pending_admin(env: Env) -> Option<Address> {
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            env.storage().instance().remove(&DataKey::PendingAdmin);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminExpiry);
+            return None;
+        }
+
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
@@ -1873,6 +1928,45 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "cannot propose current admin")]
+    fn test_propose_admin_rejects_current_admin() {
+        let (_, client, admin, _) = setup();
+        client.propose_admin(&admin);
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_clears_pending_state() {
+        let (env, client, _, user) = setup();
+        let other = Address::generate(&env);
+
+        client.propose_admin(&user);
+        client.propose_admin(&other);
+        client.cancel_admin_proposal();
+
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "pending admin proposal expired")]
+    fn test_accept_admin_rejects_expired_proposal() {
+        let (env, client, _, user) = setup();
+
+        client.propose_admin(&user);
+        env.ledger().set_sequence_number(TTL_LEDGERS + 1);
+        client.accept_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_accept_admin_blocked_when_paused() {
+        let (_, client, _, user) = setup();
+
+        client.propose_admin(&user);
+        client.pause();
+        client.accept_admin();
+    }
+
+    #[test]
     fn test_pending_admin_getter_reflects_two_step_transfer() {
         let (_, client, _, user) = setup();
         // No transfer in progress yet.
@@ -2544,45 +2638,45 @@ mod test {
         );
     }
 
-  #[test]
-fn test_approve_zero_allows_revocation() {
-    let (env, client, admin, _) = setup();
-    let spender = Address::generate(&env);
-    // First set a valid allowance
-    client.approve(&admin, &spender, &100i128, &100u32);
-    assert_eq!(client.allowance(&admin, &spender), 100i128);
-    // Now revoke it with 0 amount and 0 expiration
-    client.approve(&admin, &spender, &0i128, &0u32);
-    assert_eq!(client.allowance(&admin, &spender), 0i128);
-}
+    #[test]
+    fn test_approve_zero_allows_revocation() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        // First set a valid allowance
+        client.approve(&admin, &spender, &100i128, &100u32);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
+        // Now revoke it with 0 amount and 0 expiration
+        client.approve(&admin, &spender, &0i128, &0u32);
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+    }
 
-#[test]
-fn test_approve_clamped_ttl() {
-    let (env, client, admin, _) = setup();
-    let spender = Address::generate(&env);
-    // Approve with u32::MAX expiration_ledger (very large, exceeds network max_ttl)
-    // Clamping should prevent panic.
-    client.approve(&admin, &spender, &100i128, &u32::MAX);
-    assert_eq!(client.allowance(&admin, &spender), 100i128);
-}
+    #[test]
+    fn test_approve_clamped_ttl() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        // Approve with u32::MAX expiration_ledger (very large, exceeds network max_ttl)
+        // Clamping should prevent panic.
+        client.approve(&admin, &spender, &100i128, &u32::MAX);
+        assert_eq!(client.allowance(&admin, &spender), 100i128);
+    }
 
-#[test]
-#[should_panic(expected = "contract is paused")]
-fn test_approve_blocked_when_paused() {
-    let (env, client, admin, _) = setup();
-    let spender = Address::generate(&env);
-    client.pause();
-    client.approve(&admin, &spender, &100i128, &1000u32);
-}
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_approve_blocked_when_paused() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        client.pause();
+        client.approve(&admin, &spender, &100i128, &1000u32);
+    }
 
-#[test]
-#[should_panic(expected = "account is frozen")]
-fn test_approve_blocked_when_frozen() {
-    let (env, client, _, user) = setup();
-    let spender = Address::generate(&env);
-    client.freeze_account(&user);
-    client.approve(&user, &spender, &100i128, &1000u32);
-}
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_approve_blocked_when_frozen() {
+        let (env, client, _, user) = setup();
+        let spender = Address::generate(&env);
+        client.freeze_account(&user);
+        client.approve(&user, &spender, &100i128, &1000u32);
+    }
 
     #[test]
     fn test_pause_unpause_events() {
