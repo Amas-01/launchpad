@@ -186,8 +186,9 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "cancel-admin": {
     label: "Cancel admin transfer",
-    resolve: async (_data, ctx) => ctx.tokenClient.propose_admin({
-      new_admin: ctx.publicKey
+    resolve: () => ({
+      method: "cancel_admin_proposal",
+      args: [],
     }),
   },
 

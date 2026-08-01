@@ -330,10 +330,33 @@ async function initializeContract(
   // Build the initialize() call
   const client = new TokenClient({
     networkPassphrase: passphrase,
-    contractId,
-    rpcUrl: rpc.serverURL.toString(),
-    publicKey: sourcePublicKey,
-  });
+  })
+    .addOperation(
+      contract.call(
+        "initialize",
+        adminScVal,
+        decimalScVal,
+        nameScVal,
+        symbolScVal,
+        initialSupplyScVal,
+        maxSupplyScVal,
+        authorizationRequiredScVal,
+        authorizationRevocableScVal,
+        complianceNodeScVal,
+        StellarSdk.xdr.ScVal.scvVoid(),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const simResult = await rpc.simulateTransaction(initTx);
+
+  if (StellarSdk.rpc.Api.isSimulationError(simResult)) {
+    throw {
+      message: `Initialization simulation failed: ${simResult.error}`,
+      type: "simulation",
+    } as DeployTokenError;
+  }
 
   let assembledInitTx;
   try {
