@@ -205,12 +205,9 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "cancel-admin": {
     label: "Cancel admin transfer",
-    // No dedicated cancel exists on-chain, so overwrite the pending proposal
-    // with the current admin's own address. This neutralizes the transfer —
-    // the previously proposed admin can no longer accept.
-    resolve: (_data, ctx) => ({
-      method: "propose_admin",
-      args: [addressToScVal(ctx.publicKey)],
+    resolve: () => ({
+      method: "cancel_admin_proposal",
+      args: [],
     }),
   },
 
