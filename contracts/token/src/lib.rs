@@ -227,9 +227,12 @@ impl TokenContract {
         // When authorization_required is enabled the admin is automatically
         // authorized so the initial supply mint succeeds.
         if authorization_required {
+            let key = DataKey::AuthorizedHolder(admin.clone());
+            env.storage().persistent().set(&key, &true);
+            let ttl_ledgers = TTL_LEDGERS;
             env.storage()
                 .persistent()
-                .set(&DataKey::AuthorizedHolder(admin.clone()), &true);
+                .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
         }
 
         if initial_supply > 0 {
@@ -306,7 +309,6 @@ impl TokenContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
             .expect("admin revoked");
-        Self::_transfer_clawback(&env, &from, &admin, amount);
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer(&env, &from, &admin, amount);
 
@@ -385,7 +387,7 @@ impl TokenContract {
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
         env.events()
-            .publish((symbol_short!("prop_admin"), current_admin, new_admin), ());
+            .publish((symbol_short!("prop_adm"), current_admin, new_admin), ());
     }
 
     /// Accept the admin role. Must be called by the pending admin.
@@ -494,7 +496,7 @@ impl TokenContract {
             .persistent()
             .remove(&DataKey::AuthorizedHolder(holder.clone()));
         env.events()
-            .publish((symbol_short!("revoke_auth"), holder), ());
+            .publish((symbol_short!("rev_auth"), holder), ());
     }
 
     /// Returns `true` if `holder` is authorized to receive tokens.
@@ -537,7 +539,7 @@ impl TokenContract {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
         env.events()
-            .publish((symbol_short!("update_uri"),), uri);
+            .publish((symbol_short!("upd_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -1165,6 +1167,11 @@ impl TokenContract {
             .persistent()
             .set(&from_key, &(from_balance - amount));
 
+        let ttl_ledgers = TTL_LEDGERS;
+        env.storage()
+            .persistent()
+            .extend_ttl(&from_key, ttl_ledgers, ttl_ledgers);
+
         let to_balance: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
 
         let supply: i128 = env
@@ -1178,6 +1185,10 @@ impl TokenContract {
         Self::_enforce_max_balance_per_account(env, to, new_to_balance, supply);
 
         env.storage().persistent().set(&to_key, &new_to_balance);
+
+        env.storage()
+            .persistent()
+            .extend_ttl(&to_key, ttl_ledgers, ttl_ledgers);
 
         env.events().publish(
             (symbol_short!("transfer"), from.clone(), to.clone()),
@@ -1283,22 +1294,26 @@ mod test {
     // activity. `scripts/generate_events_doc.py --check` re-derives this
     // same set directly from source and fails CI if it and
     // `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 15] = [
+    const EXPECTED_TOPICS: [&str; 19] = [
         "init",
         "mint",
         "burn",
         "clawback",
         "transfer",
         "approve",
+        "authorize",
         "revoked",
         "freeze",
         "unfreeze",
         "pause",
         "unpause",
-        "auth",
+        "prop_adm",
+        "set_admin",
+        "rev_auth",
         "upgrade",
         "set_max_b",
         "set_cnode",
+        "upd_uri",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
@@ -1314,7 +1329,7 @@ mod test {
     fn test_emitted_topics_match_checked_in_fixture() {
         const SOURCE: &str = include_str!("lib.rs");
         let (production_source, _) = SOURCE
-            .split_once("#[cfg(test)]\nmod test {")
+            .split_once("#[cfg(test)]")
             .expect("could not locate test module boundary in lib.rs");
 
         const NEEDLE: &str = "symbol_short!(\"";
