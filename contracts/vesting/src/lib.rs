@@ -468,40 +468,50 @@ impl VestingContract {
 
     /// Admin-only: extend the cliff ledger of an existing (non-revoked) schedule.
     ///
+    /// Also shifts `end_ledger` by the same delta so that the total vesting
+    /// duration is preserved — the per-ledger unlock rate remains unchanged.
+    ///
     /// Rules enforced:
     /// - `new_cliff` must be strictly greater than the current `cliff_ledger`
     ///   (extension only — reduction is never allowed).
     /// - The current ledger must still be before the cliff (once the cliff has
     ///   already passed there is nothing left to delay).
-    /// - `new_cliff` must remain strictly less than `end_ledger`.
+    /// - `new_cliff` must remain strictly less than the shifted `end_ledger`.
     pub fn extend_cliff(env: Env, recipient: Address, new_cliff: u32, index: Option<u32>) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
 
         let (key, mut schedule) = Self::_load_schedule(&env, &recipient, index);
 
-        if schedule.revoked {
-            panic_with_error!(&env, VestingError::ScheduleRevoked);
-        }
-        if env.ledger().sequence() >= schedule.cliff_ledger {
-            panic_with_error!(&env, VestingError::CliffPassed);
-        }
-        if new_cliff <= schedule.cliff_ledger {
-            panic_with_error!(&env, VestingError::CliffNotExtended);
-        }
-        if new_cliff >= schedule.end_ledger {
-            panic_with_error!(&env, VestingError::CliffAfterEnd);
-        }
+        assert!(!schedule.revoked, "schedule has been revoked");
+        assert!(
+            env.ledger().sequence() < schedule.cliff_ledger,
+            "cliff has already passed"
+        );
+        assert!(
+            new_cliff > schedule.cliff_ledger,
+            "new_cliff must be later than current cliff"
+        );
 
-        // Capture old value before mutation
+        // Shift end_ledger by the same delta so vesting duration is preserved
+        let delta = new_cliff - schedule.cliff_ledger;
         let old_cliff = schedule.cliff_ledger;
+        let old_end = schedule.end_ledger;
+        let new_end = schedule.end_ledger + delta;
+
+        assert!(
+            new_cliff < new_end,
+            "new_cliff must be before the shifted end_ledger"
+        );
+
         schedule.cliff_ledger = new_cliff;
+        schedule.end_ledger = new_end;
         env.storage().persistent().set(&key, &schedule);
 
-        // Emit event with tuple payload
+        // Emit event with old/new cliff and old/new end
         env.events().publish(
             (symbol_short!("clf_ext"), recipient),
-            (old_cliff, new_cliff),
+            (old_cliff, new_cliff, old_end, new_end),
         );
     }
 
@@ -1336,9 +1346,9 @@ mod test {
 
         let schedule = get_schedule_latest(&client, &recipient);
         assert_eq!(schedule.cliff_ledger, 150);
-        assert_eq!(schedule.end_ledger, 200); // unchanged
+        assert_eq!(schedule.end_ledger, 250); // shifted by same delta (+50)
 
-        // Verify event emission contains (old_cliff, new_cliff)
+        // Verify event emission contains (old_cliff, new_cliff, old_end, new_end)
         use soroban_sdk::xdr::ToXdr;
         use soroban_sdk::IntoVal;
         let events = env.events().all();
@@ -1350,13 +1360,55 @@ mod test {
                 (
                     contract_id,
                     (symbol_short!("clf_ext"), recipient).into_val(&env),
-                    (100u32, 150u32).into_val(&env)
+                    (100u32, 150u32, 200u32, 250u32).into_val(&env)
                 )
             ]
         );
     }
 
     #[test]
+    fn test_extend_cliff_preserves_unlock_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        // Original: cliff=100, end=200, duration=100 ledgers.
+        // At ledger 150 (midpoint), 500 out of 1000 should be vested.
+        env.ledger().set_sequence_number(150);
+        let vested_before = vested_amount_latest(&client, &recipient);
+
+        // Now extend cliff from 100 to 120 (delta = +20).
+        // With the fix, end should also shift by +20 to 220, preserving the
+        // 100-ledger vesting duration. At ledger 170 (midpoint of 120→220),
+        // the same 500 out of 1000 should be vested.
+        env.ledger().set_sequence_number(50); // must be before cliff
+        extend_cliff_latest(&client, &recipient, 120u32);
+
+        let schedule = get_schedule_latest(&client, &recipient);
+        assert_eq!(schedule.cliff_ledger, 120);
+        assert_eq!(schedule.end_ledger, 220);
+        assert_eq!(schedule.end_ledger - schedule.cliff_ledger, 100); // duration preserved
+
+        // At the new midpoint (170) the vested amount should be the same
+        env.ledger().set_sequence_number(170);
+        let vested_after = vested_amount_latest(&client, &recipient);
+        assert_eq!(vested_before, vested_after);
+
+        // At the original end_ledger (200), tokens should NOT be fully
+        // vested anymore — only 80% should be vested (80/100 elapsed)
+        env.ledger().set_sequence_number(200);
+        assert_eq!(vested_amount_latest(&client, &recipient), 800);
+
+        // At the new end_ledger (220), tokens should be fully vested
+        env.ledger().set_sequence_number(220);
+        assert_eq!(vested_amount_latest(&client, &recipient), 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_cliff must be later than current cliff")]
     fn test_extend_cliff_cannot_reduce() {
         let env = Env::default();
         env.mock_all_auths();
