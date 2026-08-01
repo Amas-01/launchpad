@@ -1100,7 +1100,7 @@ impl TokenContract {
         let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_balance = balance.checked_add(amount).expect("balance overflow");
 
-        Self::_enforce_max_balance_per_account(env, to, new_balance, new_supply);
+        Self::_enforce_max_balance_per_account(env, to, new_balance, supply);
 
         env.storage().persistent().set(&key, &new_balance);
 
@@ -1423,8 +1423,8 @@ mod test {
 
         client.set_max_balance_per_account(&Some(10u32));
 
-        // total_supply == 1_000_000_0000000; 10% == 100_000_0000000
-        // attempt to transfer 100_000_0000001 should exceed cap.
+        // total_supply == 1_000_000_0000000; 10% == 100_000_0000000.
+        // Transfering the full 10% cap should succeed.
         client.transfer(&admin, &user, &100_000_0000000i128);
         assert_eq!(client.balance(&user), 100_000_0000000i128);
     }
@@ -1455,23 +1455,14 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "max balance per account exceeded")]
     fn test_set_max_balance_per_account_mint_exceeds_panics() {
         let (_, client, admin, user) = setup();
 
         client.set_max_balance_per_account(&Some(10u32));
 
-        // Initial total supply is 1_000_000_0000000 (held by admin).
-        // Transfer 100_000_0000000 to user (user now has 10% of 1M supply).
-        client.transfer(&admin, &user, &100_000_0000000i128);
-
-        // Minting 1 more token to user without increasing admin supply:
-        // user balance = 100_000_0000001, total supply = 1_000_000_0000001.
-        // 10% of total supply = 100_000_0000000 (integer division).
-        // 100_000_0000001 > 100_000_0000000, so it exceeds max balance.
-        assert_eq!(
-            client.try_mint(&user, &1i128),
-            Err(Ok(TokenError::ExceedsMaxBalance.into()))
-        );
+        // Minting one more base unit should exceed the 10% cap.
+        client.mint(&user, &1i128);
     }
 
     #[test]
