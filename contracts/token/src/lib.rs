@@ -76,26 +76,65 @@ pub struct AllowanceValue {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Typed contract errors.
+/// Typed contract errors — surfaced in release WASM as numeric codes.
 ///
-/// Only the compliance-node paths use these today. Every cross-contract call
-/// into a compliance node is made with the generated `try_` variant so a
-/// misbehaving, archived, or non-existent node surfaces as one of these codes
-/// instead of letting a raw host error escape and revert the whole invocation
-/// with an opaque failure.
+/// Codes 1–3 pre-existed for compliance-node paths and are preserved at those
+/// values so that existing clients do not break. The remainder cover every
+/// other failure mode so that `try_*` client calls can distinguish failures
+/// even in release builds where panic strings are stripped.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum TokenError {
-    /// The configured compliance node answered `can_trade` with `false`.
+    // ── Compliance node ──────────────────────────────────────────────────
+    /// The compliance node answered `can_trade` with `false`.
     ComplianceRejected = 1,
-    /// The configured compliance node could not be called, or did not return a
-    /// `bool`. The token fails closed: value-moving operations are blocked
-    /// until an admin repoints or clears the node.
+    /// The compliance node could not be called or returned a non-`bool`.
     ComplianceNodeUnavailable = 2,
-    /// The address passed to `set_compliance_node` did not answer a `can_trade`
-    /// probe, so it was rejected rather than stored.
+    /// The address passed to `set_compliance_node` failed the probe.
     InvalidComplianceNode = 3,
+    // ── Initialization ───────────────────────────────────────────────────
+    /// `initialize` was called on a contract that is already initialized.
+    AlreadyInitialized = 4,
+    /// The contract is permanently locked (`revoke_admin` was called).
+    Locked = 5,
+    /// The contract is paused.
+    Paused = 6,
+    // ── Validation ───────────────────────────────────────────────────────
+    /// Amount is zero or negative where a positive value is required.
+    InvalidAmount = 7,
+    /// Sender has insufficient token balance.
+    InsufficientBalance = 8,
+    /// Spender has insufficient allowance.
+    InsufficientAllowance = 9,
+    /// The account is frozen and cannot send tokens.
+    Frozen = 10,
+    /// Recipient is not on the authorized-holders list.
+    NotAuthorizedHolder = 11,
+    /// `revoke_authorization` was called but authorization is not revocable.
+    NotRevocable = 12,
+    /// Mint would exceed the `max_supply` cap.
+    ExceedsMaxSupply = 13,
+    /// WASM hash supplied to `upgrade` is the all-zeros sentinel.
+    InvalidWasmHash = 14,
+    /// `expiration_ledger` is not strictly greater than the current ledger.
+    InvalidLedgerRange = 15,
+    /// Transfer or mint would push the recipient above the per-account cap.
+    ExceedsMaxBalance = 16,
+    /// `accept_admin` was called with no pending proposal.
+    NoPendingAdmin = 17,
+    /// `initial_supply` exceeds `max_supply` in `initialize`.
+    ExceedsInitialSupply = 18,
+    /// Decimal value exceeds 18.
+    InvalidDecimals = 19,
+    /// `mint_batch` received vectors of different lengths.
+    BatchLengthMismatch = 20,
+    /// `mint_batch` received a batch larger than 100.
+    BatchTooLarge = 21,
+    /// `contract_uri` getter called before a URI has been set.
+    ContractUriNotSet = 22,
+    /// A storage getter was called before `initialize`.
+    NotInitialized = 23,
 }
 
 #[contractclient(name = "ComplianceNodeClient")]
@@ -147,16 +186,22 @@ impl TokenContract {
         compliance_node: Option<Address>,
     ) {
         if env.storage().instance().has(&DataKey::Initialized) {
-            panic!("already initialized");
+            panic_with_error!(&env, TokenError::AlreadyInitialized);
         }
         admin.require_auth();
         Self::_require_not_locked(&env);
 
-        assert!(decimal <= 18, "decimals must be <= 18");
+        if decimal > 18 {
+            panic_with_error!(&env, TokenError::InvalidDecimals);
+        }
 
         if let Some(cap) = max_supply {
-            assert!(cap > 0, "max_supply must be positive");
-            assert!(initial_supply <= cap, "initial_supply exceeds max_supply");
+            if cap <= 0 {
+                panic_with_error!(&env, TokenError::InvalidAmount);
+            }
+            if initial_supply > cap {
+                panic_with_error!(&env, TokenError::ExceedsInitialSupply);
+            }
             env.storage().instance().set(&DataKey::MaxSupply, &cap);
         }
 
@@ -204,7 +249,9 @@ impl TokenContract {
     pub fn mint(env: Env, to: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
-        assert!(amount > 0, "amount must be positive");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
         Self::_check_compliance_issue(&env, &to);
         Self::_mint(&env, &to, amount);
 
@@ -222,8 +269,12 @@ impl TokenContract {
     pub fn burn(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         from.require_auth();
-        assert!(amount > 0, "amount must be positive");
-        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
+        if Self::_is_frozen(&env, &from) {
+            panic_with_error!(&env, TokenError::Frozen);
+        }
         Self::_burn(&env, &from, amount);
     }
 
@@ -231,7 +282,9 @@ impl TokenContract {
     pub fn burn_admin(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
-        assert!(amount > 0, "amount must be positive");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
         Self::_burn(&env, &from, amount);
     }
 
@@ -243,12 +296,15 @@ impl TokenContract {
     pub fn clawback(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
-        assert!(amount > 0, "amount must be positive");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
 
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
             .expect("admin revoked");
         Self::_transfer_clawback(&env, &from, &admin, amount);
         Self::_check_compliance(&env, &from, &admin);
@@ -279,13 +335,19 @@ impl TokenContract {
     pub fn mint_batch(env: Env, to: soroban_sdk::Vec<Address>, amounts: soroban_sdk::Vec<i128>) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
-        assert!(to.len() == amounts.len(), "mismatching lengths");
-        assert!(to.len() <= 100, "batch size exceeds maximum of 100");
-        let ttl_ledgers = TTL_LEDGERS;
+        if to.len() != amounts.len() {
+            panic_with_error!(&env, TokenError::BatchLengthMismatch);
+        }
+        if to.len() > 100 {
+            panic_with_error!(&env, TokenError::BatchTooLarge);
+        }
+        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
         for i in 0..to.len() {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
-            assert!(amount > 0, "amount must be positive");
+            if amount <= 0 {
+                panic_with_error!(&env, TokenError::InvalidAmount);
+            }
             Self::_check_compliance_issue(&env, &recipient);
             Self::_mint(&env, &recipient, amount);
             let key = DataKey::Balance(recipient);
@@ -301,8 +363,12 @@ impl TokenContract {
     pub fn burn_self(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         from.require_auth();
-        assert!(amount > 0, "amount must be positive");
-        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
+        if Self::_is_frozen(&env, &from) {
+            panic_with_error!(&env, TokenError::Frozen);
+        }
         Self::_burn(&env, &from, amount);
     }
 
@@ -329,7 +395,7 @@ impl TokenContract {
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
-            .expect("no pending admin");
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NoPendingAdmin));
         pending.require_auth();
         let old_admin: Address = env
             .storage()
@@ -421,7 +487,9 @@ impl TokenContract {
             .instance()
             .get(&DataKey::AuthorizationRevocable)
             .unwrap_or(false);
-        assert!(revocable, "authorization is not revocable for this token");
+        if !revocable {
+            panic_with_error!(&env, TokenError::NotRevocable);
+        }
         env.storage()
             .persistent()
             .remove(&DataKey::AuthorizedHolder(holder.clone()));
@@ -478,10 +546,9 @@ impl TokenContract {
     /// new WASM must remain storage-compatible with previous deployments.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         Self::_require_admin(&env);
-        assert!(
-            new_wasm_hash != BytesN::from_array(&env, &[0; 32]),
-            "invalid wasm hash"
-        );
+        if new_wasm_hash == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, TokenError::InvalidWasmHash);
+        }
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         env.events()
@@ -494,8 +561,12 @@ impl TokenContract {
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         Self::_check_paused(&env);
         from.require_auth();
-        assert!(amount > 0, "amount must be positive");
-        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
+        if Self::_is_frozen(&env, &from) {
+            panic_with_error!(&env, TokenError::Frozen);
+        }
         Self::_check_compliance(&env, &from, &to);
         Self::_check_authorized(&env, &to);
 
@@ -535,7 +606,9 @@ impl TokenContract {
     ) {
         Self::_check_paused(&env);
         from.require_auth();
-        assert!(amount >= 0, "amount must be non-negative");
+        if amount < 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
         assert!(!Self::_is_frozen(&env, &from), "account is frozen");
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
@@ -544,10 +617,9 @@ impl TokenContract {
             env.storage().temporary().remove(&key);
         } else {
             let current_ledger = env.ledger().sequence();
-            assert!(
-                expiration_ledger > current_ledger,
-                "expiration_ledger must be in the future"
-            );
+            if expiration_ledger <= current_ledger {
+                panic_with_error!(&env, TokenError::InvalidLedgerRange);
+            }
 
             let value = AllowanceValue {
                 amount,
@@ -569,8 +641,12 @@ impl TokenContract {
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         Self::_check_paused(&env);
         spender.require_auth();
-        assert!(amount > 0, "amount must be positive");
-        assert!(!Self::_is_frozen(&env, &from), "account is frozen");
+        if amount <= 0 {
+            panic_with_error!(&env, TokenError::InvalidAmount);
+        }
+        if Self::_is_frozen(&env, &from) {
+            panic_with_error!(&env, TokenError::Frozen);
+        }
         Self::_check_compliance(&env, &from, &to);
         Self::_check_authorized(&env, &to);
 
@@ -581,7 +657,9 @@ impl TokenContract {
             Some(v) if v.expiration_ledger >= current_ledger => v.amount,
             _ => 0,
         };
-        assert!(allowance >= amount, "insufficient allowance");
+        if allowance < amount {
+            panic_with_error!(&env, TokenError::InsufficientAllowance);
+        }
 
         let remaining = allowance - amount;
         let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
@@ -680,12 +758,12 @@ impl TokenContract {
             .get(&DataKey::Locked)
             .unwrap_or(false);
         if locked {
-            panic!("admin revoked");
+            panic_with_error!(&env, TokenError::Locked);
         }
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     /// Returns the address proposed via `propose_admin` that has not yet
@@ -710,21 +788,21 @@ impl TokenContract {
         env.storage()
             .instance()
             .get(&DataKey::Decimals)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     pub fn name(env: Env) -> String {
         env.storage()
             .instance()
             .get(&DataKey::Name)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     pub fn symbol(env: Env) -> String {
         env.storage()
             .instance()
             .get(&DataKey::Symbol)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
     pub fn total_supply(env: Env) -> i128 {
@@ -778,10 +856,9 @@ impl TokenContract {
         Self::_require_admin(&env);
 
         if let Some(p) = max_balance_per_account {
-            assert!(
-                (1..=100).contains(&p),
-                "max_balance_per_account must be 1..=100"
-            );
+            if !(1..=100).contains(&p) {
+                panic_with_error!(&env, TokenError::InvalidAmount);
+            }
             env.storage()
                 .instance()
                 .set(&DataKey::MaxBalancePerAccount, &p);
@@ -844,7 +921,7 @@ impl TokenContract {
         env.storage()
             .instance()
             .get(&DataKey::ContractUri)
-            .expect("contract URI not set")
+            .unwrap_or_else(|| panic_with_error!(&env, TokenError::ContractUriNotSet))
     }
 
     /// Returns the configured compliance node, if any.
@@ -869,7 +946,9 @@ impl TokenContract {
                 .persistent()
                 .get(&DataKey::AuthorizedHolder(holder.clone()))
                 .unwrap_or(false);
-            assert!(authorized, "recipient is not authorized to hold this token");
+            if !authorized {
+                panic_with_error!(env, TokenError::NotAuthorizedHolder);
+            }
         }
     }
 
@@ -879,7 +958,7 @@ impl TokenContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin revoked");
+            .unwrap_or_else(|| panic_with_error!(env, TokenError::Locked));
         admin.require_auth();
     }
 
@@ -890,7 +969,7 @@ impl TokenContract {
             .get(&DataKey::Locked)
             .unwrap_or(false);
         if locked {
-            panic!("admin revoked: contract is locked");
+            panic_with_error!(env, TokenError::Locked);
         }
     }
 
@@ -908,7 +987,7 @@ impl TokenContract {
             .get::<DataKey, bool>(&DataKey::IsPaused)
             .unwrap_or(false)
         {
-            panic!("contract is paused");
+            panic_with_error!(env, TokenError::Paused);
         }
     }
 
@@ -921,16 +1000,22 @@ impl TokenContract {
             return;
         };
 
-        let Some(admin) = env
+        let admin: Option<Address> = env
             .storage()
             .instance()
-            .get::<DataKey, Address>(&DataKey::Admin)
-        else {
-            return; // contract is locked; cap no longer enforced
-        };
+            .get(&DataKey::Admin);
+//         let Some(admin) = env
+//             .storage()
+//             .instance()
+//             .get::<DataKey, Address>(&DataKey::Admin)
+//         else {
+//             return; // contract is locked; cap no longer enforced
+//         };
 
-        if to == &admin {
-            return;
+        if let Some(ref admin_addr) = admin {
+            if to == admin_addr {
+                return;
+            }
         }
 
         let max_allowed = supply
@@ -938,10 +1023,9 @@ impl TokenContract {
             .expect("max balance calc overflow")
             / 100i128;
 
-        assert!(
-            new_balance <= max_allowed,
-            "max balance per account exceeded"
-        );
+        if new_balance > max_allowed {
+            panic_with_error!(env, TokenError::ExceedsMaxBalance);
+        }
     }
     /// Ask the configured compliance node whether `from` → `to` is permitted.
     ///
@@ -1005,7 +1089,9 @@ impl TokenContract {
             .instance()
             .get::<DataKey, i128>(&DataKey::MaxSupply)
         {
-            assert!(new_supply <= cap, "mint would exceed max_supply");
+            if new_supply > cap {
+                panic_with_error!(env, TokenError::ExceedsMaxSupply);
+            }
         }
 
         let key = DataKey::Balance(to.clone());
@@ -1032,7 +1118,9 @@ impl TokenContract {
     fn _burn(env: &Env, from: &Address, amount: i128) {
         let key = DataKey::Balance(from.clone());
         let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        assert!(balance >= amount, "insufficient balance to burn");
+        if balance < amount {
+            panic_with_error!(env, TokenError::InsufficientBalance);
+        }
         let new_balance = balance
             .checked_sub(amount)
             .expect("balance underflow on burn");
@@ -1069,7 +1157,9 @@ impl TokenContract {
         let to_key = DataKey::Balance(to.clone());
 
         let from_balance: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
-        assert!(from_balance >= amount, "insufficient balance");
+        if from_balance < amount {
+            panic_with_error!(env, TokenError::InsufficientBalance);
+        }
 
         env.storage()
             .persistent()
@@ -1325,7 +1415,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "max balance per account exceeded")]
     fn test_set_max_balance_per_account_transfer_exceeds_panics() {
         let (_, client, admin, user) = setup();
 
@@ -1333,7 +1422,10 @@ mod test {
         client.transfer(&admin, &user, &100_000_0000000i128);
 
         // one more token should exceed cap.
-        client.transfer(&admin, &user, &1i128);
+        assert_eq!(
+            client.try_transfer(&admin, &user, &1i128),
+            Err(Ok(TokenError::ExceedsMaxBalance.into()))
+        );
     }
 
     #[test]
@@ -1348,15 +1440,23 @@ mod test {
     }
 
     #[test]
-    // #[should_panic(expected = "max balance per account exceeded")]
     fn test_set_max_balance_per_account_mint_exceeds_panics() {
-        let (_, client, _, user) = setup();
+        let (_, client, admin, user) = setup();
 
         client.set_max_balance_per_account(&Some(10u32));
-        client.mint(&user, &100_000_0000000i128);
 
-        // minting 1 more exceeds cap
-        client.mint(&user, &1i128);
+        // Initial total supply is 1_000_000_0000000 (held by admin).
+        // Transfer 100_000_0000000 to user (user now has 10% of 1M supply).
+        client.transfer(&admin, &user, &100_000_0000000i128);
+
+        // Minting 1 more token to user without increasing admin supply:
+        // user balance = 100_000_0000001, total supply = 1_000_000_0000001.
+        // 10% of total supply = 100_000_0000000 (integer division).
+        // 100_000_0000001 > 100_000_0000000, so it exceeds max balance.
+        assert_eq!(
+            client.try_mint(&user, &1i128),
+            Err(Ok(TokenError::ExceedsMaxBalance.into()))
+        );
     }
 
     #[test]
@@ -1382,19 +1482,21 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "already initialized")]
     fn test_double_init_panics() {
         let (env, client, admin, _) = setup();
-        client.initialize(
-            &admin,
-            &7u32,
-            &String::from_str(&env, "Dup"),
-            &String::from_str(&env, "DUP"),
-            &0i128,
-            &None,
-            &false,
-            &false,
-            &None,
+        assert_eq!(
+            client.try_initialize(
+                &admin,
+                &7u32,
+                &String::from_str(&env, "Dup"),
+                &String::from_str(&env, "DUP"),
+                &0i128,
+                &None,
+                &false,
+                &false,
+                &None,
+            ),
+            Err(Ok(TokenError::AlreadyInitialized.into()))
         );
     }
 
@@ -1454,7 +1556,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "mismatching lengths")]
     fn test_mint_batch_len_mismatch() {
         let (env, client, _, _) = setup();
         let u1 = Address::generate(&env);
@@ -1466,11 +1567,13 @@ mod test {
         amounts.push_back(100i128);
         amounts.push_back(200i128);
 
-        client.mint_batch(&to, &amounts);
+        assert_eq!(
+            client.try_mint_batch(&to, &amounts),
+            Err(Ok(TokenError::BatchLengthMismatch.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "batch size exceeds maximum of 100")]
     fn test_mint_batch_exceeds_max_size() {
         let (env, client, _, _) = setup();
         let mut to = soroban_sdk::Vec::new(&env);
@@ -1480,7 +1583,10 @@ mod test {
             to.push_back(addr.clone());
             amounts.push_back(1i128);
         }
-        client.mint_batch(&to, &amounts);
+        assert_eq!(
+            client.try_mint_batch(&to, &amounts),
+            Err(Ok(TokenError::BatchTooLarge.into()))
+        );
     }
 
     #[test]
@@ -1553,10 +1659,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "insufficient balance to burn")]
     fn test_burn_insufficient() {
         let (_, client, _, user) = setup();
-        client.burn(&user, &1i128);
+        assert_eq!(
+            client.try_burn(&user, &1i128),
+            Err(Ok(TokenError::InsufficientBalance.into()))
+        );
     }
 
     #[test]
@@ -1573,36 +1681,44 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_burn_self_rejects_zero() {
         let (_, client, _, user) = setup();
-        client.burn_self(&user, &0i128);
+        assert_eq!(
+            client.try_burn_self(&user, &0i128),
+            Err(Ok(TokenError::InvalidAmount.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "insufficient balance to burn")]
     fn test_burn_self_insufficient_balance() {
         let (_, client, _, user) = setup();
         // user has zero balance; should fail.
-        client.burn_self(&user, &1i128);
+        assert_eq!(
+            client.try_burn_self(&user, &1i128),
+            Err(Ok(TokenError::InsufficientBalance.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "account is frozen")]
     fn test_burn_self_blocked_when_frozen() {
         let (_, client, admin, user) = setup();
         client.transfer(&admin, &user, &1_000i128);
         client.freeze_account(&user);
-        client.burn_self(&user, &500i128);
+        assert_eq!(
+            client.try_burn_self(&user, &500i128),
+            Err(Ok(TokenError::Frozen.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "account is frozen")]
     fn test_burn_blocked_when_frozen() {
         let (_, client, admin, user) = setup();
         client.transfer(&admin, &user, &1_000i128);
         client.freeze_account(&user);
-        client.burn(&user, &500i128);
+        assert_eq!(
+            client.try_burn(&user, &500i128),
+            Err(Ok(TokenError::Frozen.into()))
+        );
     }
 
     #[test]
@@ -1619,10 +1735,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "insufficient balance")]
     fn test_transfer_insufficient() {
         let (_, client, _, user) = setup();
-        client.transfer(&user, &user, &1i128);
+        assert_eq!(
+            client.try_transfer(&user, &user, &1i128),
+            Err(Ok(TokenError::InsufficientBalance.into()))
+        );
     }
 
     #[test]
@@ -1643,13 +1761,15 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "insufficient allowance")]
     fn test_transfer_from_exceeds_allowance() {
         let (env, client, admin, user) = setup();
         let spender = Address::generate(&env);
 
         client.approve(&admin, &spender, &10i128, &1000u32);
-        client.transfer_from(&spender, &admin, &user, &11i128);
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &11i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
     }
 
     // ── burn_from tests ─────────────────────────────────────────────────
@@ -1728,10 +1848,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "no pending admin")]
     fn test_accept_admin_without_proposal() {
         let (_, client, _, _) = setup();
-        client.accept_admin();
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(TokenError::NoPendingAdmin.into()))
+        );
     }
 
     #[test]
@@ -1777,17 +1899,17 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "account is frozen")]
     fn test_frozen_transfer_blocked() {
         let (_, client, admin, user) = setup();
         client.transfer(&admin, &user, &1000i128);
         client.freeze_account(&user);
-        // This should panic because `user` is frozen.
-        client.transfer(&user, &admin, &500i128);
+        assert_eq!(
+            client.try_transfer(&user, &admin, &500i128),
+            Err(Ok(TokenError::Frozen.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "account is frozen")]
     fn test_frozen_transfer_from_blocked() {
         let (env, client, admin, user) = setup();
         let spender = Address::generate(&env);
@@ -1796,7 +1918,10 @@ mod test {
         client.approve(&user, &spender, &1000i128, &1000u32);
         // Freeze user, then attempt transfer_from.
         client.freeze_account(&user);
-        client.transfer_from(&spender, &user, &admin, &500i128);
+        assert_eq!(
+            client.try_transfer_from(&spender, &user, &admin, &500i128),
+            Err(Ok(TokenError::Frozen.into()))
+        );
     }
 
     // ── Revoke admin / lock tests ───────────────────────────────────────
@@ -1810,66 +1935,77 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "admin revoked")]
     fn test_admin_getter_after_revoke_panics() {
         let (_, client, _, _) = setup();
         client.revoke_admin();
-        // Admin storage entry has been removed.
-        let _ = client.admin();
+        assert_eq!(
+            client.try_admin(),
+            Err(Ok(TokenError::Locked.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "admin revoked: contract is locked")]
     fn test_mint_after_revoke_panics() {
         let (_, client, _, user) = setup();
         client.revoke_admin();
-        client.mint(&user, &1i128);
+        assert_eq!(
+            client.try_mint(&user, &1i128),
+            Err(Ok(TokenError::Locked.into()))
+        );
     }
 
     // ── Regression test for issue #322: initialize() re-callable after revoke_admin ──
 
     #[test]
-    #[should_panic(expected = "already initialized")]
     fn test_initialize_after_revoke_admin_panics() {
         let (env, client, admin, _) = setup();
         client.revoke_admin();
         // Admin storage entry is gone, but Initialized must still block re-init.
-        client.initialize(
-            &admin,
-            &7u32,
-            &String::from_str(&env, "Attacker"),
-            &String::from_str(&env, "EVL"),
-            &1_000_000i128,
-            &None,
-            &false,
-            &false,
-            &None,
+        assert_eq!(
+            client.try_initialize(
+                &admin,
+                &7u32,
+                &String::from_str(&env, "Attacker"),
+                &String::from_str(&env, "EVL"),
+                &1_000_000i128,
+                &None,
+                &false,
+                &false,
+                &None,
+            ),
+            Err(Ok(TokenError::AlreadyInitialized.into()))
         );
     }
 
     #[test]
-    #[should_panic(expected = "admin revoked: contract is locked")]
     fn test_burn_admin_after_revoke_panics() {
         let (_, client, admin, _) = setup();
         client.revoke_admin();
-        client.burn_admin(&admin, &1i128);
+        assert_eq!(
+            client.try_burn_admin(&admin, &1i128),
+            Err(Ok(TokenError::Locked.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "admin revoked: contract is locked")]
     fn test_propose_admin_after_revoke_panics() {
         let (env, client, _, _) = setup();
         let other = Address::generate(&env);
         client.revoke_admin();
-        client.propose_admin(&other);
+        assert_eq!(
+            client.try_propose_admin(&other),
+            Err(Ok(TokenError::Locked.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "admin revoked: contract is locked")]
     fn test_freeze_after_revoke_panics() {
         let (_, client, _, user) = setup();
         client.revoke_admin();
-        client.freeze_account(&user);
+        assert_eq!(
+            client.try_freeze_account(&user),
+            Err(Ok(TokenError::Locked.into()))
+        );
     }
 
     #[test]
@@ -1914,7 +2050,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn test_non_admin_cannot_freeze() {
         let env = Env::default();
         // Do NOT mock all auths — we want real auth checks.
@@ -1946,8 +2081,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        // Should panic — user is not admin.
-        client.freeze_account(&user);
+        // Should fail — user is not admin.
+        assert!(client.try_freeze_account(&user).is_err());
     }
 
     // ── Pause / Unpause tests ───────────────────────────────────────────
@@ -1963,37 +2098,45 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_paused_mint_blocked() {
         let (_, client, _, user) = setup();
         client.pause();
-        client.mint(&user, &1000i128);
+        assert_eq!(
+            client.try_mint(&user, &1000i128),
+            Err(Ok(TokenError::Paused.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_paused_burn_blocked() {
         let (_, client, admin, _) = setup();
         client.pause();
-        client.burn(&admin, &1000i128);
+        assert_eq!(
+            client.try_burn(&admin, &1000i128),
+            Err(Ok(TokenError::Paused.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_paused_transfer_blocked() {
         let (_, client, admin, user) = setup();
         client.pause();
-        client.transfer(&admin, &user, &1000i128);
+        assert_eq!(
+            client.try_transfer(&admin, &user, &1000i128),
+            Err(Ok(TokenError::Paused.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn test_paused_transfer_from_blocked() {
         let (env, client, admin, user) = setup();
         let spender = Address::generate(&env);
         client.approve(&admin, &spender, &1000i128, &1000u32);
         client.pause();
-        client.transfer_from(&spender, &admin, &user, &500i128);
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &500i128),
+            Err(Ok(TokenError::Paused.into()))
+        );
     }
 
     #[test]
@@ -2022,7 +2165,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn test_non_admin_cannot_pause() {
         let env = Env::default();
         let contract_id = env.register_contract(None, TokenContract);
@@ -2052,7 +2194,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        assert!(client.try_pause().is_err());
     }
 
     // ── max_supply tests ────────────────────────────────────────────────
@@ -2101,10 +2243,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "mint would exceed max_supply")]
     fn test_mint_exceeds_max_supply() {
         let (_, client, _, user) = setup_with_cap();
-        client.mint(&user, &500_0000001i128);
+        assert_eq!(
+            client.try_mint(&user, &500_0000001i128),
+            Err(Ok(TokenError::ExceedsMaxSupply.into()))
+        );
     }
 
     #[test]
@@ -2117,7 +2261,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "initial_supply exceeds max_supply")]
     fn test_initial_supply_exceeds_max_supply() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2126,16 +2269,19 @@ mod test {
         let client = TokenContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
-        client.initialize(
-            &admin,
-            &7u32,
-            &String::from_str(&env, "Bad"),
-            &String::from_str(&env, "BAD"),
-            &2_000_0000000i128,
-            &Some(1_000_0000000i128),
-            &false,
-            &false,
-            &None,
+        assert_eq!(
+            client.try_initialize(
+                &admin,
+                &7u32,
+                &String::from_str(&env, "Bad"),
+                &String::from_str(&env, "BAD"),
+                &2_000_0000000i128,
+                &Some(1_000_0000000i128),
+                &false,
+                &false,
+                &None,
+            ),
+            Err(Ok(TokenError::ExceedsInitialSupply.into()))
         );
     }
 
@@ -2158,23 +2304,26 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract URI not set")]
     fn test_contract_uri_not_set() {
         let (_, client, _, _) = setup();
-        client.contract_uri();
+        assert_eq!(
+            client.try_contract_uri(),
+            Err(Ok(TokenError::ContractUriNotSet.into()))
+        );
     }
     // ── Upgrade tests ───────────────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "invalid wasm hash")]
     fn test_upgrade_rejects_zero_hash() {
         let (env, client, _, _) = setup();
         let zero_hash = BytesN::from_array(&env, &[0; 32]);
-        client.upgrade(&zero_hash);
+        assert_eq!(
+            client.try_upgrade(&zero_hash),
+            Err(Ok(TokenError::InvalidWasmHash.into()))
+        );
     }
 
     #[test]
-    #[should_panic]
     fn test_non_admin_cannot_upgrade() {
         let env = Env::default();
         let contract_id = env.register_contract(None, TokenContract);
@@ -2206,7 +2355,7 @@ mod test {
             },
         }]);
 
-        client.upgrade(&non_zero_hash);
+        assert!(client.try_upgrade(&non_zero_hash).is_err());
     }
 
     // ── Authorization flag tests ────────────────────────────────────────
@@ -2263,10 +2412,12 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "recipient is not authorized to hold this token")]
     fn test_transfer_to_unauthorized_blocked() {
         let (_, client, admin, user) = setup_with_auth_required();
-        client.transfer(&admin, &user, &100_0000000i128);
+        assert_eq!(
+            client.try_transfer(&admin, &user, &100_0000000i128),
+            Err(Ok(TokenError::NotAuthorizedHolder.into()))
+        );
     }
 
     #[test]
@@ -2288,7 +2439,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "authorization is not revocable for this token")]
     fn test_revoke_fails_when_not_revocable() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2311,14 +2461,19 @@ mod test {
         );
 
         client.authorize_holder(&user);
-        client.revoke_authorization(&user);
+        assert_eq!(
+            client.try_revoke_authorization(&user),
+            Err(Ok(TokenError::NotRevocable.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "recipient is not authorized to hold this token")]
     fn test_mint_to_unauthorized_blocked() {
         let (_, client, _, user) = setup_with_auth_required();
-        client.mint(&user, &1000i128);
+        assert_eq!(
+            client.try_mint(&user, &1000i128),
+            Err(Ok(TokenError::NotAuthorizedHolder.into()))
+        );
     }
 
     #[test]
@@ -2332,12 +2487,14 @@ mod test {
     // ── approve expiration tests ────────────────────────────────────────
 
     #[test]
-    #[should_panic(expected = "expiration_ledger must be in the future")]
     fn test_approve_expired_ledger_panics() {
         let (env, client, admin, _) = setup();
         let spender = Address::generate(&env);
         // Ledger sequence is 0 by default; expiration_ledger = 0 is NOT in the future.
-        client.approve(&admin, &spender, &100i128, &0u32);
+        assert_eq!(
+            client.try_approve(&admin, &spender, &100i128, &0u32),
+            Err(Ok(TokenError::InvalidLedgerRange.into()))
+        );
     }
 
     #[test]
@@ -2367,7 +2524,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "insufficient allowance")]
     fn test_transfer_from_after_expiry_reverts_cleanly() {
         let (env, client, admin, user) = setup();
         let spender = Address::generate(&env);
@@ -2375,9 +2531,11 @@ mod test {
         client.approve(&admin, &spender, &100i128, &100u32);
         env.ledger().set_sequence_number(200);
 
-        // Must revert with the standard "insufficient allowance" message,
-        // not an opaque archived-entry failure.
-        client.transfer_from(&spender, &admin, &user, &1i128);
+        // Must revert with the standard insufficient allowance error
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &1i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
     }
 
   #[test]
@@ -2474,38 +2632,46 @@ fn test_approve_blocked_when_frozen() {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_set_compliance_node_rejects_non_contract_address() {
         let (env, client, _, _) = setup();
         // A plain account address is not a contract, so the probe fails and the
         // address is refused instead of silently bricking every transfer.
-        client.set_compliance_node(&Some(Address::generate(&env)));
+        assert_eq!(
+            client.try_set_compliance_node(&Some(Address::generate(&env))),
+            Err(Ok(TokenError::InvalidComplianceNode.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_set_compliance_node_rejects_contract_without_can_trade() {
         let (env, client, _, _) = setup();
         let wrong = env.register_contract(None, WrongInterfaceContract);
-        client.set_compliance_node(&Some(wrong));
+        assert_eq!(
+            client.try_set_compliance_node(&Some(wrong)),
+            Err(Ok(TokenError::InvalidComplianceNode.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_set_compliance_node_rejects_the_token_itself() {
         let (_, client, _, _) = setup();
         // The simplest form of the bricking mistake: pointing the token at
         // itself. The probe re-enters and fails, so it never gets stored.
         let own = client.address.clone();
-        client.set_compliance_node(&Some(own));
+        assert_eq!(
+            client.try_set_compliance_node(&Some(own)),
+            Err(Ok(TokenError::InvalidComplianceNode.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_set_compliance_node_rejects_panicking_node() {
         let (env, client, _, _) = setup();
         let node = env.register_contract(None, PanickingComplianceNode);
-        client.set_compliance_node(&Some(node));
+        assert_eq!(
+            client.try_set_compliance_node(&Some(node)),
+            Err(Ok(TokenError::InvalidComplianceNode.into()))
+        );
     }
 
     #[test]
