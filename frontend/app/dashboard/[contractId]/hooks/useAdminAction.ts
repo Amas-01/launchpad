@@ -2,6 +2,9 @@
 
 import { useCallback, useState } from "react";
 import { TransactionBuilder, rpc, Contract } from "@stellar/stellar-sdk";
+import { Client as TokenClient } from "@/lib/bindings/token/src/index";
+import { Client as VestingClient } from "@/lib/bindings/vesting/src/index";
+import { parseSorobanError } from "@/lib/transactionSimulator";
 import { useWallet } from "../../../hooks/useWallet";
 import { useNetwork } from "../../../providers/NetworkProvider";
 import { useToast } from "../../../providers/ToastProvider";
@@ -132,56 +135,63 @@ export function useAdminAction(
         publicKey,
         server,
         simulator,
+        tokenClient: new TokenClient({
+          networkPassphrase: networkConfig.passphrase,
+          contractId,
+          rpcUrl: server.serverURL.toString(),
+          publicKey,
+        }),
+        getVestingClient: (vestingContractId: string) => new VestingClient({
+          networkPassphrase: networkConfig.passphrase,
+          contractId: vestingContractId,
+          rpcUrl: server.serverURL.toString(),
+          publicKey,
+        })
       };
 
       try {
-        const call = await def.resolve(data, ctx);
-        const targetContractId = call.contractId ?? contractId;
-
-        // 1. Preflight — capability-specific where it adds diagnostics,
-        //    generic simulation otherwise, skipped for input-free calls.
-        const mode = def.preflight ?? "simulate";
-        let result: PreflightCheckResult | null = null;
-        if (typeof mode === "function") {
-          result = await mode(data, ctx);
-        } else if (mode === "simulate") {
-          result = await simulator.simulateContract(
-            targetContractId,
-            call.method,
-            call.args,
-            publicKey,
-          );
+        // 1. Preflight
+        if (typeof def.preflight === "function") {
+          const result = await def.preflight(data, ctx);
+          if (result) {
+            setPreflight((prev) => ({ ...prev, [action]: result }));
+          }
+          if (result?.errors?.length) {
+            toast.show({
+              title: `${def.label} simulation failed`,
+              message: result.errors[0],
+              variant: "error",
+            });
+            return false;
+          }
         }
 
-        if (result) {
-          setPreflight((prev) => ({ ...prev, [action]: result }));
-        }
-        if (result?.errors?.length) {
+        // 2. Build and simulate using typed bindings
+        let assembledTx;
+        try {
+          assembledTx = await def.resolve(data, ctx);
+        } catch (simErr) {
+          const errorMessage = simErr instanceof Error ? simErr.message : String(simErr);
+          const userFriendlyError = parseSorobanError(errorMessage);
+          
+          setPreflight((prev) => ({
+            ...prev,
+            [action]: {
+              success: false,
+              warnings: [],
+              errors: [userFriendlyError],
+            },
+          }));
+          
           toast.show({
             title: `${def.label} simulation failed`,
-            message: result.errors[0],
+            message: userFriendlyError,
             variant: "error",
           });
           return false;
         }
 
-        // 2. Build, simulate, assemble.
-        const account = await server.getAccount(publicKey);
-        const tx = new TransactionBuilder(account, {
-          fee: "1000",
-          networkPassphrase: networkConfig.passphrase,
-        })
-          .addOperation(
-            new Contract(targetContractId).call(call.method, ...call.args),
-          )
-          .setTimeout(30)
-          .build();
-
-        const sim = await server.simulateTransaction(tx);
-        if (rpc.Api.isSimulationError(sim)) {
-          throw new Error(`Simulation failed: ${sim.error}`);
-        }
-        const prepared = rpc.assembleTransaction(tx, sim).build();
+        const prepared = assembledTx.built!;
 
         // 3. Sign and submit.
         let signedXdr: string;

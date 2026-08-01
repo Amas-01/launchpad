@@ -15,7 +15,9 @@
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ci": "CI=true playwright test",
     "test:e2e:report": "playwright show-report",
-    "test:e2e:install": "playwright install --with-deps"
+    "test:e2e:install": "playwright install --with-deps",
+    "bindings:generate": "stellar contract bindings typescript --wasm ../target/wasm32-unknown-unknown/release/soroban_token.wasm --output-dir lib/bindings/token --overwrite && stellar contract bindings typescript --wasm ../target/wasm32-unknown-unknown/release/soroban_vesting.wasm --output-dir lib/bindings/vesting --overwrite",
+    "bindings:check": "npm run bindings:generate && git diff --exit-code lib/bindings"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
