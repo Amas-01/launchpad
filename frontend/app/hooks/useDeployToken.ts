@@ -5,6 +5,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { useWallet } from "./useWallet";
 import { useNetwork } from "../providers/NetworkProvider";
 import { toBaseUnits } from "@/lib/utils";
+import { Client as TokenClient } from "@/lib/bindings/token/src/index";
 
 // Generate random bytes for salt
 function randomBytes(length: number): Buffer {
@@ -327,33 +328,7 @@ async function initializeContract(
   const sourceAccount = await rpc.getAccount(sourcePublicKey);
 
   // Build the initialize() call
-  const contract = new StellarSdk.Contract(contractId);
-
-  // Convert parameters to ScVals
-  const adminScVal = new StellarSdk.Address(params.adminAddress).toScVal();
-  const decimalScVal = StellarSdk.nativeToScVal(params.decimals, { type: "u32" });
-  const nameScVal = StellarSdk.nativeToScVal(params.name, { type: "string" });
-  const symbolScVal = StellarSdk.nativeToScVal(params.symbol, { type: "string" });
-  const initialSupplyScVal = StellarSdk.nativeToScVal(toBaseUnits(params.initialSupply, params.decimals), { type: "i128" });
-  const maxSupplyScVal = params.maxSupply
-    ? StellarSdk.nativeToScVal(toBaseUnits(params.maxSupply, params.decimals), { type: "i128" })
-    : StellarSdk.xdr.ScVal.scvVoid();
-  const authorizationRequiredScVal = StellarSdk.nativeToScVal(
-    params.authorizationRequired ?? false,
-    { type: "bool" },
-  );
-  const authorizationRevocableScVal = StellarSdk.nativeToScVal(
-    params.authorizationRevocable ?? false,
-    { type: "bool" },
-  );
-  const complianceNodeScVal =
-    params.complianceNodeAddress &&
-    params.complianceNodeAddress.trim().length > 0
-      ? new StellarSdk.Address(params.complianceNodeAddress.trim()).toScVal()
-      : StellarSdk.xdr.ScVal.scvVoid();
-
-  const initTx = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+  const client = new TokenClient({
     networkPassphrase: passphrase,
   })
     .addOperation(
@@ -368,12 +343,12 @@ async function initializeContract(
         authorizationRequiredScVal,
         authorizationRevocableScVal,
         complianceNodeScVal,
-      )
+        StellarSdk.xdr.ScVal.scvVoid(),
+      ),
     )
     .setTimeout(30)
     .build();
 
-  // Simulate
   const simResult = await rpc.simulateTransaction(initTx);
 
   if (StellarSdk.rpc.Api.isSimulationError(simResult)) {
@@ -383,18 +358,28 @@ async function initializeContract(
     } as DeployTokenError;
   }
 
-  if (!StellarSdk.rpc.Api.isSimulationSuccess(simResult)) {
+  let assembledInitTx;
+  try {
+    assembledInitTx = await client.initialize({
+      admin: params.adminAddress,
+      decimal: params.decimals,
+      name: params.name,
+      symbol: params.symbol,
+      initial_supply: BigInt(toBaseUnits(params.initialSupply, params.decimals)),
+      max_supply: params.maxSupply ? BigInt(toBaseUnits(params.maxSupply, params.decimals)) : undefined,
+      authorization_required: params.authorizationRequired ?? false,
+      authorization_revocable: params.authorizationRevocable ?? false,
+      compliance_node: params.complianceNodeAddress && params.complianceNodeAddress.trim().length > 0 ? params.complianceNodeAddress.trim() : undefined
+    });
+  } catch (err) {
     throw {
-      message: "Initialization simulation did not succeed.",
+      message: `Initialization simulation failed: ${err instanceof Error ? err.message : String(err)}`,
       type: "simulation",
     } as DeployTokenError;
   }
 
-  // Assemble
-  const assembledInitTx = StellarSdk.rpc.assembleTransaction(initTx, simResult).build();
-
   // Sign
-  const signedInitXdr = await signTransaction(assembledInitTx.toXDR(), {
+  const signedInitXdr = await signTransaction(assembledInitTx.built!.toXDR(), {
     networkPassphrase: passphrase,
   });
 

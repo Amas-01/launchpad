@@ -4,7 +4,48 @@
     "nonce": 0
   },
   "auth": [
-    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "initialize",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u32": 7
+                },
+                {
+                  "string": "FuzzToken"
+                },
+                {
+                  "string": "FZT"
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 10000000000000
+                  }
+                },
+                "void",
+                {
+                  "bool": false
+                },
+                {
+                  "bool": false
+                },
+                "void"
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
     [],
     [],
     [],
@@ -26,7 +67,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 5206706899729
+                    "lo": 2120187664714
                   }
                 }
               ]
@@ -93,14 +134,14 @@
                 "val": {
                   "i128": {
                     "hi": 0,
-                    "lo": 4793293100271
+                    "lo": 7879812335286
                   }
                 }
               }
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -141,14 +182,14 @@
                 "val": {
                   "i128": {
                     "hi": 0,
-                    "lo": 5206706899729
+                    "lo": 2120187664714
                   }
                 }
               }
             },
             "ext": "v0"
           },
-          104832
+          6307200
         ]
       ],
       [
@@ -220,6 +261,18 @@
                         },
                         "val": {
                           "u32": 7
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Initialized"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": true
                         }
                       },
                       {
@@ -321,6 +374,39 @@
       ],
       [
         {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 5541220902715666415
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 5541220902715666415
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
           "contract_code": {
             "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
           }
@@ -406,6 +492,9 @@
             "topics": [
               {
                 "symbol": "mint"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -646,7 +735,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 5206706899729
+                    "lo": 2120187664714
                   }
                 }
               ]
@@ -677,7 +766,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 5206706899729
+                "lo": 2120187664714
               }
             }
           }
@@ -800,7 +889,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 4793293100271
+                "lo": 7879812335286
               }
             }
           }
@@ -852,7 +941,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 5206706899729
+                "lo": 2120187664714
               }
             }
           }
@@ -904,7 +993,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 4793293100271
+                "lo": 7879812335286
               }
             }
           }
@@ -956,7 +1045,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 5206706899729
+                "lo": 2120187664714
               }
             }
           }
@@ -1058,7 +1147,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 4793293100271
+                "lo": 7879812335286
               }
             }
           }
@@ -1110,7 +1199,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 5206706899729
+                "lo": 2120187664714
               }
             }
           }

@@ -17,12 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check event docs are in sync with contract source
+        run: python3 scripts/generate_events_doc.py --check
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-          components: rustfmt
+          components:
+            - rustfmt
+            - clippy
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
@@ -30,11 +35,28 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run tests
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run debug tests
         run: cargo test --workspace
 
-      - name: Build WASM
-        run: cargo build --target wasm32-unknown-unknown --release
+      - name: Run release tests
+        run: cargo test --workspace --release
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      - name: Install Soroban CLI
+        run: cargo install --locked soroban-cli
+
+      - name: Build optimized WASM
+        run: soroban contract build
 
       - name: Report WASM Size
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
@@ -106,6 +128,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
       - name: Lint
         run: npm run lint
