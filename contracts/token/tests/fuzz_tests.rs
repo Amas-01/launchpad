@@ -72,6 +72,7 @@ fn setup_env() -> (Env, TokenContractClient<'static>, Address, Address, Address)
         &false,
         &false,
         &None,
+        &None,
     );
 
     (env, client, admin, user1, user2)
@@ -100,6 +101,7 @@ fn setup_capped_env(
         &Some(cap),
         &false,
         &false,
+        &None,
         &None,
     );
 
@@ -407,6 +409,7 @@ fn test_mint_i128_overflow() {
         &false,
         &false,
         &None,
+        &None,
     );
 
     // total_supply is (i128::MAX − 1); minting 2 overflows.
@@ -464,6 +467,7 @@ fn test_initialize_rejects_decimals_above_18() {
         &false,
         &false,
         &None,
+        &None,
     );
 }
 
@@ -485,6 +489,7 @@ fn test_initialize_accepts_decimals_at_boundary() {
         &None,
         &false,
         &false,
+        &None,
         &None,
     );
 

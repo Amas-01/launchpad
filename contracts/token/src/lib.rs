@@ -188,6 +188,7 @@ impl TokenContract {
         authorization_required: bool,
         authorization_revocable: bool,
         compliance_node: Option<Address>,
+        contract_uri: Option<String>,
     ) {
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, TokenError::AlreadyInitialized);
@@ -226,6 +227,9 @@ impl TokenContract {
             env.storage()
                 .instance()
                 .set(&DataKey::ComplianceNode, &node);
+        }
+        if let Some(uri) = contract_uri {
+            env.storage().instance().set(&DataKey::ContractUri, &uri);
         }
 
         // When authorization_required is enabled the admin is automatically
@@ -974,11 +978,11 @@ impl TokenContract {
             .unwrap_or(false)
     }
 
-    pub fn contract_uri(env: Env) -> String {
+    /// Returns the contract metadata URI, if one has been configured.
+    pub fn contract_uri(env: Env) -> Option<String> {
         env.storage()
             .instance()
             .get(&DataKey::ContractUri)
-            .unwrap_or_else(|| panic_with_error!(&env, TokenError::ContractUriNotSet))
     }
 
     /// Returns the configured compliance node, if any.
@@ -1459,6 +1463,7 @@ mod test {
             &false,
             &false,
             &None,
+            &None,
         );
 
         (env, client, admin, user)
@@ -1545,19 +1550,17 @@ mod test {
     #[test]
     fn test_double_init_panics() {
         let (env, client, admin, _) = setup();
-        assert_eq!(
-            client.try_initialize(
-                &admin,
-                &7u32,
-                &String::from_str(&env, "Dup"),
-                &String::from_str(&env, "DUP"),
-                &0i128,
-                &None,
-                &false,
-                &false,
-                &None,
-            ),
-            Err(Ok(TokenError::AlreadyInitialized.into()))
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Dup"),
+            &String::from_str(&env, "DUP"),
+            &0i128,
+            &None,
+            &false,
+            &false,
+            &None,
+            &None,
         );
     }
 
@@ -2061,19 +2064,17 @@ mod test {
         let (env, client, admin, _) = setup();
         client.revoke_admin();
         // Admin storage entry is gone, but Initialized must still block re-init.
-        assert_eq!(
-            client.try_initialize(
-                &admin,
-                &7u32,
-                &String::from_str(&env, "Attacker"),
-                &String::from_str(&env, "EVL"),
-                &1_000_000i128,
-                &None,
-                &false,
-                &false,
-                &None,
-            ),
-            Err(Ok(TokenError::AlreadyInitialized.into()))
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Attacker"),
+            &String::from_str(&env, "EVL"),
+            &1_000_000i128,
+            &None,
+            &false,
+            &false,
+            &None,
+            &None,
         );
     }
 
@@ -2168,6 +2169,7 @@ mod test {
             &None,
             &false,
             &false,
+            &None,
             &None,
         );
 
@@ -2283,6 +2285,7 @@ mod test {
             &false,
             &false,
             &None,
+            &None,
         );
 
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -2317,6 +2320,7 @@ mod test {
             &Some(1_000_0000000i128),
             &false,
             &false,
+            &None,
             &None,
         );
 
@@ -2369,19 +2373,17 @@ mod test {
         let client = TokenContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
-        assert_eq!(
-            client.try_initialize(
-                &admin,
-                &7u32,
-                &String::from_str(&env, "Bad"),
-                &String::from_str(&env, "BAD"),
-                &2_000_0000000i128,
-                &Some(1_000_0000000i128),
-                &false,
-                &false,
-                &None,
-            ),
-            Err(Ok(TokenError::ExceedsInitialSupply.into()))
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "Bad"),
+            &String::from_str(&env, "BAD"),
+            &2_000_0000000i128,
+            &Some(1_000_0000000i128),
+            &false,
+            &false,
+            &None,
+            &None,
         );
     }
 
@@ -2390,7 +2392,7 @@ mod test {
         let (env, client, _, _) = setup();
         let uri = String::from_str(&env, "https://example.com/token-metadata.json");
         client.update_contract_uri(&uri);
-        assert_eq!(client.contract_uri(), uri);
+        assert_eq!(client.contract_uri(), Some(uri));
     }
 
     #[test]
@@ -2400,16 +2402,38 @@ mod test {
         let uri_b = String::from_str(&env, "https://example.com/b.json");
         client.update_contract_uri(&uri_a);
         client.update_contract_uri(&uri_b);
-        assert_eq!(client.contract_uri(), uri_b);
+        assert_eq!(client.contract_uri(), Some(uri_b));
     }
 
     #[test]
-    fn test_contract_uri_not_set() {
+    fn test_contract_uri_not_set_returns_none() {
         let (_, client, _, _) = setup();
-        assert_eq!(
-            client.try_contract_uri(),
-            Err(Ok(TokenError::ContractUriNotSet.into()))
+        assert_eq!(client.contract_uri(), None);
+    }
+
+    #[test]
+    fn test_initialize_sets_contract_uri() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TokenContract);
+        let client = TokenContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let uri = String::from_str(&env, "https://example.com/token-metadata.json");
+
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "TestToken"),
+            &String::from_str(&env, "TST"),
+            &0i128,
+            &None,
+            &false,
+            &false,
+            &None,
+            &Some(uri.clone()),
         );
+
+        assert_eq!(client.contract_uri(), Some(uri));
     }
     // ── Upgrade tests ───────────────────────────────────────────────────
 
@@ -2441,6 +2465,7 @@ mod test {
             &None,
             &false,
             &false,
+            &None,
             &None,
         );
 
@@ -2479,6 +2504,7 @@ mod test {
             &None,
             &true,
             &true,
+            &None,
             &None,
         );
 
@@ -2557,6 +2583,7 @@ mod test {
             &None,
             &true,
             &false, // revocable = false
+            &None,
             &None,
         );
 
