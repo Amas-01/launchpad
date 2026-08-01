@@ -211,6 +211,10 @@ impl VestingContract {
 
         Self::_validate_total_amount(total_amount);
         assert!(
+            cliff_ledger >= env.ledger().sequence(),
+            "cliff_ledger must not be in the past"
+        );
+        assert!(
             end_ledger > cliff_ledger,
             "end_ledger must be after cliff_ledger"
         );
@@ -922,10 +926,32 @@ mod test {
                  symbol_short!(\"{topic}\") literal was found in the contract"
             );
         }
+        #[test]
+    #[should_panic(expected = "cliff_ledger must not be in the past")]
+    fn test_create_schedule_past_cliff_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+
+        client.initialize(&admin, &token_addr);
+
+        // Advance current ledger sequence to 100
+        env.ledger().set_sequence_number(100);
+
+        // Attempt to pass a cliff_ledger (50) that is before current ledger (100)
+        client.create_schedule(&recipient, &1000, &50, &200);
+    }
 
         // No symbol_short! literal exists outside the expected set — i.e.
         // nothing new was added without updating the fixture (and
         // docs/events.json / docs/events.md alongside it).
+        
         let mut rest = production_source;
         while let Some(pos) = rest.find(NEEDLE) {
             let after = &rest[pos + NEEDLE.len()..];
