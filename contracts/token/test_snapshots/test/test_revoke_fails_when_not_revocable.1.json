@@ -119,7 +119,7 @@
             },
             "ext": "v0"
           },
-          4095
+          6307200
         ]
       ],
       [
@@ -533,19 +533,13 @@
           "v0": {
             "topics": [
               {
-                "symbol": "auth"
+                "symbol": "authorize"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
               }
             ],
-            "data": {
-              "vec": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "bool": true
-                }
-              ]
-            }
+            "data": "void"
           }
         }
       },
@@ -613,7 +607,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'authorization is not revocable for this token' from contract function 'Symbol(obj#119)'"
+                  "string": "caught panic 'authorization is not revocable for this token' from contract function 'Symbol(obj#121)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
