@@ -12,6 +12,14 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, B
 /// this to `extend_ttl` fails the transaction.
 const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
 
+/// Largest schedule amount that can be linearly interpolated without an
+/// `i128` overflow for any valid pair of `u32` ledger sequence numbers.
+///
+/// `_vested_amount` multiplies this amount by the elapsed ledger count. A
+/// schedule can span up to `u32::MAX` ledgers, so keeping the amount at or
+/// below this ceiling makes that intermediate multiplication safe.
+const MAX_VESTING_AMOUNT: i128 = i128::MAX / u32::MAX as i128;
+
 /// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
 /// us a more precise target (e.g. it's already in the past): about a year.
 ///
@@ -39,6 +47,7 @@ pub enum DataKey {
     Locked,
     TokenContract,
     IsPaused,
+    TotalCommitted,
     Schedule(Address, u32),
     ScheduleCount(Address),
     RecipientCount,
@@ -65,6 +74,14 @@ pub struct ScheduleInput {
     pub end_ledger: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct Solvency {
+    pub token_balance: i128,
+    pub total_committed: i128,
+    pub solvent: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
@@ -85,7 +102,7 @@ impl VestingContract {
     /// Set the admin and the token contract this vesting module manages.
     pub fn initialize(env: Env, admin: Address, token_contract: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            panic_with_error!(&env, VestingError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -116,7 +133,7 @@ impl VestingContract {
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
-            .expect("no pending admin");
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NoPendingAdmin));
         pending.require_auth();
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
@@ -141,7 +158,11 @@ impl VestingContract {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
 
-        assert!(total_amount > 0, "total_amount must be positive");
+        Self::_validate_total_amount(total_amount);
+        assert!(
+            cliff_ledger >= env.ledger().sequence(),
+            "cliff_ledger must not be in the past"
+        );
         assert!(
             end_ledger > cliff_ledger,
             "end_ledger must be after cliff_ledger"
@@ -155,11 +176,13 @@ impl VestingContract {
             .storage()
             .instance()
             .get(&DataKey::TokenContract)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
 
         // Atomically transfer tokens from admin to this contract
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
+        Self::_increase_total_committed(&env, total_amount);
+        Self::_assert_solvent(&env, &token_addr);
 
         let schedule = VestingSchedule {
             recipient: recipient.clone(),
@@ -199,15 +222,19 @@ impl VestingContract {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
 
-        assert!(schedules.len() > 0, "schedules cannot be empty");
-        assert!(schedules.len() <= 50, "batch size exceeds maximum of 50");
+        if schedules.len() == 0 {
+            panic_with_error!(&env, VestingError::BatchEmpty);
+        }
+        if schedules.len() > 50 {
+            panic_with_error!(&env, VestingError::BatchTooLarge);
+        }
 
         // Get the token contract address
         let token_addr: Address = env
             .storage()
             .instance()
             .get(&DataKey::TokenContract)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
 
         let mut total_amount: i128 = 0;
         let mut assigned_indexes = Vec::new(&env);
@@ -217,7 +244,7 @@ impl VestingContract {
         for i in 0..schedules.len() {
             let input = schedules.get(i).expect("index out of bounds");
 
-            assert!(input.total_amount > 0, "total_amount must be positive");
+            Self::_validate_total_amount(input.total_amount);
             assert!(
                 input.end_ledger > input.cliff_ledger,
                 "end_ledger must be after cliff_ledger"
@@ -237,6 +264,8 @@ impl VestingContract {
         // Phase 2: Transfer total amount from admin to contract in one transaction
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         token_client.transfer(&admin, &env.current_contract_address(), &total_amount);
+        Self::_increase_total_committed(&env, total_amount);
+        Self::_assert_solvent(&env, &token_addr);
 
         // Phase 3: Create all schedules
         let mut created_count: u32 = 0;
@@ -288,14 +317,19 @@ impl VestingContract {
         Self::_check_paused(&env);
         let (key, mut schedule) = Self::_load_schedule(&env, &recipient, index);
 
-        assert!(!schedule.revoked, "schedule has been revoked");
+        if schedule.revoked {
+            panic_with_error!(&env, VestingError::ScheduleRevoked);
+        }
 
         let vested = Self::_vested_amount(&env, &schedule);
         let releasable = vested - schedule.released;
-        assert!(releasable > 0, "nothing to release");
+        if releasable <= 0 {
+            panic_with_error!(&env, VestingError::NothingToRelease);
+        }
 
         schedule.released += releasable;
         env.storage().persistent().set(&key, &schedule);
+        Self::_decrease_total_committed(&env, releasable);
 
         // Extend TTL for the schedule to prevent archiving
         // saturating_sub prevents u32 underflow when the schedule has fully vested (current_ledger > end_ledger)
@@ -315,7 +349,7 @@ impl VestingContract {
             .storage()
             .instance()
             .get(&DataKey::TokenContract)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
 
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         token_client.transfer(&env.current_contract_address(), &recipient, &releasable);
@@ -354,22 +388,26 @@ impl VestingContract {
 
         let (key, mut schedule) = Self::_load_schedule(&env, &recipient, index);
 
-        assert!(!schedule.revoked, "schedule already revoked");
+        if schedule.revoked {
+            panic_with_error!(&env, VestingError::AlreadyRevoked);
+        }
 
         let vested = Self::_vested_amount(&env, &schedule);
         let releasable = vested - schedule.released;
         let unvested = schedule.total_amount - vested;
+        let committed = schedule.total_amount - schedule.released;
 
         // Update schedule state
         schedule.revoked = true;
         schedule.released = vested; // All vested tokens are now accounted for as released (or being released)
         env.storage().persistent().set(&key, &schedule);
+        Self::_decrease_total_committed(&env, committed);
 
         let token_addr: Address = env
             .storage()
             .instance()
             .get(&DataKey::TokenContract)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
 
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
 
@@ -384,7 +422,7 @@ impl VestingContract {
                 .storage()
                 .instance()
                 .get(&DataKey::Admin)
-                .expect("not initialized");
+                .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
             token_client.transfer(&env.current_contract_address(), &admin, &unvested);
         }
 
@@ -394,12 +432,15 @@ impl VestingContract {
 
     /// Admin-only: extend the cliff ledger of an existing (non-revoked) schedule.
     ///
+    /// Also shifts `end_ledger` by the same delta so that the total vesting
+    /// duration is preserved — the per-ledger unlock rate remains unchanged.
+    ///
     /// Rules enforced:
     /// - `new_cliff` must be strictly greater than the current `cliff_ledger`
     ///   (extension only — reduction is never allowed).
     /// - The current ledger must still be before the cliff (once the cliff has
     ///   already passed there is nothing left to delay).
-    /// - `new_cliff` must remain strictly less than `end_ledger`.
+    /// - `new_cliff` must remain strictly less than the shifted `end_ledger`.
     pub fn extend_cliff(env: Env, recipient: Address, new_cliff: u32, index: Option<u32>) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -415,20 +456,26 @@ impl VestingContract {
             new_cliff > schedule.cliff_ledger,
             "new_cliff must be later than current cliff"
         );
+
+        // Shift end_ledger by the same delta so vesting duration is preserved
+        let delta = new_cliff - schedule.cliff_ledger;
+        let old_cliff = schedule.cliff_ledger;
+        let old_end = schedule.end_ledger;
+        let new_end = schedule.end_ledger + delta;
+
         assert!(
-            new_cliff < schedule.end_ledger,
-            "new_cliff must be before end_ledger"
+            new_cliff < new_end,
+            "new_cliff must be before the shifted end_ledger"
         );
 
-        // Capture old value before mutation
-        let old_cliff = schedule.cliff_ledger;
         schedule.cliff_ledger = new_cliff;
+        schedule.end_ledger = new_end;
         env.storage().persistent().set(&key, &schedule);
 
-        // Emit event with tuple payload
+        // Emit event with old/new cliff and old/new end
         env.events().publish(
             (symbol_short!("clf_ext"), recipient),
-            (old_cliff, new_cliff),
+            (old_cliff, new_cliff, old_end, new_end),
         );
     }
 
@@ -444,6 +491,28 @@ impl VestingContract {
     pub fn released_amount(env: Env, recipient: Address, index: Option<u32>) -> i128 {
         let (_, schedule) = Self::_load_schedule(&env, &recipient, index);
         schedule.released
+    }
+
+    /// Total tokens still committed to active vesting schedules.
+    pub fn total_committed(env: Env) -> i128 {
+        Self::_total_committed(&env)
+    }
+
+    /// Compare the vesting contract's live token balance to outstanding grants.
+    pub fn solvency(env: Env) -> Solvency {
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenContract)
+            .expect("not initialized");
+        let total_committed = Self::_total_committed(&env);
+        let token_balance = Self::_token_balance(&env, &token_addr);
+
+        Solvency {
+            token_balance,
+            total_committed,
+            solvent: token_balance >= total_committed,
+        }
     }
 
     /// Returns `true` if the contract is currently paused.
@@ -530,7 +599,7 @@ impl VestingContract {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized))
     }
 
     /// Returns the token contract address managed by this vesting contract.
@@ -538,7 +607,7 @@ impl VestingContract {
         env.storage()
             .instance()
             .get(&DataKey::TokenContract)
-            .expect("not initialized")
+            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized))
     }
 
     /// Return the number of recipients tracked (including any pruned slots).
@@ -597,7 +666,9 @@ impl VestingContract {
             i += 1;
         }
 
-        assert!(pruned, "recipient not tracked");
+        if !pruned {
+            panic_with_error!(&env, VestingError::RecipientNotTracked);
+        }
         env.events().publish((symbol_short!("prune"),), recipient);
     }
 
@@ -609,7 +680,7 @@ impl VestingContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, VestingError::NotInitialized));
         admin.require_auth();
     }
 
@@ -631,8 +702,16 @@ impl VestingContract {
             .get::<DataKey, bool>(&DataKey::IsPaused)
             .unwrap_or(false)
         {
-            panic!("vesting contract is paused");
+            panic_with_error!(env, VestingError::Paused);
         }
+    }
+
+    fn _validate_total_amount(total_amount: i128) {
+        assert!(total_amount > 0, "total_amount must be positive");
+        assert!(
+            total_amount <= MAX_VESTING_AMOUNT,
+            "total_amount exceeds vesting limit"
+        );
     }
 
     fn _schedule_key(recipient: &Address, index: u32) -> DataKey {
@@ -652,16 +731,56 @@ impl VestingContract {
         Self::_extend_persistent_ttl(env, &key, ttl_ledgers);
     }
 
+    fn _total_committed(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalCommitted)
+            .unwrap_or(0)
+    }
+
+    fn _set_total_committed(env: &Env, amount: i128) {
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCommitted, &amount);
+    }
+
+    fn _increase_total_committed(env: &Env, amount: i128) {
+        let total = Self::_total_committed(env)
+            .checked_add(amount)
+            .expect("total committed overflow");
+        Self::_set_total_committed(env, total);
+    }
+
+    fn _decrease_total_committed(env: &Env, amount: i128) {
+        Self::_set_total_committed(env, Self::_total_committed(env).saturating_sub(amount));
+    }
+
+    fn _token_balance(env: &Env, token_addr: &Address) -> i128 {
+        let token_client = soroban_sdk::token::Client::new(env, token_addr);
+        token_client.balance(&env.current_contract_address())
+    }
+
+    fn _assert_solvent(env: &Env, token_addr: &Address) {
+        assert!(
+            Self::_token_balance(env, token_addr) >= Self::_total_committed(env),
+            "vesting contract underfunded"
+        );
+    }
+
     fn _resolve_schedule_index(env: &Env, recipient: &Address, index: Option<u32>) -> u32 {
         let count = Self::_schedule_count(env, recipient);
         let resolved = match index {
             Some(index) => index,
             None => {
-                assert!(count > 0, "no schedule found");
+                if count == 0 {
+                    panic_with_error!(env, VestingError::ScheduleNotFound);
+                }
                 count - 1
             }
         };
-        assert!(resolved < count, "schedule index out of bounds");
+        if resolved >= count {
+            panic_with_error!(env, VestingError::ScheduleIndexOutOfBounds);
+        }
         resolved
     }
 
@@ -676,7 +795,7 @@ impl VestingContract {
             .storage()
             .persistent()
             .get(&key)
-            .expect("no schedule found");
+            .unwrap_or_else(|| panic_with_error!(env, VestingError::ScheduleNotFound));
         (key, schedule)
     }
 
@@ -718,7 +837,11 @@ impl VestingContract {
         // Linear interpolation between cliff and end
         let elapsed = (current - schedule.cliff_ledger) as i128;
         let duration = (schedule.end_ledger - schedule.cliff_ledger) as i128;
-        schedule.total_amount * elapsed / duration
+        schedule
+            .total_amount
+            .checked_mul(elapsed)
+            .expect("vesting amount multiplication overflow")
+            / duration
     }
 
     fn _recipient_count(env: &Env) -> u32 {
@@ -805,10 +928,32 @@ mod test {
                  symbol_short!(\"{topic}\") literal was found in the contract"
             );
         }
+        #[test]
+    #[should_panic(expected = "cliff_ledger must not be in the past")]
+    fn test_create_schedule_past_cliff_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+
+        client.initialize(&admin, &token_addr);
+
+        // Advance current ledger sequence to 100
+        env.ledger().set_sequence_number(100);
+
+        // Attempt to pass a cliff_ledger (50) that is before current ledger (100)
+        client.create_schedule(&recipient, &1000, &50, &200);
+    }
 
         // No symbol_short! literal exists outside the expected set — i.e.
         // nothing new was added without updating the fixture (and
         // docs/events.json / docs/events.md alongside it).
+        
         let mut rest = production_source;
         while let Some(pos) = rest.find(NEEDLE) {
             let after = &rest[pos + NEEDLE.len()..];
@@ -932,7 +1077,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "already initialized")]
     fn test_double_init() {
         let env = Env::default();
         env.mock_all_auths();
@@ -943,7 +1087,10 @@ mod test {
         let admin = Address::generate(&env);
         let token = Address::generate(&env);
         client.initialize(&admin, &token);
-        client.initialize(&admin, &token);
+        assert_eq!(
+            client.try_initialize(&admin, &token),
+            Err(Ok(VestingError::AlreadyInitialized.into()))
+        );
     }
 
     #[test]
@@ -961,6 +1108,108 @@ mod test {
         assert_eq!(schedule.end_ledger, 200);
         assert_eq!(schedule.released, 0);
         assert!(!schedule.revoked);
+    }
+
+    #[test]
+    fn test_total_committed_tracks_schedule_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &5_000);
+
+        assert_eq!(client.total_committed(), 0);
+
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        assert_eq!(client.total_committed(), 1_000);
+        assert_eq!(token_client.balance(&contract_id), 1_000);
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 1_000,
+                total_committed: 1_000,
+                solvent: true,
+            }
+        );
+
+        env.ledger().set_sequence_number(150);
+        release_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 500);
+        assert_eq!(token_client.balance(&contract_id), 500);
+
+        client.create_schedule(&other, &300, &200, &300);
+        assert_eq!(client.total_committed(), 800);
+        assert_eq!(token_client.balance(&contract_id), 800);
+
+        revoke_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 300);
+        assert_eq!(token_client.balance(&contract_id), 300);
+    }
+
+    #[test]
+    fn test_solvency_reports_external_token_drain() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &1_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
+
+        // Models any token-side admin action that drains already committed funds
+        // from the vesting contract, such as clawback on a clawbackable token.
+        token_client.transfer(&contract_id, &admin, &400);
+
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 600,
+                total_committed: 1_000,
+                solvent: false,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "vesting contract underfunded")]
+    fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &2_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        token_client.transfer(&contract_id, &admin, &400);
+
+        client.create_schedule(&other, &100, &100, &200);
     }
 
     #[test]
@@ -990,6 +1239,37 @@ mod test {
     }
 
     #[test]
+    fn test_vested_amount_is_safe_for_large_amounts_and_long_durations() {
+        let env = Env::default();
+        let recipient = Address::generate(&env);
+        let total_amount = MAX_VESTING_AMOUNT;
+
+        // Exercise the largest valid amount over several long ledger spans.
+        // Each result must remain within the schedule allocation, proving the
+        // interpolation intermediate does not wrap.
+        for end_ledger in [1_000_000u32, u32::MAX - 1, u32::MAX] {
+            let schedule = VestingSchedule {
+                recipient: recipient.clone(),
+                total_amount,
+                cliff_ledger: 0,
+                end_ledger,
+                released: 0,
+                revoked: false,
+            };
+            env.ledger().set_sequence_number(end_ledger - 1);
+            let vested = VestingContract::_vested_amount(&env, &schedule);
+            assert!(vested > 0);
+            assert!(vested <= total_amount);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "total_amount exceeds vesting limit")]
+    fn test_total_amount_above_vesting_limit_is_rejected() {
+        VestingContract::_validate_total_amount(MAX_VESTING_AMOUNT + 1);
+    }
+
+    #[test]
     fn test_release_incremental() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1012,7 +1292,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "nothing to release")]
     fn test_double_release_same_ledger_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1023,7 +1302,10 @@ mod test {
 
         env.ledger().set_sequence_number(150);
         release_latest(&client, &recipient);
-        release_latest(&client, &recipient);
+        assert_eq!(
+            client.try_release(&recipient, &latest_index()),
+            Err(Ok(VestingError::NothingToRelease.into()))
+        );
     }
 
     // ── Regression tests for issue #215: u32 underflow in release() ────
@@ -1206,7 +1488,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "schedule has been revoked")]
     fn test_release_after_revoke_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1219,11 +1500,13 @@ mod test {
         revoke_latest(&client, &recipient);
 
         env.ledger().set_sequence_number(200);
-        release_latest(&client, &recipient);
+        assert_eq!(
+            client.try_release(&recipient, &latest_index()),
+            Err(Ok(VestingError::ScheduleRevoked.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "schedule already revoked")]
     fn test_double_revoke_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1233,11 +1516,13 @@ mod test {
         let (_, recipient) = setup_schedule(&env, &client);
 
         revoke_latest(&client, &recipient);
-        revoke_latest(&client, &recipient);
+        assert_eq!(
+            client.try_revoke(&recipient, &latest_index()),
+            Err(Ok(VestingError::AlreadyRevoked.into()))
+        );
     }
 
     #[test]
-    #[should_panic]
     fn test_revoke_non_admin_panics() {
         let env = Env::default();
         let contract_id = env.register_contract(None, VestingContract);
@@ -1246,7 +1531,7 @@ mod test {
         let recipient = Address::generate(&env);
         let token = Address::generate(&env);
         client.initialize(&admin, &token);
-        client.revoke(&recipient, &latest_index());
+        assert!(client.try_revoke(&recipient, &latest_index()).is_err());
     }
 
     // ── extend_cliff tests ─────────────────────────────────────────────
@@ -1265,9 +1550,9 @@ mod test {
 
         let schedule = get_schedule_latest(&client, &recipient);
         assert_eq!(schedule.cliff_ledger, 150);
-        assert_eq!(schedule.end_ledger, 200); // unchanged
+        assert_eq!(schedule.end_ledger, 250); // shifted by same delta (+50)
 
-        // Verify event emission contains (old_cliff, new_cliff)
+        // Verify event emission contains (old_cliff, new_cliff, old_end, new_end)
         use soroban_sdk::xdr::ToXdr;
         use soroban_sdk::IntoVal;
         let events = env.events().all();
@@ -1279,10 +1564,51 @@ mod test {
                 (
                     contract_id,
                     (symbol_short!("clf_ext"), recipient).into_val(&env),
-                    (100u32, 150u32).into_val(&env)
+                    (100u32, 150u32, 200u32, 250u32).into_val(&env)
                 )
             ]
         );
+    }
+
+    #[test]
+    fn test_extend_cliff_preserves_unlock_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        // Original: cliff=100, end=200, duration=100 ledgers.
+        // At ledger 150 (midpoint), 500 out of 1000 should be vested.
+        env.ledger().set_sequence_number(150);
+        let vested_before = vested_amount_latest(&client, &recipient);
+
+        // Now extend cliff from 100 to 120 (delta = +20).
+        // With the fix, end should also shift by +20 to 220, preserving the
+        // 100-ledger vesting duration. At ledger 170 (midpoint of 120→220),
+        // the same 500 out of 1000 should be vested.
+        env.ledger().set_sequence_number(50); // must be before cliff
+        extend_cliff_latest(&client, &recipient, 120u32);
+
+        let schedule = get_schedule_latest(&client, &recipient);
+        assert_eq!(schedule.cliff_ledger, 120);
+        assert_eq!(schedule.end_ledger, 220);
+        assert_eq!(schedule.end_ledger - schedule.cliff_ledger, 100); // duration preserved
+
+        // At the new midpoint (170) the vested amount should be the same
+        env.ledger().set_sequence_number(170);
+        let vested_after = vested_amount_latest(&client, &recipient);
+        assert_eq!(vested_before, vested_after);
+
+        // At the original end_ledger (200), tokens should NOT be fully
+        // vested anymore — only 80% should be vested (80/100 elapsed)
+        env.ledger().set_sequence_number(200);
+        assert_eq!(vested_amount_latest(&client, &recipient), 800);
+
+        // At the new end_ledger (220), tokens should be fully vested
+        env.ledger().set_sequence_number(220);
+        assert_eq!(vested_amount_latest(&client, &recipient), 1000);
     }
 
     #[test]
@@ -1296,11 +1622,13 @@ mod test {
         let (_, recipient) = setup_schedule(&env, &client);
 
         // cliff is 100; trying to set it to 50 must panic
-        extend_cliff_latest(&client, &recipient, 50u32);
+        assert_eq!(
+            client.try_extend_cliff(&recipient, &50u32, &latest_index()),
+            Err(Ok(VestingError::CliffNotExtended.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "cliff has already passed")]
     fn test_extend_cliff_after_cliff_passed() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1311,11 +1639,13 @@ mod test {
 
         // Jump past the cliff
         env.ledger().set_sequence_number(120);
-        extend_cliff_latest(&client, &recipient, 150u32);
+        assert_eq!(
+            client.try_extend_cliff(&recipient, &150u32, &latest_index()),
+            Err(Ok(VestingError::CliffPassed.into()))
+        );
     }
 
     #[test]
-    #[should_panic]
     fn test_extend_cliff_non_admin_panics() {
         let env = Env::default();
         // Do NOT mock all auths — only mock nothing so admin auth fails
@@ -1334,11 +1664,10 @@ mod test {
 
         // Clear auths so the next call fails
         env.set_auths(&[]);
-        client.extend_cliff(&recipient, &150u32, &latest_index());
+        assert!(client.try_extend_cliff(&recipient, &150u32, &latest_index()).is_err());
     }
 
     #[test]
-    #[should_panic(expected = "vesting contract is paused")]
     fn test_extend_cliff_blocked_when_paused() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1348,12 +1677,13 @@ mod test {
         let (_, recipient) = setup_schedule(&env, &client);
 
         client.pause();
-        // Must panic: "vesting contract is paused"
-        extend_cliff_latest(&client, &recipient, 150u32);
+        assert_eq!(
+            client.try_extend_cliff(&recipient, &150u32, &latest_index()),
+            Err(Ok(VestingError::Paused.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "total_amount must be positive")]
     fn test_create_schedule_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1363,7 +1693,10 @@ mod test {
             Address::generate(&env),
         );
         client.initialize(&admin, &Address::generate(&env));
-        client.create_schedule(&recipient, &0, &100, &200);
+        assert_eq!(
+            client.try_create_schedule(&recipient, &0, &100, &200),
+            Err(Ok(VestingError::InvalidAmount.into()))
+        );
     }
 
     #[test]
@@ -1462,7 +1795,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "batch size exceeds maximum of 50")]
     fn test_create_schedules_batch_too_large() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1489,11 +1821,13 @@ mod test {
             });
         }
 
-        client.create_schedules_batch(&schedules);
+        assert_eq!(
+            client.try_create_schedules_batch(&schedules),
+            Err(Ok(VestingError::BatchTooLarge.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "schedules cannot be empty")]
     fn test_create_schedules_batch_empty() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1507,11 +1841,13 @@ mod test {
         client.initialize(&admin, &token_addr);
 
         let schedules = Vec::new(&env);
-        client.create_schedules_batch(&schedules);
+        assert_eq!(
+            client.try_create_schedules_batch(&schedules),
+            Err(Ok(VestingError::BatchEmpty.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "total_amount must be positive")]
     fn test_create_schedules_batch_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1533,11 +1869,13 @@ mod test {
             end_ledger: 200,
         });
 
-        client.create_schedules_batch(&schedules);
+        assert_eq!(
+            client.try_create_schedules_batch(&schedules),
+            Err(Ok(VestingError::InvalidAmount.into()))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "end_ledger must be after cliff_ledger")]
     fn test_create_schedules_batch_invalid_ledgers() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1559,7 +1897,10 @@ mod test {
             end_ledger: 100,
         });
 
-        client.create_schedules_batch(&schedules);
+        assert_eq!(
+            client.try_create_schedules_batch(&schedules),
+            Err(Ok(VestingError::InvalidLedgerRange.into()))
+        );
     }
 
     #[test]

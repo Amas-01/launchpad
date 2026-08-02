@@ -511,6 +511,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -626,10 +629,17 @@
               }
             ],
             "data": {
-              "i128": {
-                "hi": 0,
-                "lo": 10
-              }
+              "vec": [
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 10
+                  }
+                },
+                {
+                  "u32": 1000
+                }
+              ]
             }
           }
         }
@@ -714,7 +724,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'insufficient allowance' from contract function 'Symbol(obj#105)'"
+                  "string": "caught panic 'insufficient allowance' from contract function 'Symbol(obj#147)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"

@@ -12,6 +12,14 @@ const config: Config = {
     testEnvironment: 'jsdom',
     // Add more setup options before each test is run
     setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
+    coverageThreshold: {
+        global: {
+            branches: 74,
+            functions: 39,
+            lines: 53,
+            statements: 53,
+        },
+    },
     moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/$1',
     },

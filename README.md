@@ -13,6 +13,7 @@ Built for founders, DAOs, and developers who need a clean interface to launch to
 - Cliff + linear vesting schedules per wallet
 - Admin panel: mint, burn, transfer ownership
 - Real-time dashboard: supply metrics, holder table, vesting progress
+- Vesting solvency checks for funded grant visibility
 - Freighter wallet integration
 - Testnet & Mainnet support
 
@@ -44,7 +45,7 @@ soroban-token-launchpad/
 │   ├── hooks/              # Stellar/Soroban React hooks
 │   └── lib/                # Contract clients & utilities
 ├── scripts/                # Deploy & keygen scripts
-└── docs/                   # Architecture & event schema docs
+└── docs/                   # Architecture, event schema, and solvency docs
 ```
 
 ---
