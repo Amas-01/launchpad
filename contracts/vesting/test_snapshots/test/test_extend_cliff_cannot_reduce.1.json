@@ -184,7 +184,10 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Recipients"
+                  "symbol": "RecipientAt"
+                },
+                {
+                  "u32": 0
                 }
               ]
             },
@@ -201,17 +204,55 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Recipients"
+                      "symbol": "RecipientAt"
+                    },
+                    {
+                      "u32": 0
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          104832
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "RecipientCount"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "symbol": "RecipientCount"
                     }
                   ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
                 }
               }
             },
@@ -1296,7 +1337,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'new_cliff must be later than current cliff' from contract function 'Symbol(obj#309)'"
+                  "string": "caught panic 'new_cliff must be later than current cliff' from contract function 'Symbol(obj#313)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

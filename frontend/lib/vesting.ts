@@ -31,6 +31,12 @@ export interface VestingInfo {
   isPaused: boolean;
 }
 
+export interface VestingSolvency {
+  tokenBalance: bigint;
+  totalCommitted: bigint;
+  solvent: boolean;
+}
+
 /* ── XDR Decoders ──────────────────────────────────────────────────── */
 
 function decodeI128(val: StellarSdk.xdr.ScVal): bigint {
@@ -50,6 +56,22 @@ function decodeAddress(val: StellarSdk.xdr.ScVal): string {
 
 function decodeBool(val: StellarSdk.xdr.ScVal): boolean {
   return val.b();
+}
+
+function decodeSolvency(val: StellarSdk.xdr.ScVal): VestingSolvency {
+  const fields = val.map();
+  if (!fields) throw new Error("Unexpected result type from solvency");
+
+  const fieldMap = new Map<string, StellarSdk.xdr.ScVal>();
+  for (const entry of fields) {
+    fieldMap.set(entry.key().sym().toString(), entry.val());
+  }
+
+  return {
+    tokenBalance: decodeI128(fieldMap.get("token_balance")!),
+    totalCommitted: decodeI128(fieldMap.get("total_committed")!),
+    solvent: decodeBool(fieldMap.get("solvent")!),
+  };
 }
 
 /* ── Simulate a read-only contract call ────────────────────────────── */
@@ -229,6 +251,17 @@ export async function fetchVestingInfo(
     currentLedger: latestLedger.sequence,
     isPaused,
   };
+}
+
+/** Fetch live vesting solvency when supported by the deployed contract. */
+export async function fetchVestingSolvency(
+  contractId: string,
+): Promise<VestingSolvency | null> {
+  try {
+    return decodeSolvency(await simulateCall(contractId, "solvency"));
+  } catch {
+    return null;
+  }
 }
 
 /**

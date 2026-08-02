@@ -519,9 +519,11 @@ async function _fetchTokenInfo(
   let contractUri: string | undefined;
   try {
     const uriVal = await simulateCall(contractId, "contract_uri", config);
-    contractUri = decodeString(uriVal);
+    if (uriVal && uriVal.switch() !== StellarSdk.xdr.ScValType.scvVoid()) {
+      contractUri = decodeString(uriVal);
+    }
   } catch {
-    // contract_uri not set or not accessible
+    // contract_uri may not be implemented or accessible; ignore.
   }
 
   let complianceNode: string | null = null;

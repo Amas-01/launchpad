@@ -2,16 +2,19 @@
 
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { VestingSolvencyBadge } from "@/components/VestingSolvencyBadge";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
   fetchScheduleCount,
   fetchVestingInfo,
+  fetchVestingSolvency,
   buildReleaseTx,
   submitTx,
   formatTokenAmount,
   truncateAddress,
   type VestingInfo,
+  type VestingSolvency,
 } from "@/lib/vesting";
 
 /* ── Soroban contract-ID regex (56 chars starting with C) ──────────── */
@@ -24,6 +27,9 @@ export function ClaimVesting() {
   const [contractId, setContractId] = useState("");
   // One VestingInfo entry per schedule index
   const [schedules, setSchedules] = useState<VestingInfo[]>([]);
+  const [solvency, setSolvency] = useState<
+    VestingSolvency | null | undefined
+  >();
   const [loading, setLoading] = useState(false);
   // Track which schedule index is currently releasing
   const [releasingIndex, setReleasingIndex] = useState<number | null>(null);
@@ -48,10 +54,15 @@ export function ClaimVesting() {
 
     setError(null);
     setSchedules([]);
+    setSolvency(undefined);
     setLoading(true);
 
     try {
-      const count = await fetchScheduleCount(trimmed, publicKey);
+      const [count, solvencyState] = await Promise.all([
+        fetchScheduleCount(trimmed, publicKey),
+        fetchVestingSolvency(trimmed),
+      ]);
+      setSolvency(solvencyState);
 
       if (count === 0) {
         setError("No vesting schedule found for your wallet on this contract.");
@@ -111,11 +122,11 @@ export function ClaimVesting() {
         });
 
         // Refresh this schedule
-        const updated = await fetchVestingInfo(
-          contractId.trim(),
-          publicKey,
-          scheduleIndex,
-        );
+        const [updated, solvencyState] = await Promise.all([
+          fetchVestingInfo(contractId.trim(), publicKey, scheduleIndex),
+          fetchVestingSolvency(contractId.trim()),
+        ]);
+        setSolvency(solvencyState);
         setSchedules((prev) => {
           const next = [...prev];
           next[scheduleIndex] = updated;
@@ -191,6 +202,10 @@ export function ClaimVesting() {
               </p>
             )}
           </div>
+
+          {solvency !== undefined && (
+            <VestingSolvencyBadge solvency={solvency} />
+          )}
 
           {/* ── One card per schedule ─────────────────────────────────── */}
           {schedules.map((info, idx) => (

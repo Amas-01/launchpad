@@ -17,7 +17,11 @@ import {
   submitTransaction,
   type VestingScheduleInfo,
 } from "@/lib/stellar";
-import { estimateVestedAmount } from "@/lib/vesting";
+import { VestingSolvencyBadge } from "@/components/VestingSolvencyBadge";
+import {
+  fetchVestingSolvency,
+  type VestingSolvency,
+} from "@/lib/vesting";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 // import { CopyButton } from "@/components/ui/CopyButton";
 import { useSoroban } from "@/hooks/useSoroban";
@@ -929,6 +933,9 @@ export default function VestingProgress({ decimals }: { decimals: number }) {
   const [vestingContract, setVestingContract] = useState("");
   const [recipient, setRecipient] = useState("");
   const [schedule, setSchedule] = useState<VestingScheduleInfo | null>(null);
+  const [solvency, setSolvency] = useState<
+    VestingSolvency | null | undefined
+  >();
   const [currentLedger, setCurrentLedger] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -939,14 +946,17 @@ export default function VestingProgress({ decimals }: { decimals: number }) {
     setLoading(true);
     setError(null);
     setSchedule(null);
+    setSolvency(undefined);
 
     try {
-      const [sched, ledger] = await Promise.all([
+      const [sched, ledger, solvencyState] = await Promise.all([
         fetchVestingSchedule(vestingContract.trim(), recipient.trim()),
         fetchCurrentLedger(),
+        fetchVestingSolvency(vestingContract.trim()),
       ]);
       setSchedule(sched);
       setCurrentLedger(ledger);
+      setSolvency(solvencyState);
     } catch (err) {
       setError(
         err instanceof Error
@@ -1007,6 +1017,10 @@ export default function VestingProgress({ decimals }: { decimals: number }) {
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <p>{error}</p>
         </div>
+      )}
+
+      {solvency !== undefined && (
+        <VestingSolvencyBadge solvency={solvency} decimals={decimals} />
       )}
 
       {/* Result */}
