@@ -95,6 +95,11 @@ export function useSoroban() {
     (signedXdr: string) => stellar.submitTransaction(signedXdr, networkConfig),
     [networkConfig],
   );
+
+  const getContractWasmHash = useCallback(
+    (contractId: string) => stellar.getContractWasmHash(contractId, networkConfig),
+    [networkConfig],
+  );
   return useMemo(
     () => ({
       fetchTokenInfo,
@@ -111,6 +116,7 @@ export function useSoroban() {
       fetchAccountOperations,
       buildBurnTransaction,
       submitTransaction,
+      getContractWasmHash,
       networkConfig,
       // Pass through formatting helpers which don't need config
       formatTokenAmount: stellar.formatTokenAmount,
@@ -131,6 +137,7 @@ export function useSoroban() {
       fetchAccountOperations,
       buildBurnTransaction,
       submitTransaction,
+      getContractWasmHash,
       networkConfig,
     ],
   );

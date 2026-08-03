@@ -19,6 +19,43 @@ function getHorizonUrl(): string {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+export interface VerificationResult {
+  status: "verified" | "modified" | "unknown";
+  deployedHash: string | null;
+  referenceHash: string | null;
+  referenceVersion: string | null;
+  isLocked: boolean;
+}
+
+export interface WasmManifestEntry {
+  wasm_hash: string;
+  source_tag: string;
+  build_ledger: string;
+}
+
+export interface WasmManifest {
+  token: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+  vesting: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+}
+
+export async function fetchWasmManifest(): Promise<WasmManifest | null> {
+  try {
+    const res = await fetch("/api/wasm-manifest");
+    if (!res.ok) return null;
+    return (await res.json()) as WasmManifest;
+  } catch {
+    return null;
+  }
+}
+
 export interface TokenInfo {
   name: string;
   symbol: string;
@@ -138,6 +175,38 @@ export async function simulateCall(
     },
     { operation: `simulate ${method}`, silent: true },
   );
+}
+
+/**
+ * Read the current WASM hash of a deployed Soroban contract.
+ *
+ * Uses the RPC getLedgerEntries endpoint to fetch the contract instance
+ * entry, which contains the executable WASM hash. Returns the hash as a
+ * lowercase hex string, or null when the entry cannot be read.
+ */
+export async function getContractWasmHash(
+  contractId: string,
+  config: NetworkConfig,
+): Promise<string | null> {
+  try {
+    const rpc = new StellarSdk.rpc.Server(config.rpcUrl);
+    const instanceKey = StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance();
+    const entry = await rpc.getContractData(contractId, instanceKey);
+    const contractData = (entry as { val: StellarSdk.xdr.LedgerEntryData }).val.contractData();
+    const scVal = contractData.val();
+    if (scVal.switch() !== StellarSdk.xdr.ScValType.scvContractInstance()) {
+      return null;
+    }
+    const instance = scVal.instance();
+    const executable = instance.executable();
+    if (executable.switch() !== StellarSdk.xdr.ContractExecutableType.contractExecutableWasm()) {
+      return null;
+    }
+    const wasmHashBuf = executable.wasmHash() as Buffer;
+    return Buffer.from(wasmHashBuf).toString("hex");
+  } catch {
+    return null;
+  }
 }
 
 function encodeTopicSymbol(symbol: string): string {
