@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
+import { useTranslations } from "next-intl";
 import {
   Copy,
   Check,
@@ -142,10 +143,11 @@ function InfoCard({ label, value }: { label: string; value: string }) {
 }
 
 function LoadingState() {
+  const t = useTranslations("token");
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
       <Loader2 className="h-8 w-8 animate-spin text-stellar-400" />
-      <p className="text-sm text-gray-400">Fetching token data...</p>
+      <p className="text-sm text-gray-400">{t("fetchingData")}</p>
     </div>
   );
 }
@@ -157,12 +159,13 @@ function ErrorState({
   message: string;
   onRetry: () => void;
 }) {
+  const t = useTranslations("common");
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 text-center">
       <AlertCircle className="h-10 w-10 text-red-400" />
       <p className="max-w-md text-gray-400">{message}</p>
       <button onClick={onRetry} className="btn-secondary px-4 py-2 text-sm">
-        Retry
+        {t("retry")}
       </button>
     </div>
   );
@@ -179,6 +182,7 @@ function HoldersTable({
   holders: TokenHolder[];
   emptyMessage?: string;
 }) {
+  const t = useTranslations("token");
   const [sortField, setSortField] = useState<SortField>("balance");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
@@ -214,7 +218,7 @@ function HoldersTable({
       <div className="glass-card p-8 text-center text-gray-500">
         <p>{emptyMessage}</p>
         <p className="mt-1 text-xs">
-          Soroban-native tokens require an indexer for full holder enumeration.
+          {t("sorobanNote")}
         </p>
       </div>
     );
@@ -330,6 +334,8 @@ export default function PublicTokenPage({
 }: {
   contractId: string;
 }) {
+  const t = useTranslations("token");
+  const tc = useTranslations("common");
   const { fetchTokenInfo, fetchTopHolders, validateTokenContract } = useSoroban();
   const { networkConfig } = useNetwork();
   const { publicKey, connected } = useWallet();
@@ -450,31 +456,29 @@ export default function PublicTokenPage({
       <TokenStatusBanner tokenInfo={tokenInfo} walletState={walletState} />
 
       {/* Token info grid */}
-      <section aria-label="Token details" className="mb-10">
-        <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
-          Token Details
-        </h2>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-          <InfoCard label="Name" value={tokenInfo.name} />
-          <InfoCard label="Symbol" value={tokenInfo.symbol} />
-          <InfoCard label="Decimals" value={String(tokenInfo.decimals)} />
-          <InfoCard label="Total Supply" value={tokenInfo.totalSupply} />
-          <InfoCard label="Circulating" value={tokenInfo.circulatingSupply} />
-          <InfoCard label="Admin" value={truncateAddress(tokenInfo.admin)} />
+      <section aria-label="Token details" className="mb-10">          <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
+            {t("tokenDetails")}
+          </h2>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            <InfoCard label={t("name")} value={tokenInfo.name} />
+            <InfoCard label={t("symbol")} value={tokenInfo.symbol} />
+            <InfoCard label={t("decimals")} value={String(tokenInfo.decimals)} />
+            <InfoCard label={t("totalSupply")} value={tokenInfo.totalSupply} />
+            <InfoCard label={t("circulating")} value={tokenInfo.circulatingSupply} />
+            <InfoCard label={t("admin")} value={truncateAddress(tokenInfo.admin)} />
         </div>
       </section>
 
-      {/* Top holders */}
-      <section aria-label="Top holders">
+      {/* Top holders */}          <section aria-label={t("holders.title")}>
         <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
-          Top Holders
+          {tc("holders")}
         </h2>
         <HoldersTable
           holders={holders}
           emptyMessage={
             contractId.startsWith("C")
-              ? "This is a Soroban-native token, so Horizon cannot enumerate its holders."
-              : "No holder data available."
+              ? t("sorobanEmpty")
+              : t("noHolderData")
           }
         />
       </section>
@@ -483,13 +487,13 @@ export default function PublicTokenPage({
       <section className="mt-10 pt-8 border-t border-white/5">
         <div className="text-center">
           <p className="text-sm text-gray-500 mb-4">
-            View this token in your dashboard with full management capabilities
+            {t("viewInDashboard")}
           </p>
           <a
             href={`/dashboard/${contractId}`}
             className="inline-flex items-center gap-2 rounded-md border border-stellar-400/30 bg-stellar-400/10 px-4 py-2 text-sm font-medium text-stellar-300 transition-colors hover:bg-stellar-400/20"
           >
-            Open in Dashboard
+            {t("openInDashboard")}
             <ExternalLink className="h-4 w-4" />
           </a>
         </div>

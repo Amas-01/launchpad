@@ -17,7 +17,7 @@ import {
 } from "@/lib/stellar";
 
 // Convert the exported array to a Set for efficient lookup
-const TRACKED_TOPICS: Set<string> = new Set(TRACKED_EVENT_TOPICS);
+const TRACKED_TOPICS = new Set<string>(TRACKED_EVENT_TOPICS);
 
 interface UseContractEventsOptions {
   intervalMs?: number;

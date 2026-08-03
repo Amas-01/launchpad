@@ -2,6 +2,7 @@
 
 import { AlertTriangle, ArrowLeft, ExternalLink } from "lucide-react";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 
 interface InvalidTokenContractProps {
   contractId: string;
@@ -12,6 +13,7 @@ export default function InvalidTokenContract({
   contractId,
   error = "This contract does not implement the SEP-41 token standard",
 }: InvalidTokenContractProps) {
+  const t = useTranslations("token.invalidContract");
   const truncatedId = contractId.length > 16 
     ? `${contractId.slice(0, 8)}...${contractId.slice(-8)}`
     : contractId;
@@ -22,40 +24,39 @@ export default function InvalidTokenContract({
         <AlertTriangle className="mx-auto h-16 w-16 text-amber-400 mb-6" />
         
         <h1 className="text-2xl font-bold text-white mb-4">
-          Invalid Token Contract
+          {t("title")}
         </h1>
         
         <p className="text-gray-400 mb-6 leading-relaxed">
-          The contract <span className="font-mono text-stellar-300">{truncatedId}</span> 
-          {" "}does not appear to be a valid SEP-41 token contract.
+          {t("description", { contractId: truncatedId })}
         </p>
         
         <div className="bg-amber-400/10 border border-amber-400/20 rounded-lg p-4 mb-6">
           <p className="text-amber-200 text-sm">
-            <strong>Error:</strong> {error}
+            <strong>{t("errorLabel")}:</strong> {error}
           </p>
         </div>
         
         <div className="text-left space-y-3 mb-8">
           <h3 className="text-lg font-semibold text-white mb-3">
-            What this means:
+            {t("whatThisMeans")}
           </h3>
           <ul className="text-gray-400 space-y-2 text-sm">
             <li className="flex items-start gap-2">
               <span className="text-stellar-400 mt-1">•</span>
-              The contract may not be a token contract at all
+              {t("notToken")}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-stellar-400 mt-1">•</span>
-              It might be missing required methods like <code className="bg-void-800 px-1 rounded">name()</code>, <code className="bg-void-800 px-1 rounded">symbol()</code>, or <code className="bg-void-800 px-1 rounded">decimals()</code>
+              {t("missingMethods", { methods: "name(), symbol(), decimals()" })}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-stellar-400 mt-1">•</span>
-              The contract could be using a different token standard
+              {t("differentStandard")}
             </li>
             <li className="flex items-start gap-2">
               <span className="text-stellar-400 mt-1">•</span>
-              There might be a network connectivity issue
+              {t("networkIssue")}
             </li>
           </ul>
         </div>
@@ -66,7 +67,7 @@ export default function InvalidTokenContract({
             className="inline-flex items-center gap-2 rounded-md border border-stellar-400/30 bg-stellar-400/10 px-4 py-2 text-sm font-medium text-stellar-300 transition-colors hover:bg-stellar-400/20"
           >
             <ArrowLeft className="h-4 w-4" />
-            Back to Home
+            {t("backToHome")}
           </Link>
           
           <a
@@ -76,13 +77,13 @@ export default function InvalidTokenContract({
             className="inline-flex items-center gap-2 rounded-md border border-gray-600 bg-gray-700/50 px-4 py-2 text-sm font-medium text-gray-300 transition-colors hover:bg-gray-700"
           >
             <ExternalLink className="h-4 w-4" />
-            View on Explorer
+            {t("viewOnExplorer")}
           </a>
         </div>
         
         <div className="mt-8 pt-6 border-t border-white/10">
           <p className="text-xs text-gray-500">
-            If you believe this is a valid token contract, please check the contract ID and try again.
+            {t("footerNote")}
           </p>
         </div>
       </div>

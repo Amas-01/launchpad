@@ -5,6 +5,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { useWallet } from "./useWallet";
 import { useNetwork } from "../providers/NetworkProvider";
 import { toBaseUnits } from "@/lib/utils";
+import { Client as TokenClient } from "@/lib/bindings/token/src/index";
 
 // Generate random bytes for salt
 function randomBytes(length: number): Buffer {
@@ -12,6 +13,7 @@ function randomBytes(length: number): Buffer {
   if (typeof window !== "undefined" && window.crypto) {
     window.crypto.getRandomValues(array);
   } else {
+    // Fallback for Node.js environment (shouldn't happen in client component)
     for (let i = 0; i < length; i++) {
       array[i] = Math.floor(Math.random() * 256);
     }
@@ -22,8 +24,6 @@ function randomBytes(length: number): Buffer {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -56,11 +56,11 @@ export interface DeployTokenError {
 /**
  * Custom hook for deploying a Soroban SEP-41 token contract.
  *
- * Deploy and initialize happen as two separate transactions.  The contract's
- * `initialize` function enforces `admin.require_auth()`, so a front-runner
- * cannot set admin to an address they do not control.  The frontend always
- * passes the deployer's own public key as `admin`, so the wallet signature
- * satisfies the check and the admin role cannot be stolen.
+ * Encapsulates the four-step deployment flow:
+ * 1. Build the deployment transaction
+ * 2. Simulate the transaction
+ * 3. Request wallet signature
+ * 4. Broadcast and poll for result
  *
  * @example
  * ```tsx
@@ -86,30 +86,35 @@ export function useDeployToken() {
   const { connected, publicKey, signTransaction } = useWallet();
   const { networkConfig } = useNetwork();
 
-  const deployToken = useCallback(
-    async (params: DeployTokenParams): Promise<DeployTokenResult> => {
-      // ── Step 0: Validation ────────────────────────────────────────────
-      if (!connected || !publicKey) {
-        throw {
-          message: "Wallet not connected. Please connect your wallet and try again.",
-          type: "validation",
-        } as DeployTokenError;
-      }
+  const networkKey = (networkConfig?.network || networkConfig?.id || "").toLowerCase();
 
-      if (!TOKEN_WASM_HASH) {
-        throw {
-          message:
-            "Token WASM hash not configured. Please set NEXT_PUBLIC_TOKEN_WASM_HASH in your environment.",
-          type: "validation",
-        } as DeployTokenError;
-      }
+    let TOKEN_WASM_HASH: string | undefined;
+
+    if (networkKey.includes("testnet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_TESTNET;
+    } else if (networkKey.includes("mainnet") || networkKey.includes("public")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_MAINNET;
+    } else if (networkKey.includes("futurenet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_FUTURENET;
+    }
+
+    if (!TOKEN_WASM_HASH) {
+      throw {
+        message: `Token WASM hash not configured for network "${networkConfig?.network || networkConfig?.id || "selected"}". Please set NEXT_PUBLIC_TOKEN_WASM_HASH_${(networkConfig?.network || networkConfig?.id || "NETWORK").toUpperCase()} in your environment.`,
+        type: "validation",
+      } as DeployTokenError;
+    }
 
       const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
 
-      // ── Step 1: Build deploy transaction ──────────────────────────────
+      // ── Step 1: Build Transaction ─────────────────────────────────────
+      // Load the source account to get the current sequence number
       const sourceAccount = await rpc.getAccount(publicKey);
+
+      // Create a contract deployment transaction using the pre-uploaded WASM hash
       const wasmHashBuffer = Buffer.from(TOKEN_WASM_HASH, "hex");
 
+      // Build the deployment operation
       const deployOp = StellarSdk.Operation.createCustomContract({
         address: new StellarSdk.Address(publicKey),
         wasmHash: wasmHashBuffer,
@@ -149,9 +154,10 @@ export function useDeployToken() {
         } as DeployTokenError;
       }
 
+      // Assemble the transaction with simulation results (footprint, auth, fee)
       const assembledDeployTx = StellarSdk.rpc.assembleTransaction(
         deployTx,
-        simResult,
+        simResult
       ).build();
 
       // ── Step 3: Sign Transaction ──────────────────────────────────────
@@ -162,6 +168,7 @@ export function useDeployToken() {
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
+        // Detect user rejection
         if (
           errorMsg.toLowerCase().includes("user declined") ||
           errorMsg.toLowerCase().includes("user rejected") ||
@@ -180,7 +187,7 @@ export function useDeployToken() {
 
       const signedDeployTx = StellarSdk.TransactionBuilder.fromXDR(
         signedDeployXdr,
-        networkConfig.passphrase,
+        networkConfig.passphrase
       ) as StellarSdk.Transaction;
 
       // ── Step 4: Broadcast and Poll ────────────────────────────────────
@@ -203,20 +210,23 @@ export function useDeployToken() {
 
       const txHash = sendResult.hash;
 
+      // Poll for transaction result
+      let getResult: StellarSdk.rpc.Api.GetTransactionResponse;
       const maxAttempts = 30;
-      const pollInterval = 2000;
+      const pollInterval = 2000; // 2 seconds
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
-        let getResult: StellarSdk.rpc.Api.GetTransactionResponse;
         try {
           getResult = await rpc.getTransaction(txHash);
         } catch {
+          // Network error during polling — continue trying
           continue;
         }
 
         if (getResult.status === "SUCCESS") {
+          // Extract the deployed contract ID from the transaction result
           const contractId = extractContractId(getResult);
           if (!contractId) {
             throw {
@@ -225,14 +235,14 @@ export function useDeployToken() {
             } as DeployTokenError;
           }
 
-          // ── Step 5: Initialize ────────────────────────────────────────
+          // Now initialize the contract
           await initializeContract(
             rpc,
             contractId,
             publicKey,
             params,
             signTransaction,
-            networkConfig.passphrase,
+            networkConfig.passphrase
           );
 
           return {
@@ -247,14 +257,17 @@ export function useDeployToken() {
             type: "broadcast",
           } as DeployTokenError;
         }
+
+        // Status is NOT_FOUND or PENDING — continue polling
       }
 
+      // Polling timeout
       throw {
         message: `Transaction polling timeout. Hash: ${txHash}. Check the transaction status manually on a Stellar explorer.`,
         type: "timeout",
       } as DeployTokenError;
     },
-    [connected, publicKey, signTransaction, networkConfig.rpcUrl, networkConfig.passphrase],
+    [connected, publicKey, signTransaction, networkConfig.rpcUrl, networkConfig.passphrase]
   );
 
   return { deployToken };
@@ -264,45 +277,57 @@ export function useDeployToken() {
 // Helper Functions
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract the deployed contract ID from a successful transaction result.
+ */
+function extractContractId(
+  result: StellarSdk.rpc.Api.GetTransactionResponse
+): string | null {
+  if (result.status !== "SUCCESS" || !result.resultMetaXdr) {
+    return null;
+  }
+
+  try {
+    const meta = result.resultMetaXdr;
+    // The contract ID is typically in the transaction meta's created contract entry
+    // For createCustomContract, the contract address is deterministic based on deployer + salt
+    // We need to parse the meta to find the created contract
+
+    // This is a simplified extraction — in production, parse the meta XDR properly
+    // For now, we'll extract from the sorobanMeta if available
+    const sorobanMeta = meta.v3()?.sorobanMeta();
+    if (sorobanMeta) {
+      const returnValue = sorobanMeta.returnValue();
+      if (returnValue) {
+        // The return value of createCustomContract is the contract address
+        const address = StellarSdk.Address.fromScVal(returnValue);
+        return address.toString();
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.error("Failed to extract contract ID:", err);
+    return null;
+  }
+}
+
+/**
+ * Initialize the deployed token contract with the provided parameters.
+ */
 async function initializeContract(
   rpc: StellarSdk.rpc.Server,
   contractId: string,
   sourcePublicKey: string,
   params: DeployTokenParams,
   signTransaction: (xdr: string, opts?: { networkPassphrase?: string }) => Promise<string>,
-  passphrase: string,
+  passphrase: string
 ): Promise<void> {
+  // Load source account
   const sourceAccount = await rpc.getAccount(sourcePublicKey);
 
-  const contract = new StellarSdk.Contract(contractId);
-
-  const adminScVal = new StellarSdk.Address(params.adminAddress).toScVal();
-  const decimalScVal = StellarSdk.nativeToScVal(params.decimals, { type: "u32" });
-  const nameScVal = StellarSdk.nativeToScVal(params.name, { type: "string" });
-  const symbolScVal = StellarSdk.nativeToScVal(params.symbol, { type: "string" });
-  const initialSupplyScVal = StellarSdk.nativeToScVal(
-    toBaseUnits(params.initialSupply, params.decimals),
-    { type: "i128" },
-  );
-  const maxSupplyScVal = params.maxSupply
-    ? StellarSdk.nativeToScVal(toBaseUnits(params.maxSupply, params.decimals), { type: "i128" })
-    : StellarSdk.xdr.ScVal.scvVoid();
-  const authorizationRequiredScVal = StellarSdk.nativeToScVal(
-    params.authorizationRequired ?? false,
-    { type: "bool" },
-  );
-  const authorizationRevocableScVal = StellarSdk.nativeToScVal(
-    params.authorizationRevocable ?? false,
-    { type: "bool" },
-  );
-  const complianceNodeScVal =
-    params.complianceNodeAddress &&
-    params.complianceNodeAddress.trim().length > 0
-      ? new StellarSdk.Address(params.complianceNodeAddress.trim()).toScVal()
-      : StellarSdk.xdr.ScVal.scvVoid();
-
-  const initTx = new StellarSdk.TransactionBuilder(sourceAccount, {
-    fee: StellarSdk.BASE_FEE,
+  // Build the initialize() call
+  const client = new TokenClient({
     networkPassphrase: passphrase,
   })
     .addOperation(
@@ -317,6 +342,7 @@ async function initializeContract(
         authorizationRequiredScVal,
         authorizationRevocableScVal,
         complianceNodeScVal,
+        StellarSdk.xdr.ScVal.scvVoid(),
       ),
     )
     .setTimeout(30)
@@ -331,24 +357,37 @@ async function initializeContract(
     } as DeployTokenError;
   }
 
-  if (!StellarSdk.rpc.Api.isSimulationSuccess(simResult)) {
+  let assembledInitTx;
+  try {
+    assembledInitTx = await client.initialize({
+      admin: params.adminAddress,
+      decimal: params.decimals,
+      name: params.name,
+      symbol: params.symbol,
+      initial_supply: BigInt(toBaseUnits(params.initialSupply, params.decimals)),
+      max_supply: params.maxSupply ? BigInt(toBaseUnits(params.maxSupply, params.decimals)) : undefined,
+      authorization_required: params.authorizationRequired ?? false,
+      authorization_revocable: params.authorizationRevocable ?? false,
+      compliance_node: params.complianceNodeAddress && params.complianceNodeAddress.trim().length > 0 ? params.complianceNodeAddress.trim() : undefined
+    });
+  } catch (err) {
     throw {
-      message: "Initialization simulation did not succeed.",
+      message: `Initialization simulation failed: ${err instanceof Error ? err.message : String(err)}`,
       type: "simulation",
     } as DeployTokenError;
   }
 
-  const assembledInitTx = StellarSdk.rpc.assembleTransaction(initTx, simResult).build();
-
-  const signedInitXdr = await signTransaction(assembledInitTx.toXDR(), {
+  // Sign
+  const signedInitXdr = await signTransaction(assembledInitTx.built!.toXDR(), {
     networkPassphrase: passphrase,
   });
 
   const signedInitTx = StellarSdk.TransactionBuilder.fromXDR(
     signedInitXdr,
-    passphrase,
+    passphrase
   ) as StellarSdk.Transaction;
 
+  // Broadcast
   const sendResult = await rpc.sendTransaction(signedInitTx);
 
   if (sendResult.status === "ERROR") {
@@ -360,6 +399,7 @@ async function initializeContract(
 
   const initHash = sendResult.hash;
 
+  // Poll for initialization result
   const maxAttempts = 30;
   const pollInterval = 2000;
 
@@ -370,7 +410,7 @@ async function initializeContract(
       const getResult = await rpc.getTransaction(initHash);
 
       if (getResult.status === "SUCCESS") {
-        return;
+        return; // Initialization successful
       }
 
       if (getResult.status === "FAILED") {
@@ -380,6 +420,7 @@ async function initializeContract(
         } as DeployTokenError;
       }
     } catch {
+      // Continue polling on network errors
       continue;
     }
   }
@@ -388,29 +429,4 @@ async function initializeContract(
     message: `Initialization polling timeout. Hash: ${initHash}`,
     type: "timeout",
   } as DeployTokenError;
-}
-
-function extractContractId(
-  result: StellarSdk.rpc.Api.GetTransactionResponse,
-): string | null {
-  if (result.status !== "SUCCESS" || !result.resultMetaXdr) {
-    return null;
-  }
-
-  try {
-    const meta = result.resultMetaXdr;
-    const sorobanMeta = meta.v3()?.sorobanMeta();
-    if (sorobanMeta) {
-      const returnValue = sorobanMeta.returnValue();
-      if (returnValue) {
-        const address = StellarSdk.Address.fromScVal(returnValue);
-        return address.toString();
-      }
-    }
-
-    return null;
-  } catch (err) {
-    console.error("Failed to extract contract ID:", err);
-    return null;
-  }
 }

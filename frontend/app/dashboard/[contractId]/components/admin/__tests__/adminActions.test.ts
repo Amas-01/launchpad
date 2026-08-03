@@ -1,10 +1,9 @@
-import { Address, scValToNative, xdr } from "@stellar/stellar-sdk";
 import {
   ADMIN_ACTIONS,
   scaleAmount,
-  type AdminActionContext,
   type AdminActionKey,
 } from "../adminActions";
+import { LEDGERS_PER_DAY } from "@/lib/soroban";
 
 /**
  * `AdminPanel` had no test at all, because nothing inside a 2,351-line
@@ -20,7 +19,7 @@ const ADMIN = "GBONK2FUFJBONR6E7H6UN7H26ZNQYUCCF6YQRATRYWK3FOJGDBD3MXKX";
 
 /** `create_schedule` / `extend_cliff` resolve ledgers relative to "now". */
 const CURRENT_LEDGER = 1_000_000;
-const LEDGERS_PER_DAY = 17280;
+
 
 function makeContext(): AdminActionContext {
   return {
@@ -109,11 +108,10 @@ describe("action resolution", () => {
     );
   });
 
-  it("cancels a pending transfer by re-proposing the current admin", async () => {
-    // There is no on-chain cancel; overwriting with self neutralizes it.
+  it("routes cancellation through the dedicated on-chain cancel method", async () => {
     const call = await ADMIN_ACTIONS["cancel-admin"].resolve({}, makeContext());
-    expect(call.method).toBe("propose_admin");
-    expect(addressOf(call.args[0])).toBe(ADMIN);
+    expect(call.method).toBe("cancel_admin_proposal");
+    expect(call.args).toHaveLength(0);
   });
 
   it("targets the vesting contract, not the token, for schedule actions", async () => {

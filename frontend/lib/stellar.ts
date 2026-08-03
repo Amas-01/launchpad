@@ -519,9 +519,11 @@ async function _fetchTokenInfo(
   let contractUri: string | undefined;
   try {
     const uriVal = await simulateCall(contractId, "contract_uri", config);
-    contractUri = decodeString(uriVal);
+    if (uriVal && uriVal.switch() !== StellarSdk.xdr.ScValType.scvVoid()) {
+      contractUri = decodeString(uriVal);
+    }
   } catch {
-    // contract_uri not set or not accessible
+    // contract_uri may not be implemented or accessible; ignore.
   }
 
   let complianceNode: string | null = null;
@@ -829,6 +831,43 @@ async function resolveVestingScheduleIndex(params: {
 }
 
 /**
+ * Fetch all vesting schedules for a recipient using the aggregate getter.
+ * Replaces the N+1 pattern (get_schedule_count + N × get_schedule).
+ */
+export async function fetchAllVestingSchedules(
+  vestingContractId: string,
+  recipient: string,
+  config: NetworkConfig,
+): Promise<VestingScheduleInfo[]> {
+  const recipientScVal = new StellarSdk.Address(recipient).toScVal();
+  const result = await simulateCall(
+    vestingContractId,
+    "get_all_schedules",
+    config,
+    [recipientScVal],
+  );
+
+  const schedules: VestingScheduleInfo[] = [];
+  const vec = result.vec();
+  if (vec) {
+    for (let i = 0; i < vec.length; i++) {
+      const fields = vec[i].map()!;
+      schedules.push({
+        recipient: decodeAddress(getStructField(fields, "recipient")),
+        totalAmount: decodeI128(getStructField(fields, "total_amount")),
+        cliffLedger: decodeU32(getStructField(fields, "cliff_ledger")),
+        endLedger: decodeU32(getStructField(fields, "end_ledger")),
+        released: decodeI128(getStructField(fields, "released")),
+        revoked: getStructField(fields, "revoked").b(),
+        scheduleIndex: i,
+        scheduleCount: vec.length,
+      });
+    }
+  }
+  return schedules;
+}
+
+/**
  * Fetch a vesting schedule.
  */
 export async function fetchVestingSchedule(
@@ -1095,31 +1134,7 @@ export async function fetchTransactionHistory(
   return { items: items.reverse(), nextCursor };
 }
 
-export type TokenActivityType =
-  | "mint"
-  | "transfer"
-  | "burn"
-  | "clawback"
-  | "freeze"
-  | "unfreeze"
-  | "pause"
-  | "unpause"
-  | "authorize"
-  | "unauthorize"
-  | "set_admin"
-  | "revoke_admin"
-  | "upgrade"
-  | "init"
-  | "revoked"
-  | "approve"
-  | "set_max_b"
-  | "set_cnode"
-  | "prop_adm"
-  | "rvk_auth"
-  | "upd_uri"
-  | "set_areq"
-  | "rvk_rvc"
-  | "other";
+export type TokenActivityType = (typeof TRACKED_EVENT_TOPICS)[number] | "other";
 
 export interface TokenActivityInfo {
   id: string;

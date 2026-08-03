@@ -2,3 +2,8 @@
 node_modules
 .next
 out
+coverage/
+*.tsbuildinfo
+playwright-report/
+test-results/
+.env*.local
