@@ -366,7 +366,7 @@ export async function simulateTokenDeployment(
     // Build the ScVal arguments that match the contract's initialize
     // signature: (admin, decimal, name, symbol, initial_supply, max_supply,
     //             authorization_required, authorization_revocable,
-    //             compliance_node)
+    //             compliance_node, contract_uri)
     const maxSupplyScVal =
       maxSupply !== null
         ? StellarSdk.nativeToScVal(maxSupply, { type: "i128" })
@@ -386,6 +386,7 @@ export async function simulateTokenDeployment(
       StellarSdk.nativeToScVal(authorizationRequired, { type: "bool" }),
       StellarSdk.nativeToScVal(authorizationRevocable, { type: "bool" }),
       complianceNodeScVal,
+      StellarSdk.xdr.ScVal.scvVoid(),
     ];
 
     const account = new StellarSdk.Account(sourceAddress, "0");

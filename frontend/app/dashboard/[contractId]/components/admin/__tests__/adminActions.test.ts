@@ -1,43 +1,8 @@
-import { Address, scValToNative, xdr } from "@stellar/stellar-sdk";
 import {
   ADMIN_ACTIONS,
   scaleAmount,
-  type AdminActionContext,
   type AdminActionKey,
 } from "../adminActions";
-
-/**
- * `AdminPanel` had no test at all, because nothing inside a 2,351-line
- * component with two parallel if/else chains was independently reachable.
- * With the capabilities declared as data, the mapping from form input to
- * contract call is now directly assertable.
- */
-
-const TOKEN = "CBTSFDGN5MU5NRKWSIBCMAMUGCHOC52H7KLZ44OKSGLC26BUKBZCCERJ";
-const VESTING = "CD6RZ6E2HJHMSRRHEPCE2FWZWWVC543P67QSOPYKRAC7FIX52MZ6LMOF";
-const ALICE = "GAEQZ5WIT3VJQ35W2JCQXFFKGUKOCKSCUZGWGVXQLZCMNXKXWKFQ7TV6";
-const ADMIN = "GBONK2FUFJBONR6E7H6UN7H26ZNQYUCCF6YQRATRYWK3FOJGDBD3MXKX";
-
-/** `create_schedule` / `extend_cliff` resolve ledgers relative to "now". */
-const CURRENT_LEDGER = 1_000_000;
-const LEDGERS_PER_DAY = 17280;
-
-function makeContext(): AdminActionContext {
-  return {
-    contractId: TOKEN,
-    decimals: 7,
-    publicKey: ADMIN,
-    server: {
-      getLatestLedger: async () => ({ sequence: CURRENT_LEDGER }),
-    } as unknown as AdminActionContext["server"],
-    simulator: {} as AdminActionContext["simulator"],
-  };
-}
-
-/** Decode an Address ScVal back to its strkey. */
-function addressOf(value: xdr.ScVal): string {
-  return Address.fromScVal(value).toString();
-}
 
 describe("scaleAmount", () => {
   it("scales a decimal string into base units", () => {
@@ -109,11 +74,10 @@ describe("action resolution", () => {
     );
   });
 
-  it("cancels a pending transfer by re-proposing the current admin", async () => {
-    // There is no on-chain cancel; overwriting with self neutralizes it.
+  it("routes cancellation through the dedicated on-chain cancel method", async () => {
     const call = await ADMIN_ACTIONS["cancel-admin"].resolve({}, makeContext());
-    expect(call.method).toBe("propose_admin");
-    expect(addressOf(call.args[0])).toBe(ADMIN);
+    expect(call.method).toBe("cancel_admin_proposal");
+    expect(call.args).toHaveLength(0);
   });
 
   it("targets the vesting contract, not the token, for schedule actions", async () => {

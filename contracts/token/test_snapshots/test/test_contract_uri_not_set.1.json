@@ -376,6 +376,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -467,7 +470,7 @@
               }
             ],
             "data": {
-              "string": "caught panic 'contract URI not set' from contract function 'Symbol(obj#85)'"
+              "string": "caught panic 'contract URI not set' from contract function 'Symbol(obj#87)'"
             }
           }
         }
