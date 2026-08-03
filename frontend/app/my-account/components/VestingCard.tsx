@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Lock } from "lucide-react";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { truncateAddress, type VestingScheduleInfo } from "@/lib/stellar";
@@ -13,11 +14,11 @@ export function VestingCard({
   contractId: string;
   currentLedger: number;
 }) {
+  const t = useTranslations("myAccount");
   const totalAmount = BigInt(schedule.totalAmount);
   const released = BigInt(schedule.released);
   const unreleased = totalAmount - released;
 
-  // Calculate vesting progress
   let vestPct = 0;
   if (currentLedger >= schedule.endLedger) {
     vestPct = 100;
@@ -32,12 +33,12 @@ export function VestingCard({
     totalAmount > 0n ? Number((released * 100n) / totalAmount) : 0;
 
   const statusLabel = schedule.revoked
-    ? "Revoked"
+    ? t("revoked")
     : currentLedger < schedule.cliffLedger
-      ? "Cliff Pending"
+      ? t("cliffPending")
       : currentLedger >= schedule.endLedger
-        ? "Fully Vested"
-        : "Vesting";
+        ? t("fullyVested")
+        : t("vesting");
 
   const statusColor = schedule.revoked
     ? "text-red-400 bg-red-400/10 border-red-400/20"
@@ -51,14 +52,13 @@ export function VestingCard({
         <div className="flex items-center gap-2">
           <Lock className="h-4 w-4 text-stellar-400" />
           <span className="text-xs text-gray-400" title={contractId}>
-            Contract: {truncateAddress(contractId, 6)}
+            {t("contractLabel", { contractId: truncateAddress(contractId, 6) })}
           </span>
           <CopyButton value={contractId} label="Copy contract ID" />
           {schedule.scheduleCount !== undefined &&
             schedule.scheduleCount > 1 && (
               <span className="rounded-full border border-stellar-400/20 bg-stellar-400/10 px-2 py-0.5 text-xs text-stellar-400">
-                Schedule {(schedule.scheduleIndex ?? 0) + 1} of{" "}
-                {schedule.scheduleCount}
+                {t("scheduleOf", { current: (schedule.scheduleIndex ?? 0) + 1, count: schedule.scheduleCount })}
               </span>
             )}
         </div>
@@ -71,30 +71,29 @@ export function VestingCard({
 
       <div className="grid grid-cols-3 gap-4 text-center">
         <div>
-          <p className="text-xs text-gray-500">Total</p>
+          <p className="text-xs text-gray-500">{t("total")}</p>
           <p className="font-mono text-sm font-semibold text-white">
             {totalAmount.toLocaleString()}
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Released</p>
+          <p className="text-xs text-gray-500">{t("released")}</p>
           <p className="font-mono text-sm font-semibold text-green-400">
             {released.toLocaleString()}
           </p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Unreleased</p>
+          <p className="text-xs text-gray-500">{t("unreleased")}</p>
           <p className="font-mono text-sm font-semibold text-amber-400">
             {unreleased.toLocaleString()}
           </p>
         </div>
       </div>
 
-      {/* Progress bars */}
       <div className="mt-4 space-y-2">
         <div>
           <div className="mb-1 flex justify-between text-xs text-gray-500">
-            <span>Vested</span>
+            <span>{t("vested")}</span>
             <span>{vestPct.toFixed(1)}%</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-void-700">
@@ -106,7 +105,7 @@ export function VestingCard({
         </div>
         <div>
           <div className="mb-1 flex justify-between text-xs text-gray-500">
-            <span>Released</span>
+            <span>{t("released")}</span>
             <span>{releasedPct.toFixed(1)}%</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-void-700">

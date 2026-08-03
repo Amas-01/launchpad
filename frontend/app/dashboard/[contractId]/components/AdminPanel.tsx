@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { useTranslations } from "next-intl";
 import {
   ShieldAlert,
   ExternalLink,
@@ -12,10 +13,13 @@ import { useWallet } from "../../../hooks/useWallet";
 import { useNetwork } from "../../../providers/NetworkProvider";
 import { useAdminAction } from "../hooks/useAdminAction";
 import { useTokenAdminState } from "../hooks/useTokenAdminState";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
 import { MintCard } from "./admin/MintCard";
 import { SupplyCard } from "./admin/SupplyCard";
 import { VestingCard } from "./admin/VestingCard";
 import { ManageVestingCard } from "./admin/ManageVestingCard";
+import { VestingDashboard } from "./admin/VestingDashboard";
+import { VestingUpgradeCard } from "./admin/VestingUpgradeCard";
 import {
   TransferAdminCard,
   RevokeAdminCard,
@@ -79,6 +83,7 @@ export function AdminPanel({
 }: AdminPanelProps) {
   const { publicKey } = useWallet();
   const { networkConfig } = useNetwork();
+  const t = useTranslations("admin");
 
   const admin = useAdminAction(contractId, decimals);
   const state = useTokenAdminState(admin.read);
@@ -97,7 +102,7 @@ export function AdminPanel({
         <div className="flex items-center gap-3">
           <ShieldAlert className="w-6 h-6 text-stellar-400" aria-hidden="true" />
           <h2 className="text-2xl font-bold text-white tracking-tight">
-            Admin Console
+            {t("title")}
           </h2>
         </div>
         {admin.lastTxHash && (
@@ -107,7 +112,7 @@ export function AdminPanel({
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-xs text-stellar-400 hover:text-stellar-300 transition-colors bg-stellar-400/10 px-3 py-1.5 rounded-full border border-stellar-400/20"
           >
-            Last Tx: {admin.lastTxHash.slice(0, 8)}...{" "}
+            {t("lastTx", { hash: admin.lastTxHash.slice(0, 8) })}
             <ExternalLink className="w-3 h-3" aria-hidden="true" />
           </a>
         )}
@@ -120,10 +125,9 @@ export function AdminPanel({
             aria-hidden="true"
           />
           <div className="text-sm">
-            <p className="font-semibold text-orange-200">Contract is paused</p>
+            <p className="font-semibold text-orange-200">{t("contractPaused")}</p>
             <p className="mt-1 text-xs leading-relaxed text-orange-100/80">
-              All state-changing operations (mint, burn, transfer, clawback) are
-              halted. Only the admin can unpause the contract.
+              {t("contractPausedDesc")}
             </p>
           </div>
         </div>
@@ -137,39 +141,21 @@ export function AdminPanel({
           />
           <div className="text-sm">
             <p className="font-semibold text-yellow-200">
-              Admin permanently revoked
+              {t("adminRevoked")}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-yellow-100/80">
-              This token contract is now immutable. Mint, burn, freeze, and
-              admin-transfer operations are permanently disabled. Holders can
-              still transfer and self-burn their tokens.
+              {t("adminRevokedDesc")}
             </p>
           </div>
         </div>
       )}
 
       {!state.locked && state.pendingAdmin && (
-        <div className="mb-6 flex items-start gap-3 rounded-xl border border-stellar-500/30 bg-stellar-500/5 p-4">
-          <UserPlus
-            className="mt-0.5 h-5 w-5 shrink-0 text-stellar-400"
-            aria-hidden="true"
-          />
-          <div className="text-sm">
-            <p className="font-semibold text-stellar-200">
-              Admin transfer pending
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-stellar-100/80">
-              A two-step admin transfer is in progress. Pending admin →{" "}
-              <span className="font-mono text-stellar-300">
-                {state.pendingAdmin.slice(0, 6)}…{state.pendingAdmin.slice(-6)}
-              </span>
-              .{" "}
-              {state.pendingAdmin === publicKey
-                ? "Your connected wallet is the pending admin — accept the role below to finalize."
-                : "It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."}
-            </p>
-          </div>
-        </div>
+        <PendingAdminBanner
+          pendingAdmin={state.pendingAdmin}
+          connectedWallet={publicKey}
+          nonPendingMessage="It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."
+        />
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-12">
@@ -181,6 +167,14 @@ export function AdminPanel({
 
         <VestingCard admin={admin} disabled={disabled} />
         <ManageVestingCard admin={admin} disabled={disabled} />
+        <VestingUpgradeCard admin={admin} disabled={disabled} locked={state.locked} />
+
+        {/* ── Vesting Dashboard ── */}
+        <VestingDashboard
+          tokenContractId={contractId}
+          decimals={decimals}
+          read={admin.read}
+        />
 
         <TransferAdminCard
           admin={admin}

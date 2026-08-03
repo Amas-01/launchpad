@@ -26,6 +26,16 @@ const MESSAGE_MAP: Record<Locale, AbstractIntlMessages> = {
   zh: zhMessages,
 };
 
+// All four supported locales are left-to-right today; keyed by locale (rather
+// than hardcoded "ltr") so adding a future RTL locale (e.g. Arabic, Hebrew) is
+// a one-line addition here instead of a second pass over this file.
+const LOCALE_DIR: Record<Locale, "ltr" | "rtl"> = {
+  en: "ltr",
+  es: "ltr",
+  fr: "ltr",
+  zh: "ltr",
+};
+
 const LocaleContext = createContext<LocaleContextType>({
   locale: "en",
   messages: MESSAGE_MAP.en,
@@ -62,6 +72,17 @@ export function LocaleProvider({ children }: LocaleProviderProps) {
       setMessages(MESSAGE_MAP[storedLocale]);
     }
   }, []);
+
+  // Keep the document's declared language and direction in sync with the
+  // selected locale. Screen readers, "translate this page" prompts, and
+  // hyphenation/quotation/font-fallback all resolve against `lang`, not the
+  // rendered text — leaving it at "en" breaks all of those for every other
+  // locale even though the visible strings are correctly translated.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.lang = locale;
+    document.documentElement.dir = LOCALE_DIR[locale];
+  }, [locale]);
 
   const setLocale = (newLocale: Locale) => {
     setLocaleState(newLocale);

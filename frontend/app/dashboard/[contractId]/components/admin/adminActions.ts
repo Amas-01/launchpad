@@ -1,5 +1,8 @@
 import { rpc, Address, xdr } from "@stellar/stellar-sdk";
-import { addressToScVal, i128ToScVal, nativeToScVal } from "@/lib/soroban";
+import { addressToScVal, i128ToScVal, nativeToScVal, daysToLedgers } from "@/lib/soroban";
+import { Client as TokenClient } from "@/lib/bindings/token/src/index";
+import type { AssembledTransaction } from "@stellar/stellar-sdk/contract";
+import { Client as VestingClient } from "@/lib/bindings/vesting/src/index";
 import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 import type { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import type { BatchMintEntry } from "@/lib/batch";
@@ -11,6 +14,7 @@ import type {
   ManageVestingData,
   MetadataUriData,
   UpgradeData,
+  VestingUpgradeData,
   WhaleCapData,
   ComplianceNodeData,
   AccountData,
@@ -30,8 +34,6 @@ import type {
  * Adding a capability means adding one entry here plus the UI that calls it.
  */
 
-/** Soroban ledgers per day, assuming 5-second ledgers. */
-const LEDGERS_PER_DAY = 17280;
 
 type Simulator = ReturnType<typeof useTransactionSimulator>;
 
@@ -44,15 +46,12 @@ export interface AdminActionContext {
   /** The single shared RPC client. */
   server: rpc.Server;
   simulator: Simulator;
+  tokenClient: TokenClient;
+  getVestingClient: (vestingContractId: string) => VestingClient;
 }
 
 /** The concrete contract call an action resolves to. */
-export interface ResolvedCall {
-  method: string;
-  args: xdr.ScVal[];
-  /** Defaults to the token contract; vesting actions target their own. */
-  contractId?: string;
-}
+export type ResolvedCall = AssembledTransaction<any>;
 
 export interface AdminActionDef<TData> {
   /** Used in toast titles and the screen-reader announcement. */
@@ -103,6 +102,7 @@ export interface AdminActionData {
   "revoke-auth": AccountData;
   revoke: EmptyData;
   upgrade: UpgradeData;
+  "vesting-upgrade": VestingUpgradeData;
 }
 
 export type AdminActionKey = keyof AdminActionData;
@@ -125,7 +125,7 @@ function indexToScVal(scheduleIndex: string): xdr.ScVal {
 /** "N days from now" as an absolute ledger sequence. */
 async function ledgerInDays(server: rpc.Server, days: string | number) {
   const { sequence } = await server.getLatestLedger();
-  return sequence + Math.round(Number(days) * LEDGERS_PER_DAY);
+  return daysToLedgers(days, sequence);
 }
 
 type AdminActionRegistry = {
@@ -137,12 +137,9 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   mint: {
     label: "Mint",
-    resolve: (data, ctx) => ({
-      method: "mint",
-      args: [
-        addressToScVal(data.to),
-        i128ToScVal(scaleAmount(data.amount, ctx.decimals)),
-      ],
+    resolve: async (data, ctx) => ctx.tokenClient.mint({
+      to: data.to,
+      amount: scaleAmount(data.amount, ctx.decimals)
     }),
     preflight: (data, ctx) =>
       ctx.simulator.checkMint(
@@ -155,41 +152,26 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "batch-mint": {
     label: "Batch mint",
-    resolve: (data, ctx) => ({
-      method: "mint_batch",
-      args: [
-        nativeToScVal(
-          data.entries.map((e) => new Address(e.address)),
-          { type: "vec" },
-        ),
-        nativeToScVal(
-          data.entries.map((e) => scaleAmount(e.amount, ctx.decimals)),
-          { type: "vec" },
-        ),
-      ],
+    resolve: async (data, ctx) => ctx.tokenClient.mint_batch({
+      to: data.entries.map((e) => e.address),
+      amounts: data.entries.map((e) => scaleAmount(e.amount, ctx.decimals))
     }),
     preflight: "none",
   },
 
   clawback: {
     label: "Clawback",
-    resolve: (data, ctx) => ({
-      method: "clawback",
-      args: [
-        addressToScVal(data.from),
-        i128ToScVal(scaleAmount(data.amount, ctx.decimals)),
-      ],
+    resolve: async (data, ctx) => ctx.tokenClient.clawback({
+      from: data.from,
+      amount: scaleAmount(data.amount, ctx.decimals)
     }),
   },
 
   "burn-admin": {
     label: "Burn (admin)",
-    resolve: (data, ctx) => ({
-      method: "burn_admin",
-      args: [
-        addressToScVal(data.from),
-        i128ToScVal(scaleAmount(data.amount, ctx.decimals)),
-      ],
+    resolve: async (data, ctx) => ctx.tokenClient.burn_admin({
+      from: data.from,
+      amount: scaleAmount(data.amount, ctx.decimals)
     }),
   },
 
@@ -197,31 +179,27 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   transfer: {
     label: "Propose admin",
-    resolve: (data) => ({
-      method: "propose_admin",
-      args: [addressToScVal(data.newAdmin)],
+    resolve: async (data, ctx) => ctx.tokenClient.propose_admin({
+      new_admin: data.newAdmin
     }),
   },
 
   "cancel-admin": {
     label: "Cancel admin transfer",
-    // No dedicated cancel exists on-chain, so overwrite the pending proposal
-    // with the current admin's own address. This neutralizes the transfer —
-    // the previously proposed admin can no longer accept.
-    resolve: (_data, ctx) => ({
-      method: "propose_admin",
-      args: [addressToScVal(ctx.publicKey)],
+    resolve: () => ({
+      method: "cancel_admin_proposal",
+      args: [],
     }),
   },
 
   "accept-admin": {
     label: "Accept admin",
-    resolve: () => ({ method: "accept_admin", args: [] }),
+    resolve: async (data, ctx) => ctx.tokenClient.accept_admin(),
   },
 
   revoke: {
     label: "Revoke admin",
-    resolve: () => ({ method: "revoke_admin", args: [] }),
+    resolve: async (data, ctx) => ctx.tokenClient.revoke_admin(),
     preflight: "none",
     successToast: {
       title: "Admin revoked",
@@ -236,24 +214,18 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Vesting",
     resolve: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
 
-      return {
-        contractId: data.vestingContract,
-        method: "create_schedule",
-        args: [
-          addressToScVal(data.recipient),
-          i128ToScVal(scaleAmount(data.amount, ctx.decimals)),
-          nativeToScVal(cliffLedger, { type: "u32" }),
-          nativeToScVal(endLedger, { type: "u32" }),
-        ],
-      };
+      return ctx.getVestingClient(data.vestingContract).create_schedule({
+        recipient: data.recipient,
+        total_amount: scaleAmount(data.amount, ctx.decimals),
+        cliff_ledger: cliffLedger,
+        end_ledger: endLedger
+      });
     },
     preflight: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
       return ctx.simulator.checkCreateSchedule(
         data.vestingContract,
         data.recipient,
@@ -267,30 +239,21 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "extend-cliff": {
     label: "Extend cliff",
-    resolve: async (data, ctx) => ({
-      contractId: data.vestingContract,
-      method: "extend_cliff",
-      args: [
-        addressToScVal(data.recipient),
-        // Same ledger math as create_schedule: the new cliff is an absolute
-        // ledger computed as "now + N days".
-        nativeToScVal(await ledgerInDays(ctx.server, data.newCliffDays), {
-          type: "u32",
-        }),
-        indexToScVal(data.scheduleIndex),
-      ],
-    }),
+    resolve: async (data, ctx) => {
+      const newCliffLedger = await ledgerInDays(ctx.server, data.newCliffDays);
+      return ctx.getVestingClient(data.vestingContract).extend_cliff({
+        recipient: data.recipient,
+        new_cliff: newCliffLedger,
+        index: data.scheduleIndex === "" ? undefined : Number(data.scheduleIndex)
+      });
+    },
   },
 
   "vesting-revoke": {
     label: "Revoke schedule",
-    resolve: (data) => ({
-      contractId: data.vestingContract,
-      method: "revoke",
-      args: [
-        addressToScVal(data.recipient),
-        indexToScVal(data.scheduleIndex),
-      ],
+    resolve: async (data, ctx) => ctx.getVestingClient(data.vestingContract).revoke({
+      recipient: data.recipient,
+      index: data.scheduleIndex === "" ? undefined : Number(data.scheduleIndex)
     }),
   },
 
@@ -298,41 +261,36 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "set-whale-cap": {
     label: "Set whale protection cap",
-    resolve: (data) => ({
-      method: "set_max_balance_per_account",
-      args: [nativeToScVal(Number(data.cap), { type: "u32" })],
+    resolve: async (data, ctx) => ctx.tokenClient.set_max_balance_per_account({
+      max_balance_per_account: Number(data.cap)
     }),
   },
 
   "disable-whale-cap": {
     label: "Disable whale protection",
-    resolve: () => ({
-      method: "set_max_balance_per_account",
-      args: [xdr.ScVal.scvVoid()],
+    resolve: async (data, ctx) => ctx.tokenClient.set_max_balance_per_account({
+      max_balance_per_account: undefined
     }),
   },
 
   "set-compliance-node": {
     label: "Set compliance node",
-    resolve: (data) => ({
-      method: "set_compliance_node",
-      args: [addressToScVal(data.address)],
+    resolve: async (data, ctx) => ctx.tokenClient.set_compliance_node({
+      node: data.address
     }),
   },
 
   "clear-compliance-node": {
     label: "Clear compliance node",
-    resolve: () => ({
-      method: "set_compliance_node",
-      args: [xdr.ScVal.scvVoid()],
+    resolve: async (data, ctx) => ctx.tokenClient.set_compliance_node({
+      node: undefined
     }),
   },
 
   "metadata-uri": {
     label: "Update metadata URI",
-    resolve: (data) => ({
-      method: "update_contract_uri",
-      args: [nativeToScVal(data.uri, { type: "string" })],
+    resolve: async (data, ctx) => ctx.tokenClient.update_contract_uri({
+      uri: data.uri
     }),
   },
 
@@ -340,7 +298,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   pause: {
     label: "Pause",
-    resolve: () => ({ method: "pause", args: [] }),
+    resolve: async (data, ctx) => ctx.tokenClient.pause(),
     preflight: "none",
     successToast: {
       title: "Token paused",
@@ -351,7 +309,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   unpause: {
     label: "Unpause",
-    resolve: () => ({ method: "unpause", args: [] }),
+    resolve: async (data, ctx) => ctx.tokenClient.unpause(),
     preflight: "none",
     successToast: {
       title: "Token unpaused",
@@ -361,9 +319,8 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   freeze: {
     label: "Freeze account",
-    resolve: (data) => ({
-      method: "freeze_account",
-      args: [addressToScVal(data.address)],
+    resolve: async (data, ctx) => ctx.tokenClient.freeze_account({
+      addr: data.address
     }),
     successToast: {
       title: "Account frozen",
@@ -374,9 +331,8 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   unfreeze: {
     label: "Unfreeze account",
-    resolve: (data) => ({
-      method: "unfreeze_account",
-      args: [addressToScVal(data.address)],
+    resolve: async (data, ctx) => ctx.tokenClient.unfreeze_account({
+      addr: data.address
     }),
     successToast: {
       title: "Account unfrozen",
@@ -388,9 +344,8 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   authorize: {
     label: "Authorize holder",
-    resolve: (data) => ({
-      method: "authorize_holder",
-      args: [addressToScVal(data.address)],
+    resolve: async (data, ctx) => ctx.tokenClient.authorize_holder({
+      holder: data.address
     }),
     successToast: {
       title: "Holder authorized",
@@ -400,9 +355,8 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   "revoke-auth": {
     label: "Revoke authorization",
-    resolve: (data) => ({
-      method: "revoke_authorization",
-      args: [addressToScVal(data.address)],
+    resolve: async (data, ctx) => ctx.tokenClient.revoke_authorization({
+      holder: data.address
     }),
     successToast: {
       title: "Authorization revoked",
@@ -413,17 +367,31 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   /* ── Danger ──────────────────────────────────────────────────── */
 
-  upgrade: {
+   upgrade: {
     label: "Upgrade contract",
-    resolve: (data) => ({
-      method: "upgrade",
-      args: [xdr.ScVal.scvBytes(Buffer.from(data.wasmHash, "hex"))],
+    resolve: async (data, ctx) => ctx.tokenClient.upgrade({
+      new_wasm_hash: Buffer.from(data.wasmHash, "hex")
     }),
     preflight: "none",
     successToast: {
       title: "Contract upgraded",
       message:
         "The contract WASM has been replaced. All holders are now on the new logic.",
+    },
+  },
+
+  "vesting-upgrade": {
+    label: "Upgrade vesting contract",
+    resolve: (data) => ({
+      contractId: data.vestingContract,
+      method: "upgrade",
+      args: [xdr.ScVal.scvBytes(Buffer.from(data.wasmHash, "hex"))],
+    }),
+    preflight: "none",
+    successToast: {
+      title: "Vesting contract upgraded",
+      message:
+        "The vesting contract WASM has been replaced. All vesting schedules are now on the new logic.",
     },
   },
 };
