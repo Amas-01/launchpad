@@ -217,23 +217,53 @@ export async function fetchReleasedAmount(
   return decodeI128(result);
 }
 
-/** Fetch combined vesting info in a single call batch. */
+/** Fetch all vesting schedules from the contract (single call, no N+1). */
+export async function fetchAllVestingSchedules(
+  contractId: string,
+  recipientAddress: string,
+): Promise<VestingSchedule[]> {
+  const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+  const result = await simulateCall(contractId, "get_all_schedules", [
+    addressVal,
+  ]);
+
+  const schedules: VestingSchedule[] = [];
+  const vec = result.vec();
+  if (vec) {
+    for (const entry of vec) {
+      const fields = entry.map();
+      if (!fields) continue;
+      const fieldMap = new Map<string, StellarSdk.xdr.ScVal>();
+      for (const f of fields) {
+        fieldMap.set(f.key().sym().toString(), f.val());
+      }
+      schedules.push({
+        recipient: decodeAddress(fieldMap.get("recipient")!),
+        totalAmount: decodeI128(fieldMap.get("total_amount")!),
+        cliffLedger: decodeU32(fieldMap.get("cliff_ledger")!),
+        endLedger: decodeU32(fieldMap.get("end_ledger")!),
+        released: decodeI128(fieldMap.get("released")!),
+        revoked: decodeBool(fieldMap.get("revoked")!),
+      });
+    }
+  }
+  return schedules;
+}
+
+/** Fetch vesting info for a specific schedule (backward compat: uses single schedule). */
 export async function fetchVestingInfo(
   contractId: string,
   recipientAddress: string,
   scheduleIndex?: number,
 ): Promise<VestingInfo> {
-  const resolvedIndex = await resolveScheduleIndex(
-    contractId,
-    recipientAddress,
-    scheduleIndex,
-  );
-  const [schedule, vestedAmount] = await Promise.all([
-    fetchVestingSchedule(contractId, recipientAddress, resolvedIndex),
-    fetchVestedAmount(contractId, recipientAddress, resolvedIndex),
+  const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+
+  const [schedule, vestedAmount, totalReleasable] = await Promise.all([
+    fetchVestingSchedule(contractId, recipientAddress, scheduleIndex),
+    fetchVestedAmount(contractId, recipientAddress, scheduleIndex),
+    simulateCall(contractId, "total_releasable", [addressVal]).then(decodeI128),
   ]);
 
-  const releasableAmount = vestedAmount - schedule.released;
   const latestLedger = await server.getLatestLedger();
 
   let isPaused = false;
@@ -247,7 +277,7 @@ export async function fetchVestingInfo(
   return {
     schedule,
     vestedAmount,
-    releasableAmount,
+    releasableAmount: totalReleasable,
     currentLedger: latestLedger.sequence,
     isPaused,
   };
@@ -288,6 +318,44 @@ export async function buildReleaseTx(
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(contract.call("release", addressVal, toU32ScVal(resolvedIndex)))
+    .setTimeout(300)
+    .build();
+
+  const sim = await server.simulateTransaction(tx);
+
+  if (StellarSdk.rpc.Api.isSimulationError(sim)) {
+    throw new Error(
+      `Simulation failed: ${(sim as StellarSdk.rpc.Api.SimulateTransactionErrorResponse).error}`,
+    );
+  }
+
+  const preparedTx = StellarSdk.rpc.assembleTransaction(
+    tx,
+    sim as StellarSdk.rpc.Api.SimulateTransactionSuccessResponse,
+  ).build();
+
+  return preparedTx.toXDR();
+}
+
+/**
+ * Build a release_all() transaction XDR for signing.
+ * Releases all unlocked tokens across all schedules in a single transfer.
+ * The caller should sign via wallet and then submit.
+ */
+export async function buildReleaseAllTx(
+  contractId: string,
+  recipientAddress: string,
+  signerAddress: string,
+): Promise<string> {
+  const account = await server.getAccount(signerAddress);
+  const contract = new StellarSdk.Contract(contractId);
+  const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: "100",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call("release_all", addressVal))
     .setTimeout(300)
     .build();
 
