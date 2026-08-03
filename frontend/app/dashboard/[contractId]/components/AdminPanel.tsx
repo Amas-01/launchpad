@@ -176,6 +176,13 @@ export function AdminPanel({
           read={admin.read}
         />
 
+        {/* ── Vesting Dashboard ── */}
+        <VestingDashboard
+          tokenContractId={contractId}
+          decimals={decimals}
+          read={admin.read}
+        />
+
         <TransferAdminCard
           admin={admin}
           disabled={disabled}
