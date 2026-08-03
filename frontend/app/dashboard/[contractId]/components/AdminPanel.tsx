@@ -1,17 +1,12 @@
 "use client";
 
 import React from "react";
-import {
-  ShieldAlert,
-  ExternalLink,
-  Lock,
-  UserPlus,
-  CircleAlert,
-} from "lucide-react";
+import { ShieldAlert, ExternalLink, Lock, CircleAlert } from "lucide-react";
 import { useWallet } from "../../../hooks/useWallet";
 import { useNetwork } from "../../../providers/NetworkProvider";
 import { useAdminAction } from "../hooks/useAdminAction";
 import { useTokenAdminState } from "../hooks/useTokenAdminState";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
 import { MintCard } from "./admin/MintCard";
 import { SupplyCard } from "./admin/SupplyCard";
 import { VestingCard } from "./admin/VestingCard";
@@ -150,27 +145,11 @@ export function AdminPanel({
       )}
 
       {!state.locked && state.pendingAdmin && (
-        <div className="mb-6 flex items-start gap-3 rounded-xl border border-stellar-500/30 bg-stellar-500/5 p-4">
-          <UserPlus
-            className="mt-0.5 h-5 w-5 shrink-0 text-stellar-400"
-            aria-hidden="true"
-          />
-          <div className="text-sm">
-            <p className="font-semibold text-stellar-200">
-              Admin transfer pending
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-stellar-100/80">
-              A two-step admin transfer is in progress. Pending admin →{" "}
-              <span className="font-mono text-stellar-300">
-                {state.pendingAdmin.slice(0, 6)}…{state.pendingAdmin.slice(-6)}
-              </span>
-              .{" "}
-              {state.pendingAdmin === publicKey
-                ? "Your connected wallet is the pending admin — accept the role below to finalize."
-                : "It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."}
-            </p>
-          </div>
-        </div>
+        <PendingAdminBanner
+          pendingAdmin={state.pendingAdmin}
+          connectedWallet={publicKey}
+          nonPendingMessage="It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."
+        />
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-12">

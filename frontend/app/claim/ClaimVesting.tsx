@@ -2,10 +2,12 @@
 
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
 import { VestingSolvencyBadge } from "@/components/VestingSolvencyBadge";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
+  fetchVestingAdminState,
   fetchAllVestingSchedules,
   fetchVestingInfo,
   fetchVestingSolvency,
@@ -13,7 +15,7 @@ import {
   buildReleaseAllTx,
   submitTx,
   formatTokenAmount,
-  truncateAddress,
+  type VestingAdminState,
   type VestingInfo,
   type VestingSolvency,
 } from "@/lib/vesting";
@@ -28,7 +30,8 @@ export function ClaimVesting() {
   const [contractId, setContractId] = useState("");
   // One VestingInfo entry per schedule index
   const [schedules, setSchedules] = useState<VestingInfo[]>([]);
-  const [solvency, setSolvency] = useState<
+  const [adminState, setAdminState] = useState<VestingAdminState | null>(null);
+  const [solvency, setSolvency] = useState
     VestingSolvency | null | undefined
   >();
   const [loading, setLoading] = useState(false);
@@ -55,19 +58,29 @@ export function ClaimVesting() {
 
     setError(null);
     setSchedules([]);
+    setAdminState(null);
     setSolvency(undefined);
     setLoading(true);
 
     try {
-      // Use get_all_schedules (single contract call, not N+1) + fetch solvency
-      const [allSchedules, solvencyState] = await Promise.all([
+      // Use get_all_schedules (single contract call, not N+1) + admin/solvency state
+      const [allSchedules, vestingAdmin, solvencyState] = await Promise.all([
         fetchAllVestingSchedules(trimmed, publicKey),
+        fetchVestingAdminState(trimmed),
         fetchVestingSolvency(trimmed),
       ]);
+      setAdminState(vestingAdmin);
       setSolvency(solvencyState);
 
       if (allSchedules.length === 0) {
-        setError("No vesting schedule found for your wallet on this contract.");
+        if (
+          vestingAdmin.pendingAdmin === publicKey ||
+          vestingAdmin.admin === publicKey
+        ) {
+          setError(null);
+        } else {
+          setError("No vesting schedule found for your wallet on this contract.");
+        }
         return;
       }
 
@@ -192,7 +205,6 @@ export function ClaimVesting() {
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
     <>
-      {/* ── Wallet gate ──────────────────────────────────────────────── */}
       {!connected && (
         <div className="glass-card p-8 text-center">
           <p className="mb-4 text-gray-400">
@@ -202,7 +214,6 @@ export function ClaimVesting() {
         </div>
       )}
 
-      {/* ── Contract ID input ────────────────────────────────────────── */}
       {connected && (
         <div className="space-y-8">
           <div className="glass-card p-6">
@@ -245,11 +256,18 @@ export function ClaimVesting() {
             )}
           </div>
 
+          {adminState?.pendingAdmin && (
+            <PendingAdminBanner
+              pendingAdmin={adminState.pendingAdmin}
+              connectedWallet={publicKey}
+              nonPendingMessage="The current admin can cancel the proposal from the contract's admin section."
+            />
+          )}
+
           {solvency !== undefined && (
             <VestingSolvencyBadge solvency={solvency} />
           )}
 
-          {/* ── One card per schedule ─────────────────────────────────── */}
           {schedules.map((info, idx) => (
             <ScheduleCard
               key={idx}
@@ -261,7 +279,6 @@ export function ClaimVesting() {
             />
           ))}
 
-          {/* ── Release all button (when multiple schedules) ──────────── */}
           {schedules.length > 1 && (
             <Button
               onClick={handleReleaseAll}
@@ -278,6 +295,8 @@ export function ClaimVesting() {
     </>
   );
 }
+
+/* ── remaining components (ScheduleCard, StatCard, DetailRow) unchanged ── */
 
 /* ── Per-schedule card ─────────────────────────────────────────────── */
 

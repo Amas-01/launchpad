@@ -141,6 +141,12 @@ impl VestingContract {
         env.events().publish((symbol_short!("acc_adm"),), pending);
     }
 
+    /// Cancel a proposed admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+    }
+
     /// Create a cliff + linear vesting schedule for `recipient`.
     ///
     /// `cliff_ledger` — ledger number when tokens start unlocking.
@@ -601,6 +607,12 @@ impl VestingContract {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized))
+    }
+
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no transfer is in progress.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     /// Returns the token contract address managed by this vesting contract.
@@ -1243,107 +1255,134 @@ mod test {
         assert!(!schedule.revoked);
     }
 
-    #[test]
-    fn test_total_committed_tracks_schedule_lifecycle() {
-        let env = Env::default();
-        env.mock_all_auths();
+#[test]
+fn test_pending_admin_getter_and_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    let admin = Address::generate(&env);
+    let proposed = Address::generate(&env);
+    let token = Address::generate(&env);
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &5_000);
+    client.initialize(&admin, &token);
 
-        assert_eq!(client.total_committed(), 0);
+    assert_eq!(client.pending_admin(), None);
 
-        client.create_schedule(&recipient, &1_000, &100, &200);
-        assert_eq!(client.total_committed(), 1_000);
-        assert_eq!(token_client.balance(&contract_id), 1_000);
-        assert_eq!(
-            client.solvency(),
-            Solvency {
-                token_balance: 1_000,
-                total_committed: 1_000,
-                solvent: true,
-            }
-        );
+    client.propose_admin(&proposed);
+    assert_eq!(client.pending_admin(), Some(proposed.clone()));
 
-        env.ledger().set_sequence_number(150);
-        release_latest(&client, &recipient);
-        assert_eq!(client.total_committed(), 500);
-        assert_eq!(token_client.balance(&contract_id), 500);
+    client.cancel_admin_proposal();
+    assert_eq!(client.pending_admin(), None);
 
-        client.create_schedule(&other, &300, &200, &300);
-        assert_eq!(client.total_committed(), 800);
-        assert_eq!(token_client.balance(&contract_id), 800);
+    client.propose_admin(&proposed);
+    client.accept_admin();
+    assert_eq!(client.pending_admin(), None);
+}
 
-        revoke_latest(&client, &recipient);
-        assert_eq!(client.total_committed(), 300);
-        assert_eq!(token_client.balance(&contract_id), 300);
-    }
+#[test]
+fn test_total_committed_tracks_schedule_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    #[test]
-    fn test_solvency_reports_external_token_drain() {
-        let env = Env::default();
-        env.mock_all_auths();
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &5_000);
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000);
-        client.create_schedule(&recipient, &1_000, &100, &200);
+    assert_eq!(client.total_committed(), 0);
 
-        // Models any token-side admin action that drains already committed funds
-        // from the vesting contract, such as clawback on a clawbackable token.
-        token_client.transfer(&contract_id, &admin, &400);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+    assert_eq!(client.total_committed(), 1_000);
+    assert_eq!(token_client.balance(&contract_id), 1_000);
+    assert_eq!(
+        client.solvency(),
+        Solvency {
+            token_balance: 1_000,
+            total_committed: 1_000,
+            solvent: true,
+        }
+    );
 
-        assert_eq!(
-            client.solvency(),
-            Solvency {
-                token_balance: 600,
-                total_committed: 1_000,
-                solvent: false,
-            }
-        );
-    }
+    env.ledger().set_sequence_number(150);
+    release_latest(&client, &recipient);
+    assert_eq!(client.total_committed(), 500);
+    assert_eq!(token_client.balance(&contract_id), 500);
 
-    #[test]
-    #[should_panic(expected = "vesting contract underfunded")]
-    fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
-        let env = Env::default();
-        env.mock_all_auths();
+    client.create_schedule(&other, &300, &200, &300);
+    assert_eq!(client.total_committed(), 800);
+    assert_eq!(token_client.balance(&contract_id), 800);
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    revoke_latest(&client, &recipient);
+    assert_eq!(client.total_committed(), 300);
+    assert_eq!(token_client.balance(&contract_id), 300);
+}
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+#[test]
+fn test_solvency_reports_external_token_drain() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &2_000);
-        client.create_schedule(&recipient, &1_000, &100, &200);
-        token_client.transfer(&contract_id, &admin, &400);
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        client.create_schedule(&other, &100, &100, &200);
-    }
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &1_000);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+
+    // Models any token-side admin action that drains already committed funds
+    // from the vesting contract, such as clawback on a clawbackable token.
+    token_client.transfer(&contract_id, &admin, &400);
+
+    assert_eq!(
+        client.solvency(),
+        Solvency {
+            token_balance: 600,
+            total_committed: 1_000,
+            solvent: false,
+        }
+    );
+}
+
+#[test]
+#[should_panic(expected = "vesting contract underfunded")]
+fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &2_000);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+    token_client.transfer(&contract_id, &admin, &400);
+
+    client.create_schedule(&other, &100, &100, &200);
+}
 
     #[test]
     fn test_vested_before_cliff() {
