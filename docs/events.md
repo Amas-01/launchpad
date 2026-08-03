@@ -28,16 +28,20 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `unfreeze_account` | `unfreeze` | `addr: Address` | — | () |
 | `pause` | `pause` | — | — | () |
 | `unpause` | `unpause` | — | — | () |
-| `authorize_holder`, `revoke_authorization` | `auth` | — | — | (holder: Address, authorized: bool) |
+| `authorize_holder` | `authorize` | `holder: Address` | — | () |
+| `revoke_authorization` | `rvk_auth` | `holder: Address` | — | () |
 | `upgrade` | `upgrade` | — | — | new_wasm_hash: BytesN<32> |
 | `set_max_balance_per_account` | `set_max_b` | — | — | Option<u32> |
 | `set_compliance_node` | `set_cnode` | — | — | Option<Address> |
+| `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
+| `accept_admin` | `set_admin` | `old_admin: Address` | `new_admin: Address` | () |
+| `update_contract_uri` | `upd_uri` | — | — | uri: String |
+| `set_authorization_required` | `set_areq` | — | — | required: bool |
+| `renounce_authorization_revocable` | `rvk_rvc` | — | — | () |
 
 > clawback also emits a `transfer` event (from the internal `_transfer` helper it calls) in the same transaction, so a claw-backed balance change shows up as both events.
 
 > transfer_from re-uses this event because the observable balance change is identical to a direct transfer; the allowance deduction is visible through the `allowance` getter instead.
-
-> Both functions publish under the same `auth` topic; the boolean in the data payload distinguishes granting authorization from revoking it.
 
 ---
 

@@ -61,10 +61,14 @@
         "data": "()"
       },
       {
-        "functions": ["authorize_holder", "revoke_authorization"],
-        "topics": ["auth"],
-        "data": "(holder: Address, authorized: bool)",
-        "note": "Both functions publish under the same `auth` topic; the boolean in the data payload distinguishes granting authorization from revoking it."
+        "functions": ["authorize_holder"],
+        "topics": ["authorize", "holder: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["revoke_authorization"],
+        "topics": ["rvk_auth", "holder: Address"],
+        "data": "()"
       },
       {
         "functions": ["upgrade"],
@@ -80,6 +84,31 @@
         "functions": ["set_compliance_node"],
         "topics": ["set_cnode"],
         "data": "Option<Address>"
+      },
+      {
+        "functions": ["propose_admin"],
+        "topics": ["prop_adm", "current_admin: Address", "new_admin: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["accept_admin"],
+        "topics": ["set_admin", "old_admin: Address", "new_admin: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["update_contract_uri"],
+        "topics": ["upd_uri"],
+        "data": "uri: String"
+      },
+      {
+        "functions": ["set_authorization_required"],
+        "topics": ["set_areq"],
+        "data": "required: bool"
+      },
+      {
+        "functions": ["renounce_authorization_revocable"],
+        "topics": ["rvk_rvc"],
+        "data": "()"
       }
     ]
   },

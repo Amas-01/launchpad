@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Loader2 } from "lucide-react";
 import { PersonalActivityTable } from "./PersonalActivityTable";
 import type { TokenActivityInfo } from "@/lib/stellar";
@@ -19,10 +20,12 @@ export function PersonalTransactionsSection({
   onLoadMore: () => void;
   publicKey: string;
 }) {
+  const t = useTranslations("myAccount");
+
   return (
-    <section aria-label="Personal transaction history">
+    <section aria-label={t("transactionHistory")}>
       <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
-        Transaction History
+        {t("transactionHistory")}
       </h2>
       {loading ? (
         <div className="flex justify-center p-8">
