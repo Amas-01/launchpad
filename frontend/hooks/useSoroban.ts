@@ -51,6 +51,12 @@ export function useSoroban() {
     [networkConfig],
   );
 
+  const fetchAllVestingSchedules = useCallback(
+    (vestingContractId: string, recipient: string) =>
+      stellar.fetchAllVestingSchedules(vestingContractId, recipient, networkConfig),
+    [networkConfig],
+  );
+
   const fetchSupplyBreakdown = useCallback(
     (tokenContractId: string, vestingContractId?: string) =>
       stellar.fetchSupplyBreakdown(
@@ -98,6 +104,7 @@ export function useSoroban() {
       fetchCurrentLedger,
       fetchVestingSchedule,
       fetchVestingScheduleCount,
+      fetchAllVestingSchedules,
       fetchSupplyBreakdown,
       fetchAccountBalances,
       fetchTransactionHistory,
@@ -117,6 +124,7 @@ export function useSoroban() {
       fetchCurrentLedger,
       fetchVestingSchedule,
       fetchVestingScheduleCount,
+      fetchAllVestingSchedules,
       fetchSupplyBreakdown,
       fetchAccountBalances,
       fetchTransactionHistory,

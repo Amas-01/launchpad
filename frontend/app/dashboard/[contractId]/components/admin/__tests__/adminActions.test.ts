@@ -1,8 +1,6 @@
-import { Address, scValToNative, xdr } from "@stellar/stellar-sdk";
 import {
   ADMIN_ACTIONS,
   scaleAmount,
-  type AdminActionContext,
   type AdminActionKey,
 } from "../adminActions";
 import { LEDGERS_PER_DAY } from "@/lib/soroban";
@@ -110,11 +108,10 @@ describe("action resolution", () => {
     );
   });
 
-  it("cancels a pending transfer by re-proposing the current admin", async () => {
-    // There is no on-chain cancel; overwriting with self neutralizes it.
+  it("routes cancellation through the dedicated on-chain cancel method", async () => {
     const call = await ADMIN_ACTIONS["cancel-admin"].resolve({}, makeContext());
-    expect(call.method).toBe("propose_admin");
-    expect(addressOf(call.args[0])).toBe(ADMIN);
+    expect(call.method).toBe("cancel_admin_proposal");
+    expect(call.args).toHaveLength(0);
   });
 
   it("targets the vesting contract, not the token, for schedule actions", async () => {

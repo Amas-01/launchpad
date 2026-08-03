@@ -1,19 +1,16 @@
-import type { Metadata } from "next";
+"use client";
+
+import { useTranslations } from "next-intl";
 import { ClaimVesting } from "./ClaimVesting";
 
-export const metadata: Metadata = {
-  title: "Claim Vesting — SoroPad",
-  description:
-    "View your vesting schedule and claim unlocked tokens on the SoroPad launchpad.",
-};
-
 export default function ClaimPage() {
+  const t = useTranslations("claim");
+
   return (
     <section className="mx-auto max-w-2xl px-6 py-16">
-      <h1 className="mb-2 text-3xl font-bold gradient-text">Claim Vesting</h1>
+      <h1 className="mb-2 text-3xl font-bold gradient-text">{t("title")}</h1>
       <p className="mb-10 text-gray-400">
-        Enter your vesting contract address to view your schedule and release
-        unlocked tokens.
+        {t("description")}
       </p>
       <ClaimVesting />
     </section>
