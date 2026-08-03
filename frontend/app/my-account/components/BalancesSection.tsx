@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Loader2, AlertCircle } from "lucide-react";
 import { BalanceCard } from "./BalanceCard";
 import type { AccountBalance } from "@/lib/stellar";
@@ -15,10 +16,12 @@ export function BalancesSection({
   error: string | null;
   onRetry: () => void;
 }) {
+  const t = useTranslations("myAccount");
+  const tc = useTranslations("common");
   return (
-    <section aria-label="Token balances" className="mb-10">
+    <section aria-label={t("tokenBalances")} className="mb-10">
       <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
-        Token Balances
+        {t("tokenBalances")}
       </h2>
       {loading ? (
         <div className="flex justify-center p-8">
@@ -32,12 +35,12 @@ export function BalancesSection({
             onClick={onRetry}
             className="btn-secondary mt-3 px-4 py-1.5 text-sm"
           >
-            Retry
+            {tc("retry")}
           </button>
         </div>
       ) : balances.length === 0 ? (
         <div className="glass-card p-8 text-center text-sm text-gray-500">
-          No balances found for this account.
+          {t("noBalances")}
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

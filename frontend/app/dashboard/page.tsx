@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { Search, User } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 
 export default function DashboardIndex() {
+  const t = useTranslations("dashboard");
   const router = useRouter();
   const [contractId, setContractId] = useState("");
   const [error, setError] = useState("");
@@ -16,12 +18,12 @@ export default function DashboardIndex() {
 
     const trimmed = contractId.trim();
     if (!trimmed) {
-      setError("Please enter a contract ID.");
+      setError(t("errors.emptyContract"));
       return;
     }
     // Basic Soroban contract ID validation (56-char alphanumeric starting with C)
     if (!/^C[A-Z0-9]{55}$/.test(trimmed) && !/^G[A-Z2-7]{55}$/.test(trimmed)) {
-      setError("Invalid contract ID format. Expected a 56-character Stellar address.");
+      setError(t("errors.invalidFormat"));
       return;
     }
 
@@ -32,10 +34,9 @@ export default function DashboardIndex() {
   return (
     <div className="mx-auto flex min-h-[80vh] max-w-3xl flex-col items-center justify-center px-6 text-center">
       <span className="text-5xl">📊</span>
-      <h1 className="mt-4 text-3xl font-bold text-white">Token Dashboard</h1>
+      <h1 className="mt-4 text-3xl font-bold text-white">{t("title")}</h1>
       <p className="mt-3 max-w-md text-gray-400">
-        Enter a deployed token&apos;s contract ID to view supply metrics,
-        holder distribution, and more.
+        {t("description")}
       </p>
 
       <form onSubmit={handleSubmit} className="mt-8 w-full max-w-lg">
@@ -48,14 +49,14 @@ export default function DashboardIndex() {
               setContractId(e.target.value);
               if (error) setError("");
             }}
-            placeholder="CABC123...XYZ (contract ID)"
+            placeholder={t("searchPlaceholder")}
             className="flex-1 bg-transparent text-sm text-white placeholder-gray-600 outline-none"
-            aria-label="Contract ID"
+            aria-label={t("searchLabel")}
             spellCheck={false}
             autoComplete="off"
           />
           <Button type="submit" className="shrink-0 px-4 py-2 text-sm">
-            View
+            {t("sections.contractId")}
           </Button>
         </div>
         {error && (
@@ -68,7 +69,7 @@ export default function DashboardIndex() {
         className="mt-6 inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-5 py-2.5 text-sm text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
       >
         <User className="h-4 w-4" />
-        View My Account
+        {t("viewMyAccount")}
       </Link>
     </div>
   );

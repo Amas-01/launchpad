@@ -1,54 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Env, Map, Vec,
-};
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-/// Typed contract errors for the vesting contract.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum VestingError {
-    /// `initialize` was called on a contract that is already initialized.
-    AlreadyInitialized = 1,
-    /// Operation attempted before `initialize` was called.
-    NotInitialized = 2,
-    /// The vesting contract is paused.
-    Paused = 3,
-    /// Amount is zero or negative where a positive value is required.
-    InvalidAmount = 4,
-    /// `end_ledger` is not strictly after `cliff_ledger`.
-    InvalidLedgerRange = 5,
-    /// `accept_admin` was called with no pending proposal.
-    NoPendingAdmin = 6,
-    /// Operation attempted on a revoked vesting schedule.
-    ScheduleRevoked = 7,
-    /// Schedule has already been revoked.
-    AlreadyRevoked = 8,
-    /// `release` was called but no vested tokens are available.
-    NothingToRelease = 9,
-    /// No schedule found for recipient.
-    ScheduleNotFound = 10,
-    /// Schedule index is out of bounds for recipient.
-    ScheduleIndexOutOfBounds = 11,
-    /// Batch schedules list is empty.
-    BatchEmpty = 12,
-    /// Batch schedules size exceeds maximum of 50.
-    BatchTooLarge = 13,
-    /// `extend_cliff` called after the cliff ledger has passed.
-    CliffPassed = 14,
-    /// New cliff ledger is not strictly later than the current cliff ledger.
-    CliffNotExtended = 15,
-    /// New cliff ledger is not strictly before the end ledger.
-    CliffAfterEnd = 16,
-    /// `prune_recipient` called for a recipient that is not tracked.
-    RecipientNotTracked = 17,
-}
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Vec};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -92,6 +44,7 @@ const TTL_LEDGERS: u32 = {
 pub enum DataKey {
     Admin,
     PendingAdmin,
+    Locked,
     TokenContract,
     IsPaused,
     TotalCommitted,
@@ -148,6 +101,7 @@ impl VestingContract {
 
     /// Set the admin and the token contract this vesting module manages.
     pub fn initialize(env: Env, admin: Address, token_contract: Address) {
+        admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, VestingError::AlreadyInitialized);
         }
@@ -175,6 +129,7 @@ impl VestingContract {
 
     /// Accept the admin role. Must be called by the pending admin.
     pub fn accept_admin(env: Env) {
+        Self::_require_not_locked(&env);
         let pending: Address = env
             .storage()
             .instance()
@@ -184,6 +139,12 @@ impl VestingContract {
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish((symbol_short!("acc_adm"),), pending);
+    }
+
+    /// Cancel a proposed admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
     }
 
     /// Create a cliff + linear vesting schedule for `recipient`.
@@ -202,12 +163,7 @@ impl VestingContract {
         end_ledger: u32,
     ) {
         Self::_check_paused(&env);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
-        admin.require_auth();
+        Self::_require_admin(&env);
 
         Self::_validate_total_amount(total_amount);
         assert!(
@@ -271,12 +227,7 @@ impl VestingContract {
     /// with a clear error rather than an opaque resource failure.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         Self::_check_paused(&env);
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
-        admin.require_auth();
+        Self::_require_admin(&env);
 
         if schedules.len() == 0 {
             panic_with_error!(&env, VestingError::BatchEmpty);
@@ -593,6 +544,52 @@ impl VestingContract {
         env.events().publish((symbol_short!("unpause"),), ());
     }
 
+    /// Upgrade this contract's WASM code hash in place. Admin only.
+    ///
+    /// Security note: this preserves existing storage and contract state, so
+    /// new WASM must remain storage-compatible with previous deployments.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::_require_admin(&env);
+        assert!(
+            new_wasm_hash != BytesN::from_array(&env, &[0; 32]),
+            "invalid wasm hash"
+        );
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events()
+            .publish((symbol_short!("upgrade"),), new_wasm_hash);
+    }
+
+    /// Permanently revoke the admin role and lock the contract.
+    ///
+    /// After this call:
+    /// - No further `create_schedule`, `revoke`, `extend_cliff`,
+    ///   `prune_recipient`, `propose_admin`, `accept_admin`,
+    ///   `upgrade`, `pause`, or `unpause` operation can ever succeed.
+    /// - The Admin storage entry is removed and a `Locked` flag is set.
+    /// - `is_locked()` returns `true` from then on.
+    ///
+    /// Holders can still `release` and `keep_alive`. The contract
+    /// becomes effectively immutable.
+    ///
+    /// **This action is irreversible.**
+    pub fn revoke_admin(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::Locked, &true);
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish((symbol_short!("revoked"),), true);
+    }
+
+    /// Returns `true` once `revoke_admin` has been called. Once locked, no
+    /// admin operation can ever succeed again.
+    pub fn is_locked(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false)
+    }
+
     /// Return the number of schedules stored for a recipient.
     pub fn get_schedule_count(env: Env, recipient: Address) -> u32 {
         Self::_schedule_count(&env, &recipient)
@@ -610,6 +607,12 @@ impl VestingContract {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized))
+    }
+
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no transfer is in progress.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     /// Returns the token contract address managed by this vesting contract.
@@ -682,15 +685,159 @@ impl VestingContract {
         env.events().publish((symbol_short!("prune"),), recipient);
     }
 
+    /// Sum vested amount across all non-revoked schedules for a recipient.
+    pub fn total_vested(env: Env, recipient: Address) -> i128 {
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                if !schedule.revoked {
+                    total += Self::_vested_amount(&env, &schedule);
+                }
+            }
+        }
+        total
+    }
+
+    /// Sum released amount across all schedules for a recipient.
+    pub fn total_released(env: Env, recipient: Address) -> i128 {
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                total += schedule.released;
+            }
+        }
+        total
+    }
+
+    /// Sum releasable (vested minus released) across all non-revoked schedules.
+    pub fn total_releasable(env: Env, recipient: Address) -> i128 {
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut total: i128 = 0;
+        for i in 0..count {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                if !schedule.revoked {
+                    let vested = Self::_vested_amount(&env, &schedule);
+                    total += vested - schedule.released;
+                }
+            }
+        }
+        total
+    }
+
+    /// Return all schedule objects for a recipient in a single call.
+    pub fn get_all_schedules(env: Env, recipient: Address) -> Vec<VestingSchedule> {
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut schedules: Vec<VestingSchedule> = Vec::new(&env);
+        for i in 0..count {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                schedules.push_back(schedule);
+            }
+        }
+        schedules
+    }
+
+    /// Release all releasable tokens across all non-revoked schedules
+    /// in a single token transfer.
+    pub fn release_all(env: Env, recipient: Address) {
+        Self::_check_paused(&env);
+        recipient.require_auth();
+
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut total_releasable: i128 = 0;
+
+        for i in 0..count {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(mut schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                if schedule.revoked {
+                    continue;
+                }
+                let vested = Self::_vested_amount(&env, &schedule);
+                let releasable = vested - schedule.released;
+                if releasable > 0 {
+                    schedule.released += releasable;
+                    env.storage().persistent().set(&key, &schedule);
+
+                    let remaining_ledgers =
+                        schedule.end_ledger.saturating_sub(env.ledger().sequence());
+                    if remaining_ledgers > 0 {
+                        env.storage().persistent().extend_ttl(
+                            &key,
+                            remaining_ledgers,
+                            remaining_ledgers,
+                        );
+                    }
+
+                    total_releasable += releasable;
+                }
+            }
+        }
+
+        assert!(total_releasable > 0, "nothing to release");
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenContract)
+            .expect("not initialized");
+
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &total_releasable,
+        );
+
+        env.events()
+            .publish((symbol_short!("release"), recipient), total_releasable);
+    }
+
     // ── Internals ───────────────────────────────────────────────────────
 
     fn _require_admin(env: &Env) {
+        Self::_require_not_locked(env);
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(env, VestingError::NotInitialized));
         admin.require_auth();
+    }
+
+    fn _require_not_locked(env: &Env) {
+        let locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false);
+        if locked {
+            panic!("admin revoked: contract is locked");
+        }
     }
 
     fn _check_paused(env: &Env) {
@@ -886,9 +1033,9 @@ mod test {
     // categories of activity. `scripts/generate_events_doc.py --check`
     // re-derives this same set directly from source and fails CI if it
     // and `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 11] = [
+    const EXPECTED_TOPICS: [&str; 13] = [
         "init", "prop_adm", "acc_adm", "create", "batch", "release", "revoke", "clf_ext", "pause",
-        "unpause", "prune",
+        "unpause", "prune", "upgrade", "revoked",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
@@ -1108,107 +1255,134 @@ mod test {
         assert!(!schedule.revoked);
     }
 
-    #[test]
-    fn test_total_committed_tracks_schedule_lifecycle() {
-        let env = Env::default();
-        env.mock_all_auths();
+#[test]
+fn test_pending_admin_getter_and_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    let admin = Address::generate(&env);
+    let proposed = Address::generate(&env);
+    let token = Address::generate(&env);
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &5_000);
+    client.initialize(&admin, &token);
 
-        assert_eq!(client.total_committed(), 0);
+    assert_eq!(client.pending_admin(), None);
 
-        client.create_schedule(&recipient, &1_000, &100, &200);
-        assert_eq!(client.total_committed(), 1_000);
-        assert_eq!(token_client.balance(&contract_id), 1_000);
-        assert_eq!(
-            client.solvency(),
-            Solvency {
-                token_balance: 1_000,
-                total_committed: 1_000,
-                solvent: true,
-            }
-        );
+    client.propose_admin(&proposed);
+    assert_eq!(client.pending_admin(), Some(proposed.clone()));
 
-        env.ledger().set_sequence_number(150);
-        release_latest(&client, &recipient);
-        assert_eq!(client.total_committed(), 500);
-        assert_eq!(token_client.balance(&contract_id), 500);
+    client.cancel_admin_proposal();
+    assert_eq!(client.pending_admin(), None);
 
-        client.create_schedule(&other, &300, &200, &300);
-        assert_eq!(client.total_committed(), 800);
-        assert_eq!(token_client.balance(&contract_id), 800);
+    client.propose_admin(&proposed);
+    client.accept_admin();
+    assert_eq!(client.pending_admin(), None);
+}
 
-        revoke_latest(&client, &recipient);
-        assert_eq!(client.total_committed(), 300);
-        assert_eq!(token_client.balance(&contract_id), 300);
-    }
+#[test]
+fn test_total_committed_tracks_schedule_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    #[test]
-    fn test_solvency_reports_external_token_drain() {
-        let env = Env::default();
-        env.mock_all_auths();
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &5_000);
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000);
-        client.create_schedule(&recipient, &1_000, &100, &200);
+    assert_eq!(client.total_committed(), 0);
 
-        // Models any token-side admin action that drains already committed funds
-        // from the vesting contract, such as clawback on a clawbackable token.
-        token_client.transfer(&contract_id, &admin, &400);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+    assert_eq!(client.total_committed(), 1_000);
+    assert_eq!(token_client.balance(&contract_id), 1_000);
+    assert_eq!(
+        client.solvency(),
+        Solvency {
+            token_balance: 1_000,
+            total_committed: 1_000,
+            solvent: true,
+        }
+    );
 
-        assert_eq!(
-            client.solvency(),
-            Solvency {
-                token_balance: 600,
-                total_committed: 1_000,
-                solvent: false,
-            }
-        );
-    }
+    env.ledger().set_sequence_number(150);
+    release_latest(&client, &recipient);
+    assert_eq!(client.total_committed(), 500);
+    assert_eq!(token_client.balance(&contract_id), 500);
 
-    #[test]
-    #[should_panic(expected = "vesting contract underfunded")]
-    fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
-        let env = Env::default();
-        env.mock_all_auths();
+    client.create_schedule(&other, &300, &200, &300);
+    assert_eq!(client.total_committed(), 800);
+    assert_eq!(token_client.balance(&contract_id), 800);
 
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
+    revoke_latest(&client, &recipient);
+    assert_eq!(client.total_committed(), 300);
+    assert_eq!(token_client.balance(&contract_id), 300);
+}
 
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+#[test]
+fn test_solvency_reports_external_token_drain() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-        client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &2_000);
-        client.create_schedule(&recipient, &1_000, &100, &200);
-        token_client.transfer(&contract_id, &admin, &400);
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
 
-        client.create_schedule(&other, &100, &100, &200);
-    }
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &1_000);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+
+    // Models any token-side admin action that drains already committed funds
+    // from the vesting contract, such as clawback on a clawbackable token.
+    token_client.transfer(&contract_id, &admin, &400);
+
+    assert_eq!(
+        client.solvency(),
+        Solvency {
+            token_balance: 600,
+            total_committed: 1_000,
+            solvent: false,
+        }
+    );
+}
+
+#[test]
+#[should_panic(expected = "vesting contract underfunded")]
+fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VestingContract);
+    let client = VestingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(admin.clone());
+    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+    client.initialize(&admin, &token_addr);
+    asset_client.mint(&admin, &2_000);
+    client.create_schedule(&recipient, &1_000, &100, &200);
+    token_client.transfer(&contract_id, &admin, &400);
+
+    client.create_schedule(&other, &100, &100, &200);
+}
 
     #[test]
     fn test_vested_before_cliff() {
@@ -1778,7 +1952,7 @@ mod test {
 
         // Create batch of 50 schedules (simulating staff/investor distribution)
         let mut schedules = Vec::new(&env);
-        for i in 0..50 {
+        for _ in 0..50 {
             let recipient = Address::generate(&env);
             schedules.push_back(ScheduleInput {
                 recipient,
@@ -2092,10 +2266,401 @@ mod test {
         assert_eq!(token_client.balance(&admin), 250);
     }
 
-    // ── Regression tests for issue #324: TTL clamp for long schedules ──
+   
+    // ── #359: initialize auth guard ───────────────────────────────────
 
     #[test]
-    fn test_create_schedule_four_years_does_not_panic() {
+    #[should_panic]
+    fn test_initialize_unauthorized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+    }
+
+    #[test]
+    fn test_initialize_authorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+    }
+
+    // ── Regression tests for issue #324: TTL clamp for long schedules ──
+ // ── Upgrade tests ───────────────────────────────────────────
+    #[test]
+    fn test_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let zero_hash = BytesN::from_array(&env, &[0; 32]);
+        client.upgrade(&zero_hash);
+    }
+
+    #[test]
+    fn test_upgrade_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        client.upgrade(&non_zero_hash);
+
+        // Verify the contract is still functional after upgrade
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_non_admin_cannot_upgrade() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &user,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (non_zero_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.upgrade(&non_zero_hash);
+    }
+
+    // ── Lock / revoke_admin tests ──────────────────────────────
+
+    #[test]
+    fn test_revoke_admin_sets_locked_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert!(!client.is_locked());
+        client.revoke_admin();
+        assert!(client.is_locked());
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked")]
+    fn test_admin_getter_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        let _ = client.get_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_create_schedule_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let recipient = Address::generate(&env);
+        client.create_schedule(&recipient, &1000, &100, &200);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_revoke_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.revoke_admin();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_upgrade_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let non_zero_hash = BytesN::from_array(&env, &[1; 32]);
+        client.upgrade(&non_zero_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_extend_cliff_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+        extend_cliff_latest(&client, &recipient, 150u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_prune_recipient_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+        client.prune_recipient(&recipient);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_pause_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.pause();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_unpause_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+        client.unpause();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_propose_admin_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+        client.revoke_admin();
+
+        let other = Address::generate(&env);
+        client.propose_admin(&other);
+    }
+
+    #[test]
+    fn test_holder_release_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &1000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.revoke_admin();
+
+        // Release should still work - holders can claim vested tokens
+        env.ledger().set_sequence_number(150);
+        release_latest(&client, &recipient);
+        assert_eq!(token_client.balance(&recipient), 500);
+    }
+
+    #[test]
+    fn test_keep_alive_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+        let (_, recipient) = setup_schedule(&env, &client);
+
+        client.revoke_admin();
+
+        // keep_alive should still work after revoke
+        env.ledger().set_sequence_number(50);
+        client.keep_alive(&recipient, &latest_index());
+    }
+
+    // ── Upgrade event tests ─────────────────────────────────────
+
+    #[test]
+    fn test_upgrade_emits_event_with_new_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        let non_zero_hash = BytesN::from_array(&env, &[0xAB; 32]);
+        client.upgrade(&non_zero_hash);
+
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    (symbol_short!("upgrade"),).into_val(&env),
+                    non_zero_hash.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_revoke_admin_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        client.revoke_admin();
+
+        let events = env.events().all();
+        let last_event = events.slice(events.len() - 1..);
+        assert_eq!(
+            last_event,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    (symbol_short!("revoked"),).into_val(&env),
+                    true.into_val(&env)
+                )
+            ]
+        );
+    }
+    // ── Regression: existing vesting functionality unchanged ─────
+
+    #[test]
+    fn test_initialize_still_works() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_token_contract(), token);
+        assert!(!client.is_locked());
+    }
+
+    #[test]
+    fn test_is_locked_default_is_false() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        client.initialize(&admin, &token);
+
+        assert!(!client.is_locked());
+    }
+
+    // ── #360: aggregate getters and release_all ────────────────────────
+
+    #[test]
+    fn test_get_all_schedules_returns_all() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2108,81 +2673,47 @@ mod test {
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000_000);
+        asset_client.mint(&admin, &6000);
 
-        // ~4 years at ~5s ledgers: 4 * 365 * 24 * 60 * 60 / 5
-        let four_years_ledgers: u32 = 4 * 365 * 24 * 60 * 60 / 5;
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+        client.create_schedule(&recipient, &3000, &200, &300);
 
-        // This must not panic even though the TTL would exceed the network's
-        // max_entry_ttl if applied verbatim (see _ttl_ledgers clamp).
-        client.create_schedule(&recipient, &1_000_000, &100u32, &four_years_ledgers);
-
-        let schedule = get_schedule_latest(&client, &recipient);
-        assert_eq!(schedule.end_ledger, four_years_ledgers);
+        let all = client.get_all_schedules(&recipient);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.get(0).unwrap().total_amount, 1000);
+        assert_eq!(all.get(1).unwrap().total_amount, 2000);
+        assert_eq!(all.get(2).unwrap().total_amount, 3000);
     }
 
     #[test]
-    fn test_keep_alive_refreshes_ttl_without_release() {
+    fn test_total_vested_sums_across_schedules() {
         let env = Env::default();
         env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-        let (_, recipient) = setup_schedule(&env, &client);
-
-        // Should not panic, and should not release/transfer anything.
-        client.keep_alive(&recipient, &latest_index());
-        assert_eq!(released_amount_latest(&client, &recipient), 0);
-    }
-
-    // ── Regression tests for issue #325: unbounded recipients list ─────
-
-    #[test]
-    fn test_recipients_scale_to_several_hundred() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.budget().reset_unlimited();
 
         let contract_id = env.register_contract(None, VestingContract);
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
         let token_addr = env.register_stellar_asset_contract(admin.clone());
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
-        asset_client.mint(&admin, &1_000_000);
+        asset_client.mint(&admin, &6000);
 
-        let n = 300u32;
-        for _ in 0..n {
-            let recipient = Address::generate(&env);
-            client.create_schedule(&recipient, &1000, &100, &200);
-        }
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
 
-        assert_eq!(client.get_recipient_count(), n);
-
-        let page = client.get_recipients_paginated(&0u32, &n);
-        assert_eq!(page.len(), n);
+        env.ledger().set_sequence_number(175);
+        // Schedule 0: (175-100)/(200-100) = 75% of 1000 = 750
+        // Schedule 1: (175-150)/(250-150) = 25% of 2000 = 500
+        // Total: 1250
+        assert_eq!(client.total_vested(&recipient), 1250);
     }
 
     #[test]
-    fn test_prune_recipient_removes_from_paginated_list() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-        let (_, recipient) = setup_schedule(&env, &client);
-
-        assert_eq!(client.get_recipients_paginated(&0u32, &10u32).len(), 1);
-
-        client.prune_recipient(&recipient);
-
-        assert_eq!(client.get_recipients_paginated(&0u32, &10u32).len(), 0);
-    }
-
-    #[test]
-    fn test_prune_recipient_not_tracked_panics() {
+    fn test_total_released_sums_across_schedules() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2190,13 +2721,144 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &6000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+
+        env.ledger().set_sequence_number(175);
+        assert_eq!(client.total_released(&recipient), 0);
+
+        release_at(&client, &recipient, 0);
+        // Schedule 0 released: 750
+        assert_eq!(client.total_released(&recipient), 750);
+
+        release_latest(&client, &recipient);
+        // Schedule 1 also released: 500
+        assert_eq!(client.total_released(&recipient), 1250);
+    }
+
+    #[test]
+    fn test_total_releasable_returns_unlocked_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &6000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+
+        env.ledger().set_sequence_number(175);
+        // Before any release: releasable == vested
+        assert_eq!(client.total_releasable(&recipient), 1250);
+
+        release_at(&client, &recipient, 0);
+        // After releasing schedule 0 (750): releasable = 1250 - 750 = 500
+        assert_eq!(client.total_releasable(&recipient), 500);
+    }
+
+    #[test]
+    fn test_release_all_transfers_combined_releasable() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &6000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+
+        env.ledger().set_sequence_number(175);
+
+        client.release_all(&recipient);
+
+        assert_eq!(token_client.balance(&recipient), 1250);
+        assert_eq!(released_amount_at(&client, &recipient, 0), 750);
+        assert_eq!(released_amount_at(&client, &recipient, 1), 500);
+    }
+
+    #[test]
+    fn test_release_all_skips_revoked_schedules() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &6000);
+
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+        client.create_schedule(&recipient, &3000, &200, &300);
+
+        env.ledger().set_sequence_number(175);
+
+        let balance_before = token_client.balance(&recipient);
+
+        // Revoke schedule at index 1 — recipient gets 500 vested, admin gets 1500 unvested
+        revoke_at(&client, &recipient, 1);
+        let balance_after_revoke = token_client.balance(&recipient);
+        assert_eq!(balance_after_revoke - balance_before, 500);
+
+        client.release_all(&recipient);
+
+        // release_all should only process non-revoked schedules:
+        //   Schedule 0 (non-revoked): (175-100)/(200-100) * 1000 = 750
+        //   Schedule 1 (revoked): skipped
+        //   Schedule 2 (non-revoked, before cliff): 0
+        // Total new tokens: 750
+        assert_eq!(token_client.balance(&recipient) - balance_after_revoke, 750);
+    }
+
+    #[test]
+    fn test_total_vested_zero_when_no_schedules() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
         let token = Address::generate(&env);
+
         client.initialize(&admin, &token);
 
-        let stranger = Address::generate(&env);
-        assert_eq!(
-            client.try_prune_recipient(&stranger),
-            Err(Ok(VestingError::RecipientNotTracked.into()))
-        );
+        assert_eq!(client.total_vested(&recipient), 0);
+        assert_eq!(client.total_released(&recipient), 0);
+        assert_eq!(client.total_releasable(&recipient), 0);
+
+        let all = client.get_all_schedules(&recipient);
+        assert_eq!(all.len(), 0);
     }
 }

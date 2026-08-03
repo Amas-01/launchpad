@@ -19,6 +19,43 @@ function getHorizonUrl(): string {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+export interface VerificationResult {
+  status: "verified" | "modified" | "unknown";
+  deployedHash: string | null;
+  referenceHash: string | null;
+  referenceVersion: string | null;
+  isLocked: boolean;
+}
+
+export interface WasmManifestEntry {
+  wasm_hash: string;
+  source_tag: string;
+  build_ledger: string;
+}
+
+export interface WasmManifest {
+  token: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+  vesting: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+}
+
+export async function fetchWasmManifest(): Promise<WasmManifest | null> {
+  try {
+    const res = await fetch("/api/wasm-manifest");
+    if (!res.ok) return null;
+    return (await res.json()) as WasmManifest;
+  } catch {
+    return null;
+  }
+}
+
 export interface TokenInfo {
   name: string;
   symbol: string;
@@ -138,6 +175,38 @@ export async function simulateCall(
     },
     { operation: `simulate ${method}`, silent: true },
   );
+}
+
+/**
+ * Read the current WASM hash of a deployed Soroban contract.
+ *
+ * Uses the RPC getLedgerEntries endpoint to fetch the contract instance
+ * entry, which contains the executable WASM hash. Returns the hash as a
+ * lowercase hex string, or null when the entry cannot be read.
+ */
+export async function getContractWasmHash(
+  contractId: string,
+  config: NetworkConfig,
+): Promise<string | null> {
+  try {
+    const rpc = new StellarSdk.rpc.Server(config.rpcUrl);
+    const instanceKey = StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance();
+    const entry = await rpc.getContractData(contractId, instanceKey);
+    const contractData = (entry as { val: StellarSdk.xdr.LedgerEntryData }).val.contractData();
+    const scVal = contractData.val();
+    if (scVal.switch() !== StellarSdk.xdr.ScValType.scvContractInstance()) {
+      return null;
+    }
+    const instance = scVal.instance();
+    const executable = instance.executable();
+    if (executable.switch() !== StellarSdk.xdr.ContractExecutableType.contractExecutableWasm()) {
+      return null;
+    }
+    const wasmHashBuf = executable.wasmHash() as Buffer;
+    return Buffer.from(wasmHashBuf).toString("hex");
+  } catch {
+    return null;
+  }
 }
 
 function encodeTopicSymbol(symbol: string): string {
@@ -831,6 +900,43 @@ async function resolveVestingScheduleIndex(params: {
 }
 
 /**
+ * Fetch all vesting schedules for a recipient using the aggregate getter.
+ * Replaces the N+1 pattern (get_schedule_count + N × get_schedule).
+ */
+export async function fetchAllVestingSchedules(
+  vestingContractId: string,
+  recipient: string,
+  config: NetworkConfig,
+): Promise<VestingScheduleInfo[]> {
+  const recipientScVal = new StellarSdk.Address(recipient).toScVal();
+  const result = await simulateCall(
+    vestingContractId,
+    "get_all_schedules",
+    config,
+    [recipientScVal],
+  );
+
+  const schedules: VestingScheduleInfo[] = [];
+  const vec = result.vec();
+  if (vec) {
+    for (let i = 0; i < vec.length; i++) {
+      const fields = vec[i].map()!;
+      schedules.push({
+        recipient: decodeAddress(getStructField(fields, "recipient")),
+        totalAmount: decodeI128(getStructField(fields, "total_amount")),
+        cliffLedger: decodeU32(getStructField(fields, "cliff_ledger")),
+        endLedger: decodeU32(getStructField(fields, "end_ledger")),
+        released: decodeI128(getStructField(fields, "released")),
+        revoked: getStructField(fields, "revoked").b(),
+        scheduleIndex: i,
+        scheduleCount: vec.length,
+      });
+    }
+  }
+  return schedules;
+}
+
+/**
  * Fetch a vesting schedule.
  */
 export async function fetchVestingSchedule(
@@ -910,15 +1016,17 @@ export const TRACKED_EVENT_TOPICS = [
   "pause",
   "unpause",
   "authorize",
-  "revoke_auth",
+  "rvk_auth",
   "revoked",
   "upgrade",
   "approve",
   "set_max_b",
   "set_cnode",
-  "prop_admin",
+  "prop_adm",
   "set_admin",
-  "update_uri",
+  "upd_uri",
+  "set_areq",
+  "rvk_rvc",
 ] as const;
 
 type TrackedTopic = (typeof TRACKED_EVENT_TOPICS)[number];
@@ -1005,7 +1113,7 @@ function decodeActivityEvent(
     case "freeze":
     case "unfreeze":
     case "authorize":
-    case "revoke_auth": {
+    case "rvk_auth": {
       // topic[1] = account address being acted on
       if (topicStrings.length > 1) {
         const addrVal = toScVal(topicStrings[1]);
@@ -1013,8 +1121,8 @@ function decodeActivityEvent(
       }
       break;
     }
-    case "prop_admin": {
-      // topics are ("prop_admin", current_admin, new_admin)
+    case "prop_adm": {
+      // topics are ("prop_adm", current_admin, new_admin)
       if (topicStrings.length > 2) {
         const currentVal = toScVal(topicStrings[1]);
         const newVal = toScVal(topicStrings[2]);
@@ -1041,7 +1149,9 @@ function decodeActivityEvent(
     case "approve":
     case "set_max_b":
     case "set_cnode":
-    case "update_uri":
+    case "upd_uri":
+    case "set_areq":
+    case "rvk_rvc":
       // No address payload or special handling needed for activity feed
       break;
     default:
@@ -1123,21 +1233,7 @@ export async function fetchTransactionHistory(
   return { items: items.reverse(), nextCursor };
 }
 
-export type TokenActivityType =
-  | "mint"
-  | "transfer"
-  | "burn"
-  | "clawback"
-  | "freeze"
-  | "unfreeze"
-  | "pause"
-  | "unpause"
-  | "authorize"
-  | "unauthorize"
-  | "set_admin"
-  | "revoke_admin"
-  | "upgrade"
-  | "other";
+export type TokenActivityType = (typeof TRACKED_EVENT_TOPICS)[number] | "other";
 
 export interface TokenActivityInfo {
   id: string;

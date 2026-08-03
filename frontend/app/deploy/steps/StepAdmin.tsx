@@ -189,7 +189,7 @@ export const StepAdmin = ({ register, errors, control }: StepProps) => {
                         <Toggle
                             id="authorizationRequired"
                             label="Authorization Required"
-                            description="Recipients must be explicitly authorized by the admin before they can receive or hold tokens."
+                            description="Recipients must be explicitly authorized by the admin before they can receive or hold tokens. The admin can turn this on or off again later."
                             checked={!!authRequired}
                             onChange={handleAuthRequiredChange}
                         />
@@ -210,6 +210,12 @@ export const StepAdmin = ({ register, errors, control }: StepProps) => {
                                 Enable &quot;Authorization Required&quot; to use &quot;Authorization Revocable&quot;.
                             </p>
                         )}
+
+                        <p className="text-xs text-gray-600 italic mt-1">
+                            Leaving &quot;Authorization Revocable&quot; off is permanent — there is no way to
+                            turn it on after deploy. Turning it on now keeps a one-way door open: the
+                            admin can later give up that power for good, but never regain it.
+                        </p>
 
                         <div className="border-t border-white/5" />
 

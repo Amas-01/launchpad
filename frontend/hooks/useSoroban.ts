@@ -56,6 +56,13 @@ export function useSoroban() {
       stellar.fetchVestingScheduleCount(vestingContractId, recipient, networkConfig),
     [networkConfig],
   );
+
+  const fetchAllVestingSchedules = useCallback(
+    (vestingContractId: string, recipient: string) =>
+      stellar.fetchAllVestingSchedules(vestingContractId, recipient, networkConfig),
+    [networkConfig],
+  );
+
   const fetchSupplyBreakdown = useCallback(
     (tokenContractId: string, vestingContractId?: string) =>
       stellar.fetchSupplyBreakdown(
@@ -94,6 +101,11 @@ export function useSoroban() {
     (signedXdr: string) => stellar.submitTransaction(signedXdr, networkConfig),
     [networkConfig],
   );
+
+  const getContractWasmHash = useCallback(
+    (contractId: string) => stellar.getContractWasmHash(contractId, networkConfig),
+    [networkConfig],
+  );
   return useMemo(
     () => ({
       fetchTokenInfo,
@@ -104,12 +116,14 @@ export function useSoroban() {
       fetchVestingSchedule,
       fetchVestedAmount,
       fetchVestingScheduleCount,
+      fetchAllVestingSchedules,
       fetchSupplyBreakdown,
       fetchAccountBalances,
       fetchTransactionHistory,
       fetchAccountOperations,
       buildBurnTransaction,
       submitTransaction,
+      getContractWasmHash,
       networkConfig,
       // Pass through formatting helpers which don't need config
       formatTokenAmount: stellar.formatTokenAmount,
@@ -124,12 +138,14 @@ export function useSoroban() {
       fetchVestingSchedule,
       fetchVestedAmount,
       fetchVestingScheduleCount,
+      fetchAllVestingSchedules,
       fetchSupplyBreakdown,
       fetchAccountBalances,
       fetchTransactionHistory,
       fetchAccountOperations,
       buildBurnTransaction,
       submitTransaction,
+      getContractWasmHash,
       networkConfig,
     ],
   );

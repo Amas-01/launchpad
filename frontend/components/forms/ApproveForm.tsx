@@ -10,6 +10,7 @@ import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { useWallet } from "@/app/hooks/useWallet";
 import { buildApproveTransaction, fetchCurrentLedger, fetchTokenDecimals, parseTokenAmount, submitTransaction } from "@/lib/stellar";
+import { daysToLedgers } from "@/lib/soroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { AlertCircle, CheckCircle, Rocket, Loader2 } from "lucide-react";
 
@@ -67,7 +68,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
 
   const getExpirationLedger = async (days: string): Promise<number> => {
     const currentLedger = await fetchCurrentLedger(networkConfig);
-    return currentLedger + parseInt(days || "365") * 17280;
+    return daysToLedgers(days || "365", currentLedger);
   };
 
   const handleCheck = async () => {
