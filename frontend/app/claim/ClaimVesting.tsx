@@ -3,16 +3,22 @@
 import { useCallback, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/Button";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
+import { VestingSolvencyBadge } from "@/components/VestingSolvencyBadge";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
-  fetchScheduleCount,
+  fetchVestingAdminState,
+  fetchAllVestingSchedules,
   fetchVestingInfo,
+  fetchVestingSolvency,
   buildReleaseTx,
+  buildReleaseAllTx,
   submitTx,
   formatTokenAmount,
-  truncateAddress,
+  type VestingAdminState,
   type VestingInfo,
+  type VestingSolvency,
 } from "@/lib/vesting";
 
 /* ── Soroban contract-ID regex (56 chars starting with C) ──────────── */
@@ -27,6 +33,10 @@ export function ClaimVesting() {
   const [contractId, setContractId] = useState("");
   // One VestingInfo entry per schedule index
   const [schedules, setSchedules] = useState<VestingInfo[]>([]);
+  const [adminState, setAdminState] = useState<VestingAdminState | null>(null);
+  const [solvency, setSolvency] = useState
+    VestingSolvency | null | undefined
+  >();
   const [loading, setLoading] = useState(false);
   // Track which schedule index is currently releasing
   const [releasingIndex, setReleasingIndex] = useState<number | null>(null);
@@ -51,19 +61,35 @@ export function ClaimVesting() {
 
     setError(null);
     setSchedules([]);
+    setAdminState(null);
+    setSolvency(undefined);
     setLoading(true);
 
     try {
-      const count = await fetchScheduleCount(trimmed, publicKey);
+      // Use get_all_schedules (single contract call, not N+1) + admin/solvency state
+      const [allSchedules, vestingAdmin, solvencyState] = await Promise.all([
+        fetchAllVestingSchedules(trimmed, publicKey),
+        fetchVestingAdminState(trimmed),
+        fetchVestingSolvency(trimmed),
+      ]);
+      setAdminState(vestingAdmin);
+      setSolvency(solvencyState);
 
-      if (count === 0) {
-        setError(t("noSchedule"));
+      if (allSchedules.length === 0) {
+        if (
+          vestingAdmin.pendingAdmin === publicKey ||
+          vestingAdmin.admin === publicKey
+        ) {
+          setError(null);
+        } else {
+          setError("No vesting schedule found for your wallet on this contract.");
+        }
         return;
       }
 
-      // Fetch all schedules in parallel
-      const infos = await Promise.all(
-        Array.from({ length: count }, (_, i) =>
+      // Build VestingInfo for each schedule
+      const infos: VestingInfo[] = await Promise.all(
+        allSchedules.map((_, i) =>
           fetchVestingInfo(trimmed, publicKey, i),
         ),
       );
@@ -114,11 +140,11 @@ export function ClaimVesting() {
         });
 
         // Refresh this schedule
-        const updated = await fetchVestingInfo(
-          contractId.trim(),
-          publicKey,
-          scheduleIndex,
-        );
+        const [updated, solvencyState] = await Promise.all([
+          fetchVestingInfo(contractId.trim(), publicKey, scheduleIndex),
+          fetchVestingSolvency(contractId.trim()),
+        ]);
+        setSolvency(solvencyState);
         setSchedules((prev) => {
           const next = [...prev];
           next[scheduleIndex] = updated;
@@ -139,10 +165,49 @@ export function ClaimVesting() {
     [connected, publicKey, schedules, contractId, signTransaction, toast],
   );
 
+  /* ── Release all unlocked tokens across all schedules ──────────────── */
+  const [releasingAll, setReleasingAll] = useState(false);
+
+  const handleReleaseAll = useCallback(async () => {
+    if (!connected || !publicKey) return;
+    setReleasingAll(true);
+    try {
+      const xdr = await buildReleaseAllTx(contractId.trim(), publicKey, publicKey);
+      const signedXdr = await signTransaction(xdr);
+      await submitTx(signedXdr);
+      toast.show({
+        title: "Success",
+        message: "All tokens released successfully!",
+        variant: "success",
+      });
+      // Refresh all schedules + solvency
+      const [allSchedules, solvencyState] = await Promise.all([
+        fetchAllVestingSchedules(contractId.trim(), publicKey),
+        fetchVestingSolvency(contractId.trim()),
+      ]);
+      const infos: VestingInfo[] = await Promise.all(
+        allSchedules.map((_, i) =>
+          fetchVestingInfo(contractId.trim(), publicKey, i),
+        ),
+      );
+      setSchedules(infos);
+      setSolvency(solvencyState);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : "Release transaction failed";
+      toast.show({
+        title: "Release Failed",
+        message: msg,
+        variant: "error",
+      });
+    } finally {
+      setReleasingAll(false);
+    }
+  }, [connected, publicKey, contractId, signTransaction, toast]);
+
   /* ── Render ────────────────────────────────────────────────────────── */
   return (
     <>
-      {/* ── Wallet gate ──────────────────────────────────────────────── */}
       {!connected && (
         <div className="glass-card p-8 text-center">
           <p className="mb-4 text-gray-400">
@@ -152,7 +217,6 @@ export function ClaimVesting() {
         </div>
       )}
 
-      {/* ── Contract ID input ────────────────────────────────────────── */}
       {connected && (
         <div className="space-y-8">
           <div className="glass-card p-6">
@@ -195,7 +259,18 @@ export function ClaimVesting() {
             )}
           </div>
 
-          {/* ── One card per schedule ─────────────────────────────────── */}
+          {adminState?.pendingAdmin && (
+            <PendingAdminBanner
+              pendingAdmin={adminState.pendingAdmin}
+              connectedWallet={publicKey}
+              nonPendingMessage="The current admin can cancel the proposal from the contract's admin section."
+            />
+          )}
+
+          {solvency !== undefined && (
+            <VestingSolvencyBadge solvency={solvency} />
+          )}
+
           {schedules.map((info, idx) => (
             <ScheduleCard
               key={idx}
@@ -206,11 +281,25 @@ export function ClaimVesting() {
               onRelease={() => handleRelease(idx)}
             />
           ))}
+
+          {schedules.length > 1 && (
+            <Button
+              onClick={handleReleaseAll}
+              isLoading={releasingAll}
+              disabled={releasingAll || releasingIndex !== null}
+              className="w-full mt-4"
+              variant="secondary"
+            >
+              Release All Schedules
+            </Button>
+          )}
         </div>
       )}
     </>
   );
 }
+
+/* ── remaining components (ScheduleCard, StatCard, DetailRow) unchanged ── */
 
 /* ── Per-schedule card ─────────────────────────────────────────────── */
 

@@ -8,6 +8,96 @@ import {
 
 export { nativeToScVal, scValToNative };
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Contract error code → human message mapping
+ *
+ * These maps let the UI translate the numeric `ContractError(#N)` codes
+ * that Soroban surfaces in release WASM into user-facing explanations.
+ * Both `TokenError` and `VestingError` use `#[repr(u32)]` so their numeric
+ * values are stable across debug and release builds.
+ * ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * Human-readable messages for every variant in the token contract's
+ * `TokenError` enum.
+ */
+export const TokenErrorMessages: Record<number, string> = {
+  1: "Transfer rejected by compliance rules.",
+  2: "Compliance node is unavailable or misconfigured.",
+  3: "Invalid compliance node address (probe failed).",
+  4: "Token contract is already initialized.",
+  5: "Contract is locked (admin was revoked).",
+  6: "Contract is paused — no state-changing operations allowed.",
+  7: "Amount must be positive.",
+  8: "Insufficient balance.",
+  9: "Insufficient allowance.",
+  10: "Account is frozen — cannot send tokens.",
+  11: "Recipient is not an authorized holder.",
+  12: "Authorization is not revocable for this token.",
+  13: "Mint would exceed the maximum supply cap.",
+  14: "WASM hash cannot be all zeros.",
+  15: "Expiration ledger must be in the future.",
+  16: "Transfer would exceed the per-account balance cap.",
+  17: "No pending admin proposal to accept.",
+  18: "Initial supply exceeds the maximum supply cap.",
+  19: "Decimal value must be 18 or less.",
+  20: "Batch recipient and amount lists have different lengths.",
+  21: "Batch size exceeds the maximum of 100 entries.",
+  22: "Contract URI has not been set yet.",
+  23: "Contract has not been initialized yet.",
+};
+
+/**
+ * Human-readable messages for every variant in the vesting contract's
+ * `VestingError` enum.
+ */
+export const VestingErrorMessages: Record<number, string> = {
+  1: "Vesting contract is already initialized.",
+  2: "Contract has not been initialized yet.",
+  3: "Vesting contract is paused.",
+  4: "Amount must be positive.",
+  5: "End ledger must be after cliff ledger.",
+  6: "No pending admin proposal to accept.",
+  7: "Schedule has been revoked — no further releases.",
+  8: "Schedule was already revoked.",
+  9: "No tokens available to release at this time.",
+  10: "No schedule found for the given recipient.",
+  11: "Schedule index is out of bounds.",
+  12: "Batch schedules list is empty.",
+  13: "Batch size exceeds the maximum of 50 entries.",
+  14: "Cliff has already passed — cannot extend.",
+  15: "New cliff must be later than the current cliff.",
+  16: "New cliff must be before the end ledger.",
+  17: "Recipient is not tracked by this contract.",
+};
+
+/**
+ * Look up the user-facing message for a Soroban contract error.
+ *
+ * Parse an error string like `"Error(Contract, #7)"` or return a fallback
+ * when the code is unknown or the error is not a contract error.
+ */
+export function describeContractError(
+  err: unknown,
+  errorMap: Record<number, string> = TokenErrorMessages,
+): string {
+  if (typeof err === "string") {
+    const match = err.match(/Error\(Contract,\s*#(\d+)\)/);
+    if (match) {
+      const code = parseInt(match[1], 10);
+      return errorMap[code] ?? `Unknown contract error (code ${code}).`;
+    }
+  }
+  if (err instanceof Error) {
+    const match = err.message.match(/Error\(Contract,\s*#(\d+)\)/);
+    if (match) {
+      const code = parseInt(match[1], 10);
+      return errorMap[code] ?? `Unknown contract error (code ${code}).`;
+    }
+  }
+  return "An unexpected error occurred.";
+}
+
 /**
  * Build a Soroban invocation transaction.
  */

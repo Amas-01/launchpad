@@ -90,6 +90,17 @@ export const upgradeSchema = z.object({
   confirmSymbol: z.string().min(1, "Type the token symbol to confirm"),
 });
 
+export const vestingUpgradeSchema = z.object({
+  vestingContract: contractAddress,
+  wasmHash: z
+    .string()
+    .regex(
+      /^[0-9a-fA-F]{64}$/,
+      "Must be a 64-character hex string (32-byte WASM hash)",
+    ),
+  confirmSymbol: z.string().min(1, "Type the symbol to confirm"),
+});
+
 export const whaleCapSchema = z.object({
   cap: z
     .string()
@@ -115,6 +126,7 @@ export type VestingData = z.infer<typeof vestingSchema>;
 export type ManageVestingData = z.infer<typeof manageVestingSchema>;
 export type MetadataUriData = z.infer<typeof metadataUriSchema>;
 export type UpgradeData = z.infer<typeof upgradeSchema>;
+export type VestingUpgradeData = z.infer<typeof vestingUpgradeSchema>;
 export type WhaleCapData = z.infer<typeof whaleCapSchema>;
 export type ComplianceNodeData = z.infer<typeof complianceNodeSchema>;
 export type AccountData = z.infer<typeof accountSchema>;

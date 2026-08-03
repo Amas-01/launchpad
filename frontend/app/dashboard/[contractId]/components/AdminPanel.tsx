@@ -13,10 +13,12 @@ import { useWallet } from "../../../hooks/useWallet";
 import { useNetwork } from "../../../providers/NetworkProvider";
 import { useAdminAction } from "../hooks/useAdminAction";
 import { useTokenAdminState } from "../hooks/useTokenAdminState";
+import { PendingAdminBanner } from "@/components/PendingAdminBanner";
 import { MintCard } from "./admin/MintCard";
 import { SupplyCard } from "./admin/SupplyCard";
 import { VestingCard } from "./admin/VestingCard";
 import { ManageVestingCard } from "./admin/ManageVestingCard";
+import { VestingUpgradeCard } from "./admin/VestingUpgradeCard";
 import {
   TransferAdminCard,
   RevokeAdminCard,
@@ -148,25 +150,11 @@ export function AdminPanel({
       )}
 
       {!state.locked && state.pendingAdmin && (
-        <div className="mb-6 flex items-start gap-3 rounded-xl border border-stellar-500/30 bg-stellar-500/5 p-4">
-          <UserPlus
-            className="mt-0.5 h-5 w-5 shrink-0 text-stellar-400"
-            aria-hidden="true"
-          />
-          <div className="text-sm">
-            <p className="font-semibold text-stellar-200">
-              {t("adminTransferPending")}
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-stellar-100/80">
-              {t("adminTransferPendingDesc", {
-                pendingAdmin: `${state.pendingAdmin.slice(0, 6)}…${state.pendingAdmin.slice(-6)}`,
-              })}{" "}
-              {state.pendingAdmin === publicKey
-                ? t("adminTransferYourWallet")
-                : t("adminTransferNotFinal")}
-            </p>
-          </div>
-        </div>
+        <PendingAdminBanner
+          pendingAdmin={state.pendingAdmin}
+          connectedWallet={publicKey}
+          nonPendingMessage="It is not finalized until the pending admin accepts. As the current admin you can cancel or overwrite it below."
+        />
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-12">
@@ -178,6 +166,7 @@ export function AdminPanel({
 
         <VestingCard admin={admin} disabled={disabled} />
         <ManageVestingCard admin={admin} disabled={disabled} />
+        <VestingUpgradeCard admin={admin} disabled={disabled} locked={state.locked} />
 
         <TransferAdminCard
           admin={admin}
