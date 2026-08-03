@@ -133,7 +133,7 @@ export function TransferAdminCard({
                 Accept Admin Role
               </Button>
             ) : (
-              // Outgoing admin cancels by overwriting the proposal with self.
+              // The outgoing admin can cancel the pending transfer directly.
               <Button
                 type="button"
                 variant="secondary"

@@ -2,17 +2,20 @@
 
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { VestingSolvencyBadge } from "@/components/VestingSolvencyBadge";
 import { useToast } from "@/app/providers/ToastProvider";
 import { useWallet } from "@/app/hooks/useWallet";
 import {
   fetchAllVestingSchedules,
   fetchVestingInfo,
+  fetchVestingSolvency,
   buildReleaseTx,
   buildReleaseAllTx,
   submitTx,
   formatTokenAmount,
   truncateAddress,
   type VestingInfo,
+  type VestingSolvency,
 } from "@/lib/vesting";
 
 /* ── Soroban contract-ID regex (56 chars starting with C) ──────────── */
@@ -25,6 +28,9 @@ export function ClaimVesting() {
   const [contractId, setContractId] = useState("");
   // One VestingInfo entry per schedule index
   const [schedules, setSchedules] = useState<VestingInfo[]>([]);
+  const [solvency, setSolvency] = useState<
+    VestingSolvency | null | undefined
+  >();
   const [loading, setLoading] = useState(false);
   // Track which schedule index is currently releasing
   const [releasingIndex, setReleasingIndex] = useState<number | null>(null);
@@ -49,11 +55,16 @@ export function ClaimVesting() {
 
     setError(null);
     setSchedules([]);
+    setSolvency(undefined);
     setLoading(true);
 
     try {
-      // Use get_all_schedules (single contract call, not N+1)
-      const allSchedules = await fetchAllVestingSchedules(trimmed, publicKey);
+      // Use get_all_schedules (single contract call, not N+1) + fetch solvency
+      const [allSchedules, solvencyState] = await Promise.all([
+        fetchAllVestingSchedules(trimmed, publicKey),
+        fetchVestingSolvency(trimmed),
+      ]);
+      setSolvency(solvencyState);
 
       if (allSchedules.length === 0) {
         setError("No vesting schedule found for your wallet on this contract.");
@@ -113,11 +124,11 @@ export function ClaimVesting() {
         });
 
         // Refresh this schedule
-        const updated = await fetchVestingInfo(
-          contractId.trim(),
-          publicKey,
-          scheduleIndex,
-        );
+        const [updated, solvencyState] = await Promise.all([
+          fetchVestingInfo(contractId.trim(), publicKey, scheduleIndex),
+          fetchVestingSolvency(contractId.trim()),
+        ]);
+        setSolvency(solvencyState);
         setSchedules((prev) => {
           const next = [...prev];
           next[scheduleIndex] = updated;
@@ -153,14 +164,18 @@ export function ClaimVesting() {
         message: "All tokens released successfully!",
         variant: "success",
       });
-      // Refresh all schedules
-      const allSchedules = await fetchAllVestingSchedules(contractId.trim(), publicKey);
+      // Refresh all schedules + solvency
+      const [allSchedules, solvencyState] = await Promise.all([
+        fetchAllVestingSchedules(contractId.trim(), publicKey),
+        fetchVestingSolvency(contractId.trim()),
+      ]);
       const infos: VestingInfo[] = await Promise.all(
         allSchedules.map((_, i) =>
           fetchVestingInfo(contractId.trim(), publicKey, i),
         ),
       );
       setSchedules(infos);
+      setSolvency(solvencyState);
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : "Release transaction failed";
@@ -229,6 +244,10 @@ export function ClaimVesting() {
               </p>
             )}
           </div>
+
+          {solvency !== undefined && (
+            <VestingSolvencyBadge solvency={solvency} />
+          )}
 
           {/* ── One card per schedule ─────────────────────────────────── */}
           {schedules.map((info, idx) => (
