@@ -12,12 +12,6 @@ interface State {
   error: Error | null;
 }
 
-/**
- * Top-level Error Boundary that catches render-time exceptions in the React
- * tree (including the ones surfaced by RPC hooks via `throw`). Async errors
- * inside event handlers are caught by the RPC interceptor in `lib/soroban.ts`
- * and surfaced as toasts.
- */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 

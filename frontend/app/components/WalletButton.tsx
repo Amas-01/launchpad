@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useWallet } from "../hooks/useWallet";
 import { CopyButton } from "@/components/ui/CopyButton";
 
@@ -18,6 +19,7 @@ function truncateAddress(address: string): string {
  * - **Connected:** shows the truncated public key with a disconnect option.
  */
 export function WalletButton() {
+  const t = useTranslations("wallet");
   const { connected, publicKey, loading, connect, disconnect } = useWallet();
 
   if (connected && publicKey) {
@@ -29,7 +31,7 @@ export function WalletButton() {
           title={publicKey}
         >
           {truncateAddress(publicKey)}
-          <CopyButton value={publicKey} label="Copy wallet address" />
+          <CopyButton value={publicKey} label={t("copyAddress")} />
         </span>
 
         {/* Disconnect button */}
@@ -37,7 +39,7 @@ export function WalletButton() {
           onClick={disconnect}
           className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-gray-400 transition-colors hover:border-red-500/30 hover:text-red-400"
         >
-          Disconnect
+          {t("disconnect")}
         </button>
       </div>
     );
@@ -49,7 +51,7 @@ export function WalletButton() {
       disabled={loading}
       className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-60"
     >
-      {loading ? "Connecting…" : "Connect Wallet"}
+      {loading ? t("connectingEllipsis") : t("connect")}
     </button>
   );
 }
