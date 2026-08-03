@@ -376,6 +376,9 @@
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
               }
             ],
             "data": {
@@ -1389,7 +1392,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'batch size exceeds maximum of 100' from contract function 'Symbol(obj#695)'"
+                  "string": "caught panic 'batch size exceeds maximum of 100' from contract function 'Symbol(obj#697)'"
                 },
                 {
                   "vec": [
