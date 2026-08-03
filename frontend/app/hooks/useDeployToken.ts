@@ -24,8 +24,6 @@ function randomBytes(length: number): Buffer {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -88,23 +86,24 @@ export function useDeployToken() {
   const { connected, publicKey, signTransaction } = useWallet();
   const { networkConfig } = useNetwork();
 
-  const deployToken = useCallback(
-    async (params: DeployTokenParams): Promise<DeployTokenResult> => {
-      // ── Step 0: Validation ────────────────────────────────────────────
-      if (!connected || !publicKey) {
-        throw {
-          message: "Wallet not connected. Please connect your wallet and try again.",
-          type: "validation",
-        } as DeployTokenError;
-      }
+  const networkKey = (networkConfig?.network || networkConfig?.id || "").toLowerCase();
 
-      if (!TOKEN_WASM_HASH) {
-        throw {
-          message:
-            "Token WASM hash not configured. Please set NEXT_PUBLIC_TOKEN_WASM_HASH in your environment.",
-          type: "validation",
-        } as DeployTokenError;
-      }
+    let TOKEN_WASM_HASH: string | undefined;
+
+    if (networkKey.includes("testnet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_TESTNET;
+    } else if (networkKey.includes("mainnet") || networkKey.includes("public")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_MAINNET;
+    } else if (networkKey.includes("futurenet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_FUTURENET;
+    }
+
+    if (!TOKEN_WASM_HASH) {
+      throw {
+        message: `Token WASM hash not configured for network "${networkConfig?.network || networkConfig?.id || "selected"}". Please set NEXT_PUBLIC_TOKEN_WASM_HASH_${(networkConfig?.network || networkConfig?.id || "NETWORK").toUpperCase()} in your environment.`,
+        type: "validation",
+      } as DeployTokenError;
+    }
 
       const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
 
