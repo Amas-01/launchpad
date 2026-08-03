@@ -917,15 +917,17 @@ export const TRACKED_EVENT_TOPICS = [
   "pause",
   "unpause",
   "authorize",
-  "revoke_auth",
+  "rvk_auth",
   "revoked",
   "upgrade",
   "approve",
   "set_max_b",
   "set_cnode",
-  "prop_admin",
+  "prop_adm",
   "set_admin",
-  "update_uri",
+  "upd_uri",
+  "set_areq",
+  "rvk_rvc",
 ] as const;
 
 type TrackedTopic = (typeof TRACKED_EVENT_TOPICS)[number];
@@ -1012,7 +1014,7 @@ function decodeActivityEvent(
     case "freeze":
     case "unfreeze":
     case "authorize":
-    case "revoke_auth": {
+    case "rvk_auth": {
       // topic[1] = account address being acted on
       if (topicStrings.length > 1) {
         const addrVal = toScVal(topicStrings[1]);
@@ -1020,8 +1022,8 @@ function decodeActivityEvent(
       }
       break;
     }
-    case "prop_admin": {
-      // topics are ("prop_admin", current_admin, new_admin)
+    case "prop_adm": {
+      // topics are ("prop_adm", current_admin, new_admin)
       if (topicStrings.length > 2) {
         const currentVal = toScVal(topicStrings[1]);
         const newVal = toScVal(topicStrings[2]);
@@ -1048,7 +1050,9 @@ function decodeActivityEvent(
     case "approve":
     case "set_max_b":
     case "set_cnode":
-    case "update_uri":
+    case "upd_uri":
+    case "set_areq":
+    case "rvk_rvc":
       // No address payload or special handling needed for activity feed
       break;
     default:

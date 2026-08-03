@@ -171,15 +171,15 @@ export function useContractEvents(
             case "freeze":
             case "unfreeze":
             case "authorize":
-            case "revoke_auth":
+            case "rvk_auth":
               if (topics.length > 1) {
                 const addrVal = toScVal(topics[1]);
                 if (addrVal) record.subject = decodeAddress(addrVal);
               }
               break;
 
-            case "prop_admin":
-              // topics are ("prop_admin", current_admin, new_admin)
+            case "prop_adm":
+              // topics are ("prop_adm", current_admin, new_admin)
               if (topics.length > 2) {
                 const currentVal = toScVal(topics[1]);
                 const newVal = toScVal(topics[2]);
@@ -206,7 +206,9 @@ export function useContractEvents(
             case "approve":
             case "set_max_b":
             case "set_cnode":
-            case "update_uri":
+            case "upd_uri":
+            case "set_areq":
+            case "rvk_rvc":
               // no extra payload needed
               break;
 
