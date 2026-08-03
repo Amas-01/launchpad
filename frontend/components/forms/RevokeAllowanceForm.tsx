@@ -9,7 +9,10 @@ import { Input } from "@/components/ui/Input";
 import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { useWallet } from "@/app/hooks/useWallet";
-import { buildApproveTransaction, submitTransaction } from "@/lib/stellar";
+import {
+  buildRevokeAllowanceTransaction,
+  submitTransaction,
+} from "@/lib/stellar";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { AlertCircle, CheckCircle, Trash2, Loader2 } from "lucide-react";
 
@@ -100,12 +103,10 @@ export function RevokeAllowanceForm({ onSuccess, onError }: RevokeAllowanceFormP
 
     setIsSubmitting(true);
     try {
-      const xdr = await buildApproveTransaction({
+      const xdr = await buildRevokeAllowanceTransaction({
         tokenContractId: formData.tokenContractId,
         ownerAddress: publicKey,
         spenderAddress: formData.spenderAddress,
-        amount: BigInt(0),
-        expirationLedger: 1000,
         config: networkConfig,
       });
 

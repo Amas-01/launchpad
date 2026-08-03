@@ -2,6 +2,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { type NetworkConfig } from "../types/network";
 import { fetchIndexedEvents } from "./indexer";
 import { wrapRpcCall } from "./soroban";
+import { buildRevokeAllowanceArgs } from "./transactionSimulator";
 
 // ---------------------------------------------------------------------------
 // Config — defaults to Stellar Testnet, overridable via localStorage
@@ -1707,6 +1708,39 @@ export async function buildApproveTransaction(params: {
         expirationScVal,
       ),
     )
+    .setTimeout(30)
+    .build();
+
+  const assembled = await simulateAndAssembleTransaction(tx, config);
+  return assembled.build().toXDR();
+}
+
+/**
+ * Build a transaction XDR that revokes an allowance on a SEP-41 token.
+ *
+ * Delegates argument construction to `buildRevokeAllowanceArgs` so the
+ * preflight simulation and the real submission use identical arguments.
+ * See that function and `contracts/token/src/lib.rs` for the rationale.
+ */
+export async function buildRevokeAllowanceTransaction(params: {
+  tokenContractId: string;
+  ownerAddress: string;
+  spenderAddress: string;
+  config: NetworkConfig;
+}): Promise<string> {
+  const { tokenContractId, ownerAddress, spenderAddress, config } = params;
+
+  const contract = new StellarSdk.Contract(tokenContractId);
+  const args = buildRevokeAllowanceArgs(ownerAddress, spenderAddress);
+
+  const horizon = new StellarSdk.Horizon.Server(config.horizonUrl);
+  const sourceAccount = await horizon.loadAccount(ownerAddress);
+
+  const tx = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: config.passphrase,
+  })
+    .addOperation(contract.call("approve", ...args))
     .setTimeout(30)
     .build();
 

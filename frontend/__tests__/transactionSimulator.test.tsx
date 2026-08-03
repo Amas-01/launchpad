@@ -6,6 +6,7 @@
 
 import "@testing-library/jest-dom";
 import {
+  buildRevokeAllowanceArgs,
   parseSorobanError,
   // simulateTransaction,
 } from "@/lib/transactionSimulator";
@@ -314,6 +315,39 @@ describe("Simulation with Mock RPC", () => {
   it("returns warnings for high fees", async () => {
     // Mock RPC returning high cost
     // expect(result.warnings).toContain("High");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// buildRevokeAllowanceArgs Tests
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("buildRevokeAllowanceArgs", () => {
+  it("returns four ScVal arguments", () => {
+    const owner = "GBPLA3EQJGNQFHZNQWUZ3Z7YZY7QZ5RZQ5JQ5JQ5JQ5JQ5JQ5JQ5JQ5";
+    const spender = "GCTV2QEQJGNQFHZNQWUZ3Z7YZY7QZ5RZQ5JQ5JQ5JQ5JQ5JQ5JQ5JQ5";
+    const args = buildRevokeAllowanceArgs(owner, spender);
+
+    expect(args).toHaveLength(4);
+  });
+
+  it("passes 0 for amount and expiration_ledger", () => {
+    const owner = "GBPLA3EQJGNQFHZNQWUZ3Z7YZY7QZ5RZQ5JQ5JQ5JQ5JQ5JQ5JQ5JQ5";
+    const spender = "GCTV2QEQJGNQFHZNQWUZ3Z7YZY7QZ5RZQ5JQ5JQ5JQ5JQ5JQ5JQ5JQ5";
+    const args = buildRevokeAllowanceArgs(owner, spender);
+
+    // owner and spender are Address ScVals — just verify they're present
+    expect(args[0]).toBeDefined();
+    expect(args[1]).toBeDefined();
+
+    // amount (i128) must be 0
+    const amountVal = args[2].value() as { hi: number; lo: number };
+    expect(amountVal.hi).toBe(0);
+    expect(amountVal.lo).toBe(0);
+
+    // expiration_ledger (u32) must be 0
+    const expVal = args[3].value() as number;
+    expect(expVal).toBe(0);
   });
 });
 
