@@ -1130,21 +1130,7 @@ export async function fetchTransactionHistory(
   return { items: items.reverse(), nextCursor };
 }
 
-export type TokenActivityType =
-  | "mint"
-  | "transfer"
-  | "burn"
-  | "clawback"
-  | "freeze"
-  | "unfreeze"
-  | "pause"
-  | "unpause"
-  | "authorize"
-  | "unauthorize"
-  | "set_admin"
-  | "revoke_admin"
-  | "upgrade"
-  | "other";
+export type TokenActivityType = (typeof TRACKED_EVENT_TOPICS)[number] | "other";
 
 export interface TokenActivityInfo {
   id: string;

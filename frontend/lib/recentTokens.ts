@@ -1,6 +1,7 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { type NetworkConfig } from "../types/network";
 import { fetchTokenInfo, type TokenInfo } from "./stellar";
+import { LEDGERS_PER_DAY } from "./soroban";
 
 export interface RecentToken extends TokenInfo {
   deployedAt: string;
@@ -15,7 +16,7 @@ interface RpcEvent {
   value?: string;
 }
 
-const LOOKBACK_LEDGERS = 17280; // ~24 hours at ~5s per ledger
+const LOOKBACK_LEDGERS = LEDGERS_PER_DAY; // ~24 hours at ~5s per ledger
 const MAX_CANDIDATES = 20;
 const MAX_RESULTS = 12;
 
