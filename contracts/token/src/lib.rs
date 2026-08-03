@@ -163,7 +163,7 @@ pub trait ComplianceNodeInterface {
 /// SEP-41 Token Contract — base implementation.
 ///
 /// Contributor issues layered on top:
-/// - #1  freeze_account / unfreeze_account (blacklist: no send or receive)
+/// - #1  freeze_account / unfreeze_account (blacklist: no send, no receive, no mint-in)
 /// - #2  two-step admin transfer (propose_admin / accept_admin)
 /// - #4  max_supply cap enforcement in mint
 /// - #138 clawback() and #163 compliance-node transfer checks
@@ -312,8 +312,12 @@ impl TokenContract {
     /// Forcefully move `amount` tokens from `from` into the admin balance.
     /// Admin only.
     ///
-    /// Bypasses the frozen check on `from` so tokens can be recovered from a
-    /// blacklisted account; the admin recipient must not be frozen.
+    /// Deliberate freeze bypass: this is the sanctioned recovery path, so it
+    /// moves value even when `from` is frozen and even when the admin
+    /// recipient would otherwise be gated by the receive-side freeze check.
+    /// Every other credit path (transfer, transfer_from, mint) refuses a
+    /// frozen recipient; clawback is the single documented exception so an
+    /// issuer can always recover funds from a blacklisted account.
     pub fn clawback(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -328,7 +332,7 @@ impl TokenContract {
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
             .expect("admin revoked");
         Self::_check_compliance(&env, &from, &admin);
-        Self::_transfer(&env, &from, &admin, amount);
+        Self::_transfer_bypass_frozen(&env, &from, &admin, amount);
 
         let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from.clone());
@@ -490,9 +494,11 @@ impl TokenContract {
         env.events().publish((symbol_short!("revoked"),), true);
     }
 
-    /// Freeze an account (blacklist): it cannot send or receive tokens. Admin only.
+    /// Freeze an account (blacklist): it cannot send or receive tokens, and
+    /// the admin cannot mint into it. Admin only.
     ///
-    /// Admin [`clawback`](Self::clawback) may still pull tokens from a frozen account.
+    /// Admin [`clawback`](Self::clawback) is the sole exception and may still
+    /// pull tokens from a frozen account back to the admin.
     pub fn freeze_account(env: Env, addr: Address) {
         Self::_require_admin(&env);
         env.storage()
@@ -1218,6 +1224,10 @@ impl TokenContract {
     }
 
     fn _mint(env: &Env, to: &Address, amount: i128) {
+        // Receive-side freeze: issuance into a blacklisted account is exactly
+        // the accumulation a freeze exists to prevent, so it is refused here.
+        // Clawback does not mint, so admin recovery is unaffected.
+        assert!(!Self::_is_frozen(env, to), "account is frozen");
         Self::_check_authorized(env, to);
         let supply: i128 = env
             .storage()
@@ -1294,7 +1304,28 @@ impl TokenContract {
             .publish((symbol_short!("burn"), from.clone()), amount);
     }
 
+    /// Public transfer path. Enforces the receive-side freeze: a frozen
+    /// recipient cannot be credited. Admin recovery goes through
+    /// [`Self::_transfer_bypass_frozen`] instead, so a blacklisted account's
+    /// tokens can still be clawed back.
     fn _transfer(env: &Env, from: &Address, to: &Address, amount: i128) {
+        assert!(!Self::_is_frozen(env, to), "account is frozen");
+        Self::_transfer_internal(env, from, to, amount);
+    }
+
+    /// Transfer that deliberately skips the recipient freeze check. Only
+    /// reachable from [`Self::clawback`], whose whole purpose is to move value
+    /// out of a frozen account back to the admin. `clawback` already guards
+    /// that the recipient is the caller-controlled admin, so this bypass
+    /// cannot be used to credit an arbitrary frozen third party.
+    fn _transfer_bypass_frozen(env: &Env, from: &Address, to: &Address, amount: i128) {
+        Self::_transfer_internal(env, from, to, amount);
+    }
+
+    /// Shared balance-movement core for both the gated and bypass paths.
+    /// Callers are responsible for any freeze / compliance / authorization
+    /// checks appropriate to their path before calling this.
+    fn _transfer_internal(env: &Env, from: &Address, to: &Address, amount: i128) {
         let from_key = DataKey::Balance(from.clone());
         let to_key = DataKey::Balance(to.clone());
 
@@ -2177,6 +2208,88 @@ mod test {
             client.try_transfer_from(&spender, &user, &admin, &500i128),
             Err(Ok(TokenError::Frozen.into()))
         );
+    }
+
+    // ── Regression tests for issue #397: freeze must block receive + mint ──
+    //
+    // Before this fix, `_is_frozen` was only checked on send-side call sites
+    // (burn, burn_self, transfer, approve, transfer_from, burn_from). Neither
+    // `_transfer`'s recipient nor `_mint`'s recipient was checked, so a frozen
+    // account kept receiving inbound transfers and could still be minted into,
+    // while the header comment claimed a full "no send or receive" blacklist.
+    // These tests pin the receive-side semantics and the deliberate clawback
+    // bypass so the contract, the doc comment, and the SecurityCard copy agree.
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_receive_transfer() {
+        let (_, client, admin, user) = setup();
+        client.freeze_account(&user);
+        // Inbound transfer to a frozen account must fail, not silently credit.
+        client.transfer(&admin, &user, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_receive_transfer_from() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+        client.approve(&admin, &spender, &1_000i128, &1000u32);
+        // Freeze the *recipient*; the sender/allowance side is fine.
+        client.freeze_account(&user);
+        client.transfer_from(&spender, &admin, &user, &500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_be_minted_into() {
+        let (_, client, _, user) = setup();
+        client.freeze_account(&user);
+        client.mint(&user, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_be_minted_into_via_batch() {
+        let (env, client, _, user) = setup();
+        let ok = Address::generate(&env);
+        client.freeze_account(&user);
+
+        let mut to = soroban_sdk::Vec::new(&env);
+        to.push_back(ok);
+        to.push_back(user);
+
+        let mut amounts = soroban_sdk::Vec::new(&env);
+        amounts.push_back(100i128);
+        amounts.push_back(200i128);
+
+        // One frozen recipient must revert the whole batch.
+        client.mint_batch(&to, &amounts);
+    }
+
+    #[test]
+    fn test_clawback_still_recovers_from_frozen_account() {
+        let (_, client, admin, user) = setup();
+        // Fund the user before freezing (transfer to an unfrozen account is fine).
+        client.transfer(&admin, &user, &1_000i128);
+        let admin_before = client.balance(&admin);
+
+        client.freeze_account(&user);
+        // Clawback must bypass the freeze on both sides and pull funds to admin.
+        client.clawback(&user, &1_000i128);
+
+        assert_eq!(client.balance(&user), 0i128);
+        assert_eq!(client.balance(&admin), admin_before + 1_000i128);
+    }
+
+    #[test]
+    fn test_unfreeze_restores_receive() {
+        let (_, client, admin, user) = setup();
+        client.freeze_account(&user);
+        client.unfreeze_account(&user);
+        // Once unfrozen, the account can receive again.
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
     }
 
     // ── Revoke admin / lock tests ───────────────────────────────────────
