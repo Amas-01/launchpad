@@ -1,16 +1,21 @@
 import { ImageResponse } from "next/og";
 import { fetchTokenInfo } from "@/lib/stellar";
-import { NETWORKS } from "@/types/network";
+import { NETWORKS, type NetworkType } from "@/types/network";
 
 export const runtime = "edge";
 
+function resolveNetwork(network: string): NetworkType {
+  return network === "mainnet" ? "mainnet" : "testnet";
+}
+
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ contractId: string }> }
+  { params }: { params: Promise<{ network: string; contractId: string }> }
 ) {
   try {
-    const { contractId } = await params;
-    const tokenInfo = await fetchTokenInfo(contractId, NETWORKS.testnet);
+    const { network, contractId } = await params;
+    const resolvedNetwork = resolveNetwork(network);
+    const tokenInfo = await fetchTokenInfo(contractId, NETWORKS[resolvedNetwork]);
     
     return new ImageResponse(
       (
