@@ -102,7 +102,7 @@
       },
       {
         "functions": ["update_contract_uri"],
-        "topics": ["update_uri"],
+        "topics": ["upd_uri"],
         "data": "uri: String"
       },
       {

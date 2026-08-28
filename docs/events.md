@@ -36,7 +36,7 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
 | `cancel_admin_proposal` | `cncl_adm` | — | — | () |
 | `accept_admin` | `set_admin` | `old_admin: Address` | `new_admin: Address` | () |
-| `update_contract_uri` | `update_uri` | — | — | uri: String |
+| `update_contract_uri` | `upd_uri` | — | — | uri: String |
 | `set_authorization_required` | `set_areq` | — | — | required: bool |
 | `renounce_authorization_revocable` | `rvk_rvc` | — | — | () |
 
