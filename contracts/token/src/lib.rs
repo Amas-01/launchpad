@@ -9,28 +9,32 @@ use soroban_sdk::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Soroban's network-enforced ceiling on how far into the future a ledger
-/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
-/// network config; 6,312,000 ledgers on mainnet). Passing a value above
-/// this to `extend_ttl` fails the transaction.
-const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
-
-/// TTL extension applied to balance/allowance entries so a holder who
-/// never touches their tokens still keeps them live for about a year.
+/// Desired lifetime for the ledger entries this contract keeps alive:
+/// about a year, assuming Stellar's ~5s ledger close time.
 ///
-/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
-/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
-/// will accept even if the formula above or the network parameter changes.
-const TTL_LEDGERS: u32 = {
-    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
-    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
-        YEAR_LEDGERS as u32
-    } else {
-        MAX_ENTRY_TTL_LEDGERS
-    }
-};
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers.
+///
+/// This is only a *request*. The effective window is whatever the network
+/// allows — `env.storage().max_ttl()`, read at call time — and every
+/// `extend_ttl` site clamps to it. On testnet and mainnet today
+/// `max_entry_ttl` is 3,110,400 ledgers, so entries actually live **about
+/// 180 days, not a year**. Holders who need their balance to outlive that
+/// must interact with the contract at least once per window.
+///
+/// Deliberately not compared against a hardcoded ceiling: the previous
+/// constant here (6,312,000) was the soroban-sdk *test harness* default
+/// (`soroban-sdk/src/env.rs`), not a network value, so the clamp it fed
+/// could never fire. The test environment still reports 6,312,000, which is
+/// why no test in this file asserts a specific network figure.
+const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
 /// Maximum lifetime for an admin transfer proposal before it becomes invalid.
+///
+/// This is a deadline in ledger numbers, not a storage TTL, so it is not
+/// clamped to `max_ttl()`. Note the instance entry holding the proposal is
+/// clamped, so on today's networks the entry's ~180-day window expires before
+/// this ~365-day deadline does; a proposal left untouched that long needs the
+/// instance kept alive by any other call.
 const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
 
 // ---------------------------------------------------------------------------
@@ -247,7 +251,7 @@ impl TokenContract {
         if authorization_required {
             let key = DataKey::AuthorizedHolder(admin.clone());
             env.storage().persistent().set(&key, &true);
-            let ttl_ledgers = TTL_LEDGERS;
+            let ttl_ledgers = Self::_ttl_ledgers(&env);
             env.storage()
                 .persistent()
                 .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
@@ -277,7 +281,7 @@ impl TokenContract {
         Self::_mint(&env, &to, amount);
 
         // Extend TTL for the balance key to prevent archiving
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         let key = DataKey::Balance(to);
         env.storage()
             .persistent()
@@ -330,11 +334,10 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
-            .expect("admin revoked");
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer_bypass_frozen(&env, &from, &admin, amount);
 
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         let from_key = DataKey::Balance(from.clone());
         let admin_key = DataKey::Balance(admin.clone());
         env.storage()
@@ -637,7 +640,7 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
-        env.events().publish((symbol_short!("update_uri"),), uri);
+        env.events().publish((symbol_short!("upd_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -674,7 +677,7 @@ impl TokenContract {
 
         // Extend TTL for both balance keys to prevent archiving
         // Use a standard TTL extension (e.g., 52 weeks in ledgers)
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -788,7 +791,7 @@ impl TokenContract {
         Self::_transfer(&env, &from, &to, amount);
 
         // Extend TTL for balance keys to prevent archiving
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         let from_key = DataKey::Balance(from);
         let to_key = DataKey::Balance(to);
         env.storage()
@@ -1038,9 +1041,7 @@ impl TokenContract {
 
     /// Returns the contract metadata URI, if one has been configured.
     pub fn contract_uri(env: Env) -> Option<String> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ContractUri)
+        env.storage().instance().get(&DataKey::ContractUri)
     }
 
     /// Returns the configured compliance node, if any.
@@ -1081,6 +1082,18 @@ impl TokenContract {
         admin.require_auth();
     }
 
+    /// The TTL to request for a persistent entry: our desired window, capped
+    /// at what the network will actually honour.
+    ///
+    /// `soroban-env-host` silently lowers an over-long `extend_ttl` on a
+    /// *persistent* entry rather than erroring, so an unclamped call is not a
+    /// hard failure — it just quietly gets you a shorter entry than the code
+    /// appears to ask for. Clamping here keeps the requested and effective
+    /// values the same, so the archival window is legible from the source.
+    fn _ttl_ledgers(env: &Env) -> u32 {
+        TTL_LEDGERS.min(env.storage().max_ttl())
+    }
+
     fn _require_not_locked(env: &Env) {
         let locked: bool = env
             .storage()
@@ -1119,17 +1132,14 @@ impl TokenContract {
             return;
         };
 
-        let admin: Option<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin);
-//         let Some(admin) = env
-//             .storage()
-//             .instance()
-//             .get::<DataKey, Address>(&DataKey::Admin)
-//         else {
-//             return; // contract is locked; cap no longer enforced
-//         };
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        //         let Some(admin) = env
+        //             .storage()
+        //             .instance()
+        //             .get::<DataKey, Address>(&DataKey::Admin)
+        //         else {
+        //             return; // contract is locked; cap no longer enforced
+        //         };
 
         if let Some(ref admin_addr) = admin {
             if to == admin_addr {
@@ -1338,7 +1348,7 @@ impl TokenContract {
             .persistent()
             .set(&from_key, &(from_balance - amount));
 
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         env.storage()
             .persistent()
             .extend_ttl(&from_key, ttl_ledgers, ttl_ledgers);
@@ -1533,29 +1543,28 @@ mod test {
     // same set directly from source and fails CI if it and
     // `docs/events.json` disagree.
     const EXPECTED_TOPICS: [&str; 22] = [
-        "init",
-        "mint",
-        "burn",
-        "clawback",
-        "transfer",
         "approve",
         "authorize",
-        "revoked",
+        "burn",
+        "clawback",
+        "cncl_adm",
         "freeze",
-        "unfreeze",
+        "init",
+        "mint",
         "pause",
-        "unpause",
-        "authorize",
-        "upgrade",
-        "set_max_b",
-        "set_cnode",
         "prop_adm",
-        "set_admin",
-        "rvk_auth",
-        "upd_uri",
-        "set_areq",
-        "rvk_rvc",
         "rev_auth",
+        "revoked",
+        "rvk_rvc",
+        "set_admin",
+        "set_areq",
+        "set_cnode",
+        "set_max_b",
+        "transfer",
+        "unfreeze",
+        "unpause",
+        "upd_uri",
+        "upgrade",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
@@ -1618,10 +1627,43 @@ mod test {
     // ── TTL constant tests ──────────────────────────────────────────────
 
     #[test]
-    fn test_ttl_ledgers_is_about_one_year() {
-        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
-        // assumption or the formula ever changes, this test catches it
-        // instead of the archival-window math silently rotting again.
+    fn test_ttl_requests_are_clamped_to_the_network_ceiling() {
+        // The archival window is decided by the clamp, not by TTL_LEDGERS:
+        // every site asks for TTL_LEDGERS and gets `min(request, max_ttl())`.
+        //
+        // This deliberately asserts a *relationship* rather than a number.
+        // The soroban-sdk test harness reports a `max_entry_ttl` of 6,312,000
+        // (its own default, `soroban-sdk/src/env.rs`), while testnet and
+        // mainnet both enforce 3,110,400. A test pinning either figure would
+        // mislead — and pinning the harness value is exactly how the old
+        // ceiling went unnoticed (#398). Note this also means the clamp does
+        // *not* bind under test, but does bind on both real networks, where
+        // the effective window is about 180 days rather than a year.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TokenContract);
+
+        env.as_contract(&contract_id, || {
+            let network_max = env.storage().max_ttl();
+            let effective = TokenContract::_ttl_ledgers(&env);
+
+            assert_eq!(
+                effective,
+                TTL_LEDGERS.min(network_max),
+                "the effective TTL must be the request clamped to the network \
+                 ceiling, never the raw request"
+            );
+            assert!(
+                effective <= network_max,
+                "effective TTL ({effective}) exceeds the network ceiling \
+                 ({network_max}); extend_ttl would be silently lowered"
+            );
+        });
+    }
+
+    #[test]
+    fn test_ttl_ledgers_encodes_a_one_year_request() {
+        // Documents intent only: 5s per ledger for 365 days. The window a
+        // holder actually gets is shorter wherever the network says so.
         let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
         assert_eq!(days, 365);
     }
@@ -2306,10 +2348,7 @@ mod test {
     fn test_admin_getter_after_revoke_panics() {
         let (_, client, _, _) = setup();
         client.revoke_admin();
-        assert_eq!(
-            client.try_admin(),
-            Err(Ok(TokenError::Locked.into()))
-        );
+        assert_eq!(client.try_admin(), Err(Ok(TokenError::Locked.into())));
     }
 
     #[test]
@@ -2902,6 +2941,7 @@ mod test {
             &None,
             &true,
             &false, // revocable = false from deploy
+            &None,
             &None,
         );
 
