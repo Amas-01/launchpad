@@ -1,6 +1,6 @@
 # Event Schema
 
-All state-changing operations in the token and vesting contracts emit structured
+All state-changing operations in the launchpad's contracts emit structured
 Soroban events. Each event uses `env.events().publish(topics, data)` where
 **topics** is a tuple whose first element is the event name (a `symbol_short!`
 value) and **data** carries the payload.
@@ -29,13 +29,14 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `pause` | `pause` | — | — | () |
 | `unpause` | `unpause` | — | — | () |
 | `authorize_holder` | `authorize` | `holder: Address` | — | () |
-| `revoke_authorization` | `rvk_auth` | `holder: Address` | — | () |
+| `revoke_authorization` | `rev_auth` | `holder: Address` | — | () |
 | `upgrade` | `upgrade` | — | — | new_wasm_hash: BytesN<32> |
 | `set_max_balance_per_account` | `set_max_b` | — | — | Option<u32> |
 | `set_compliance_node` | `set_cnode` | — | — | Option<Address> |
 | `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
+| `cancel_admin_proposal` | `cncl_adm` | — | — | () |
 | `accept_admin` | `set_admin` | `old_admin: Address` | `new_admin: Address` | () |
-| `update_contract_uri` | `upd_uri` | — | — | uri: String |
+| `update_contract_uri` | `update_uri` | — | — | uri: String |
 | `set_authorization_required` | `set_areq` | — | — | required: bool |
 | `renounce_authorization_revocable` | `rvk_rvc` | — | — | () |
 
@@ -60,10 +61,25 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `pause` | `pause` | — | () |
 | `unpause` | `unpause` | — | () |
 | `prune_recipient` | `prune` | — | recipient: Address |
+| `upgrade` | `upgrade` | — | new_wasm_hash: BytesN<32> |
+| `revoke_admin` | `revoked` | — | bool (always true) |
 
 > Emitted once per call in addition to a `create` event per schedule in the batch.
 
 > Removes a fully-settled recipient from the enumeration index only; it does not touch the recipient's own schedules.
+
+---
+
+## Airdrop Contract
+
+| Function | Topic 0 | Topic 1 | Data |
+|---|---|---|---|
+| `initialize` | `init` | `admin: Address` | (token: Address, merkle_root: BytesN<32>, deadline_ledger: u32) |
+| `fund` | `fund` | `from: Address` | amount: i128 |
+| `claim` | `claim` | `recipient: Address` | amount: i128 |
+| `reclaim_unclaimed` | `reclaim` | `admin: Address` | amount: i128 |
+
+> claim also emits the token contract's own `transfer` event in the same transaction, so a claimed allocation shows up as both events.
 
 ---
 

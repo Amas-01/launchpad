@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
+    "@noble/hashes": "^1.8.0",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^14.5.0",
     "jspdf": "^4.2.0",
