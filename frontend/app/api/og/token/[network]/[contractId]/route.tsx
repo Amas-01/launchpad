@@ -1,8 +1,13 @@
 import { ImageResponse } from "next/og";
 import { fetchTokenInfo } from "@/lib/stellar";
+import { isValidContractId } from "@/lib/contractValidation";
 import { NETWORKS, type NetworkType } from "@/types/network";
 
 export const runtime = "edge";
+
+// Cache lifetime for OG images — 60 s fresh, then serve stale while revalidating
+// for up to an additional 60 s.  Mirrors the /api/tokens/recent TTL precedent.
+const CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=60";
 
 function resolveNetwork(network: string): NetworkType {
   return network === "mainnet" ? "mainnet" : "testnet";
@@ -12,11 +17,17 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ network: string; contractId: string }> }
 ) {
+  const { network, contractId } = await params;
+
+  // Reject malformed contract IDs immediately — no RPC call needed.
+  if (!isValidContractId(contractId)) {
+    return new Response("Invalid contract ID", { status: 400 });
+  }
+
   try {
-    const { network, contractId } = await params;
     const resolvedNetwork = resolveNetwork(network);
     const tokenInfo = await fetchTokenInfo(contractId, NETWORKS[resolvedNetwork]);
-    
+
     return new ImageResponse(
       (
         <div
@@ -60,7 +71,7 @@ export async function GET(
             >
               {tokenInfo.symbol.slice(0, 2).toUpperCase()}
             </div>
-            
+
             {/* Token Name and Symbol */}
             <h1
               style={{
@@ -72,7 +83,7 @@ export async function GET(
             >
               {tokenInfo.name}
             </h1>
-            
+
             <p
               style={{
                 fontSize: "32px",
@@ -82,7 +93,7 @@ export async function GET(
             >
               ({tokenInfo.symbol})
             </p>
-            
+
             {/* Token Details */}
             <div
               style={{
@@ -100,7 +111,7 @@ export async function GET(
                 <strong>Decimals:</strong> {tokenInfo.decimals}
               </div>
             </div>
-            
+
             {/* Footer */}
             <div
               style={{
@@ -129,12 +140,14 @@ export async function GET(
       {
         width: 1200,
         height: 630,
+        headers: { "Cache-Control": CACHE_CONTROL },
       }
     );
   } catch (error) {
     console.error("Error generating OG image:", error);
-    
-    // Fallback image
+
+    // Fallback image — also cached so a single bad/transient fetch
+    // does not hammer the RPC endpoint on every retry.
     return new ImageResponse(
       (
         <div
@@ -173,6 +186,7 @@ export async function GET(
       {
         width: 1200,
         height: 630,
+        headers: { "Cache-Control": CACHE_CONTROL },
       }
     );
   }
