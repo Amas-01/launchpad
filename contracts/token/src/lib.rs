@@ -177,6 +177,7 @@ impl TokenContract {
     ///
     /// `authorization_revocable`: when true, the admin may revoke a holder's
     /// authorization, preventing them from receiving further transfers.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -316,7 +317,6 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
-            .expect("admin revoked");
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer(&env, &from, &admin, amount);
 
@@ -583,7 +583,7 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
-        env.events().publish((symbol_short!("update_uri"),), uri);
+        env.events().publish((symbol_short!("upd_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -980,9 +980,7 @@ impl TokenContract {
 
     /// Returns the contract metadata URI, if one has been configured.
     pub fn contract_uri(env: Env) -> Option<String> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ContractUri)
+        env.storage().instance().get(&DataKey::ContractUri)
     }
 
     /// Returns the configured compliance node, if any.
@@ -1061,17 +1059,14 @@ impl TokenContract {
             return;
         };
 
-        let admin: Option<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin);
-//         let Some(admin) = env
-//             .storage()
-//             .instance()
-//             .get::<DataKey, Address>(&DataKey::Admin)
-//         else {
-//             return; // contract is locked; cap no longer enforced
-//         };
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        //         let Some(admin) = env
+        //             .storage()
+        //             .instance()
+        //             .get::<DataKey, Address>(&DataKey::Admin)
+        //         else {
+        //             return; // contract is locked; cap no longer enforced
+        //         };
 
         if let Some(ref admin_addr) = admin {
             if to == admin_addr {
@@ -1353,7 +1348,7 @@ mod test {
     // activity. `scripts/generate_events_doc.py --check` re-derives this
     // same set directly from source and fails CI if it and
     // `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 19] = [
+    const EXPECTED_TOPICS: [&str; 20] = [
         "init",
         "mint",
         "burn",
@@ -1367,6 +1362,7 @@ mod test {
         "pause",
         "unpause",
         "prop_adm",
+        "cncl_adm",
         "set_admin",
         "rev_auth",
         "upgrade",
@@ -1399,7 +1395,7 @@ mod test {
             let mut found = false;
             while let Some(pos) = rest.find(NEEDLE) {
                 let after = &rest[pos + NEEDLE.len()..];
-                if after.as_bytes().len() > topic.len()
+                if after.len() > topic.len()
                     && after.starts_with(topic)
                     && after.as_bytes()[topic.len()] == b'"'
                 {
@@ -1458,7 +1454,7 @@ mod test {
             &7u32,
             &String::from_str(&env, "TestToken"),
             &String::from_str(&env, "TST"),
-            &1_000_000_0000000i128, // 1M tokens with 7 decimals
+            &10_000_000_000_000_i128, // 1M tokens with 7 decimals
             &None,
             &false,
             &false,
@@ -1485,8 +1481,8 @@ mod test {
 
         // total_supply == 1_000_000_0000000; 10% == 100_000_0000000.
         // Transfering the full 10% cap should succeed.
-        client.transfer(&admin, &user, &100_000_0000000i128);
-        assert_eq!(client.balance(&user), 100_000_0000000i128);
+        client.transfer(&admin, &user, &1_000_000_000_000_i128);
+        assert_eq!(client.balance(&user), 1_000_000_000_000_i128);
     }
 
     #[test]
@@ -1494,7 +1490,7 @@ mod test {
         let (_, client, admin, user) = setup();
 
         client.set_max_balance_per_account(&Some(10u32));
-        client.transfer(&admin, &user, &100_000_0000000i128);
+        client.transfer(&admin, &user, &1_000_000_000_000_i128);
 
         // one more token should exceed cap.
         assert_eq!(
@@ -1510,14 +1506,14 @@ mod test {
         client.set_max_balance_per_account(&Some(10u32));
 
         // mint up to cap succeeds
-        client.mint(&user, &100_000_0000000i128);
-        assert_eq!(client.balance(&user), 100_000_0000000i128);
+        client.mint(&user, &1_000_000_000_000_i128);
+        assert_eq!(client.balance(&user), 1_000_000_000_000_i128);
     }
 
     #[test]
     #[should_panic(expected = "max balance per account exceeded")]
     fn test_set_max_balance_per_account_mint_exceeds_panics() {
-        let (_, client, admin, user) = setup();
+        let (_, client, _admin, user) = setup();
 
         client.set_max_balance_per_account(&Some(10u32));
 
@@ -1543,8 +1539,8 @@ mod test {
         assert_eq!(client.symbol(), String::from_str(&env, "TST"));
         assert_eq!(client.decimals(), 7u32);
         assert_eq!(client.admin(), admin.clone());
-        assert_eq!(client.total_supply(), 1_000_000_0000000i128);
-        assert_eq!(client.balance(&admin), 1_000_000_0000000i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_000_i128);
+        assert_eq!(client.balance(&admin), 10_000_000_000_000_i128);
     }
 
     #[test]
@@ -1567,27 +1563,27 @@ mod test {
     #[test]
     fn test_mint() {
         let (_, client, admin, user) = setup();
-        client.mint(&user, &500_0000000i128);
-        assert_eq!(client.balance(&user), 500_0000000i128);
+        client.mint(&user, &5_000_000_000_i128);
+        assert_eq!(client.balance(&user), 5_000_000_000_i128);
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 + 500_0000000i128
+            10_000_000_000_000_i128 + 5_000_000_000_i128
         );
         // admin balance unchanged
-        assert_eq!(client.balance(&admin), 1_000_000_0000000i128);
+        assert_eq!(client.balance(&admin), 10_000_000_000_000_i128);
     }
 
     #[test]
     fn test_burn() {
         let (_, client, admin, _) = setup();
-        client.burn(&admin, &100_0000000i128);
+        client.burn(&admin, &1_000_000_000_i128);
         assert_eq!(
             client.balance(&admin),
-            1_000_000_0000000i128 - 100_0000000i128
+            10_000_000_000_000_i128 - 1_000_000_000_i128
         );
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 - 100_0000000i128
+            10_000_000_000_000_i128 - 1_000_000_000_i128
         );
     }
 
@@ -1662,30 +1658,30 @@ mod test {
     #[test]
     fn test_total_burned_after_single_burn() {
         let (_, client, admin, _) = setup();
-        client.burn(&admin, &100_0000000i128);
-        assert_eq!(client.total_burned(), 100_0000000i128);
+        client.burn(&admin, &1_000_000_000_i128);
+        assert_eq!(client.total_burned(), 1_000_000_000_i128);
     }
 
     #[test]
     fn test_total_burned_after_two_burns() {
         let (_, client, admin, _) = setup();
-        client.burn(&admin, &100_0000000i128);
-        client.burn(&admin, &250_0000000i128);
-        assert_eq!(client.total_burned(), 350_0000000i128);
+        client.burn(&admin, &1_000_000_000_i128);
+        client.burn(&admin, &2_500_000_000_i128);
+        assert_eq!(client.total_burned(), 3_500_000_000_i128);
     }
 
     #[test]
     fn test_burn_admin_updates_total_burned() {
         let (_, client, admin, user) = setup();
-        client.transfer(&admin, &user, &100_0000000i128);
+        client.transfer(&admin, &user, &1_000_000_000_i128);
 
-        client.burn_admin(&user, &40_0000000i128);
+        client.burn_admin(&user, &400_000_000_i128);
 
-        assert_eq!(client.balance(&user), 60_0000000i128);
-        assert_eq!(client.total_burned(), 40_0000000i128);
+        assert_eq!(client.balance(&user), 600_000_000_i128);
+        assert_eq!(client.total_burned(), 400_000_000_i128);
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 - 40_0000000i128
+            10_000_000_000_000_i128 - 400_000_000_i128
         );
     }
 
@@ -1693,18 +1689,18 @@ mod test {
     fn test_burn_updates_total_burned_and_total_supply_each_time() {
         let (_, client, admin, _) = setup();
 
-        client.burn(&admin, &100_0000000i128);
-        assert_eq!(client.total_burned(), 100_0000000i128);
+        client.burn(&admin, &1_000_000_000_i128);
+        assert_eq!(client.total_burned(), 1_000_000_000_i128);
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 - 100_0000000i128
+            10_000_000_000_000_i128 - 1_000_000_000_i128
         );
 
-        client.burn(&admin, &250_0000000i128);
-        assert_eq!(client.total_burned(), 350_0000000i128);
+        client.burn(&admin, &2_500_000_000_i128);
+        assert_eq!(client.total_burned(), 3_500_000_000_i128);
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 - 350_0000000i128
+            10_000_000_000_000_i128 - 3_500_000_000_i128
         );
     }
 
@@ -1712,13 +1708,13 @@ mod test {
     fn test_mint_does_not_change_total_burned() {
         let (_, client, admin, user) = setup();
 
-        client.burn(&admin, &100_0000000i128);
-        client.mint(&user, &25_0000000i128);
+        client.burn(&admin, &1_000_000_000_i128);
+        client.mint(&user, &250_000_000_i128);
 
-        assert_eq!(client.total_burned(), 100_0000000i128);
+        assert_eq!(client.total_burned(), 1_000_000_000_i128);
         assert_eq!(
             client.total_supply(),
-            1_000_000_0000000i128 - 100_0000000i128 + 25_0000000i128
+            10_000_000_000_000_i128 - 1_000_000_000_i128 + 250_000_000_i128
         );
     }
 
@@ -1735,13 +1731,13 @@ mod test {
     fn test_burn_self_reduces_balance_and_supply() {
         let (_, client, admin, user) = setup();
         // Admin sends some tokens to user, who then burns them themselves.
-        client.transfer(&admin, &user, &500_0000000i128);
+        client.transfer(&admin, &user, &5_000_000_000_i128);
         let supply_before = client.total_supply();
 
-        client.burn_self(&user, &200_0000000i128);
+        client.burn_self(&user, &2_000_000_000_i128);
 
-        assert_eq!(client.balance(&user), 300_0000000i128);
-        assert_eq!(client.total_supply(), supply_before - 200_0000000i128);
+        assert_eq!(client.balance(&user), 3_000_000_000_i128);
+        assert_eq!(client.total_supply(), supply_before - 2_000_000_000_i128);
     }
 
     #[test]
@@ -1788,14 +1784,14 @@ mod test {
     #[test]
     fn test_transfer() {
         let (_, client, admin, user) = setup();
-        client.transfer(&admin, &user, &250_0000000i128);
+        client.transfer(&admin, &user, &2_500_000_000_i128);
         assert_eq!(
             client.balance(&admin),
-            1_000_000_0000000i128 - 250_0000000i128
+            10_000_000_000_000_i128 - 2_500_000_000_i128
         );
-        assert_eq!(client.balance(&user), 250_0000000i128);
+        assert_eq!(client.balance(&user), 2_500_000_000_i128);
         // total supply unchanged
-        assert_eq!(client.total_supply(), 1_000_000_0000000i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_000_i128);
     }
 
     #[test]
@@ -1812,15 +1808,15 @@ mod test {
         let (env, client, admin, user) = setup();
         let spender = Address::generate(&env);
 
-        client.approve(&admin, &spender, &100_0000000i128, &1000u32);
-        assert_eq!(client.allowance(&admin, &spender), 100_0000000i128);
+        client.approve(&admin, &spender, &1_000_000_000_i128, &1000u32);
+        assert_eq!(client.allowance(&admin, &spender), 1_000_000_000_i128);
 
-        client.transfer_from(&spender, &admin, &user, &60_0000000i128);
-        assert_eq!(client.allowance(&admin, &spender), 40_0000000i128);
-        assert_eq!(client.balance(&user), 60_0000000i128);
+        client.transfer_from(&spender, &admin, &user, &600_000_000_i128);
+        assert_eq!(client.allowance(&admin, &spender), 400_000_000_i128);
+        assert_eq!(client.balance(&user), 600_000_000_i128);
         assert_eq!(
             client.balance(&admin),
-            1_000_000_0000000i128 - 60_0000000i128
+            10_000_000_000_000_i128 - 600_000_000_i128
         );
     }
 
@@ -1843,18 +1839,18 @@ mod test {
         let (env, client, admin, _) = setup();
         let spender = Address::generate(&env);
 
-        client.approve(&admin, &spender, &100_0000000i128, &1000u32);
+        client.approve(&admin, &spender, &1_000_000_000_i128, &1000u32);
         let supply_before = client.total_supply();
 
-        client.burn_from(&spender, &admin, &60_0000000i128);
+        client.burn_from(&spender, &admin, &600_000_000_i128);
 
-        assert_eq!(client.allowance(&admin, &spender), 40_0000000i128);
+        assert_eq!(client.allowance(&admin, &spender), 400_000_000_i128);
         assert_eq!(
             client.balance(&admin),
-            1_000_000_0000000i128 - 60_0000000i128
+            10_000_000_000_000_i128 - 600_000_000_i128
         );
-        assert_eq!(client.total_supply(), supply_before - 60_0000000i128);
-        assert_eq!(client.total_burned(), 60_0000000i128);
+        assert_eq!(client.total_supply(), supply_before - 600_000_000_i128);
+        assert_eq!(client.total_burned(), 600_000_000_i128);
     }
 
     #[test]
@@ -2041,10 +2037,7 @@ mod test {
     fn test_admin_getter_after_revoke_panics() {
         let (_, client, _, _) = setup();
         client.revoke_admin();
-        assert_eq!(
-            client.try_admin(),
-            Err(Ok(TokenError::Locked.into()))
-        );
+        assert_eq!(client.try_admin(), Err(Ok(TokenError::Locked.into())));
     }
 
     #[test]
@@ -2261,8 +2254,8 @@ mod test {
         client.pause();
 
         // Read-only getters should still work
-        assert_eq!(client.total_supply(), 1_000_000_0000000i128);
-        assert_eq!(client.balance(&admin), 1_000_000_0000000i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_000_i128);
+        assert_eq!(client.balance(&admin), 10_000_000_000_000_i128);
         assert!(client.is_paused());
     }
 
@@ -2316,8 +2309,8 @@ mod test {
             &7u32,
             &String::from_str(&env, "CappedToken"),
             &String::from_str(&env, "CAP"),
-            &500_0000000i128,
-            &Some(1_000_0000000i128),
+            &5_000_000_000_i128,
+            &Some(10_000_000_000_i128),
             &false,
             &false,
             &None,
@@ -2336,14 +2329,14 @@ mod test {
     #[test]
     fn test_max_supply_getter_some() {
         let (_, client, _, _) = setup_with_cap();
-        assert_eq!(client.max_supply(), Some(1_000_0000000i128));
+        assert_eq!(client.max_supply(), Some(10_000_000_000_i128));
     }
 
     #[test]
     fn test_mint_within_max_supply() {
         let (_, client, _, user) = setup_with_cap();
-        client.mint(&user, &500_0000000i128);
-        assert_eq!(client.total_supply(), 1_000_0000000i128);
+        client.mint(&user, &5_000_000_000_i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_i128);
     }
 
     #[test]
@@ -2359,9 +2352,9 @@ mod test {
     fn test_mint_exact_max_supply() {
         let (_, client, _, user) = setup_with_cap();
         // Mint exactly to the cap boundary
-        client.mint(&user, &500_0000000i128);
-        assert_eq!(client.total_supply(), 1_000_0000000i128);
-        assert_eq!(client.max_supply(), Some(1_000_0000000i128));
+        client.mint(&user, &5_000_000_000_i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_i128);
+        assert_eq!(client.max_supply(), Some(10_000_000_000_i128));
     }
 
     #[test]
@@ -2378,8 +2371,8 @@ mod test {
             &7u32,
             &String::from_str(&env, "Bad"),
             &String::from_str(&env, "BAD"),
-            &2_000_0000000i128,
-            &Some(1_000_0000000i128),
+            &20_000_000_000_i128,
+            &Some(10_000_000_000_i128),
             &false,
             &false,
             &None,
@@ -2500,7 +2493,7 @@ mod test {
             &7u32,
             &String::from_str(&env, "RegToken"),
             &String::from_str(&env, "REG"),
-            &1_000_0000000i128,
+            &10_000_000_000_i128,
             &None,
             &true,
             &true,
@@ -2541,7 +2534,7 @@ mod test {
     fn test_transfer_to_unauthorized_blocked() {
         let (_, client, admin, user) = setup_with_auth_required();
         assert_eq!(
-            client.try_transfer(&admin, &user, &100_0000000i128),
+            client.try_transfer(&admin, &user, &1_000_000_000_i128),
             Err(Ok(TokenError::NotAuthorizedHolder.into()))
         );
     }
@@ -2551,15 +2544,15 @@ mod test {
         let (_, client, admin, user) = setup_with_auth_required();
         client.authorize_holder(&user);
         assert!(client.is_authorized(&user));
-        client.transfer(&admin, &user, &100_0000000i128);
-        assert_eq!(client.balance(&user), 100_0000000i128);
+        client.transfer(&admin, &user, &1_000_000_000_i128);
+        assert_eq!(client.balance(&user), 1_000_000_000_i128);
     }
 
     #[test]
     fn test_revoke_authorization_blocks_transfer() {
         let (_, client, admin, user) = setup_with_auth_required();
         client.authorize_holder(&user);
-        client.transfer(&admin, &user, &100_0000000i128);
+        client.transfer(&admin, &user, &1_000_000_000_i128);
         client.revoke_authorization(&user);
         assert!(!client.is_authorized(&user));
     }

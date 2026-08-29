@@ -279,7 +279,7 @@ impl VestingContract {
             .unwrap_or_else(|| panic_with_error!(&env, VestingError::NotInitialized));
         admin.require_auth();
 
-        if schedules.len() == 0 {
+        if schedules.is_empty() {
             panic_with_error!(&env, VestingError::BatchEmpty);
         }
         if schedules.len() > 50 {
@@ -1044,7 +1044,7 @@ mod test {
             let mut found = false;
             while let Some(pos) = rest.find(NEEDLE) {
                 let after = &rest[pos + NEEDLE.len()..];
-                if after.as_bytes().len() > topic.len()
+                if after.len() > topic.len()
                     && after.starts_with(topic)
                     && after.as_bytes()[topic.len()] == b'"'
                 {
@@ -1059,32 +1059,10 @@ mod test {
                  symbol_short!(\"{topic}\") literal was found in the contract"
             );
         }
-        #[test]
-    #[should_panic(expected = "cliff_ledger must not be in the past")]
-    fn test_create_schedule_past_cliff_panics() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, VestingContract);
-        let client = VestingContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
-
-        client.initialize(&admin, &token_addr);
-
-        // Advance current ledger sequence to 100
-        env.ledger().set_sequence_number(100);
-
-        // Attempt to pass a cliff_ledger (50) that is before current ledger (100)
-        client.create_schedule(&recipient, &1000, &50, &200);
-    }
-
         // No symbol_short! literal exists outside the expected set — i.e.
         // nothing new was added without updating the fixture (and
         // docs/events.json / docs/events.md alongside it).
-        
+
         let mut rest = production_source;
         while let Some(pos) = rest.find(NEEDLE) {
             let after = &rest[pos + NEEDLE.len()..];
@@ -1097,6 +1075,30 @@ mod test {
             );
             rest = &after[end..];
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "cliff_ledger must not be in the past")]
+    fn test_create_schedule_past_cliff_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        client.initialize(&admin, &token_addr);
+
+        // Advance current ledger sequence to 100
+        env.ledger().set_sequence_number(100);
+
+        // Attempt to pass a cliff_ledger (50) that is before current ledger (100)
+        client.create_schedule(&recipient, &1000, &50, &200);
     }
 
     // ── TTL constant tests ──────────────────────────────────────────────
@@ -1179,7 +1181,9 @@ mod test {
         let recipient = Address::generate(env);
 
         // Register a mock token contract
-        let token = env.register_stellar_asset_contract(admin.clone());
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::StellarAssetClient::new(env, &token);
 
         // Mint tokens to the admin
@@ -1252,7 +1256,9 @@ mod test {
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
         let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1297,7 +1303,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1331,7 +1339,9 @@ mod test {
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
         let other = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1451,7 +1461,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1482,7 +1494,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1511,7 +1525,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1540,7 +1556,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1572,7 +1590,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1598,7 +1618,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -1684,7 +1706,6 @@ mod test {
         assert_eq!(schedule.end_ledger, 250); // shifted by same delta (+50)
 
         // Verify event emission contains (old_cliff, new_cliff, old_end, new_end)
-        use soroban_sdk::xdr::ToXdr;
         use soroban_sdk::IntoVal;
         let events = env.events().all();
         let last_event = events.slice(events.len() - 1..);
@@ -1783,7 +1804,9 @@ mod test {
         let contract_id = env.register_contract(None, VestingContract);
         let client = VestingContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract(admin.clone());
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
 
         // Use mock_all_auths only for setup
@@ -1795,7 +1818,9 @@ mod test {
 
         // Clear auths so the next call fails
         env.set_auths(&[]);
-        assert!(client.try_extend_cliff(&recipient, &150u32, &latest_index()).is_err());
+        assert!(client
+            .try_extend_cliff(&recipient, &150u32, &latest_index())
+            .is_err());
     }
 
     #[test]
@@ -1839,7 +1864,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -1901,7 +1928,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -1934,7 +1963,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -1967,7 +1998,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
 
         client.initialize(&admin, &token_addr);
 
@@ -1987,7 +2020,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
 
         client.initialize(&admin, &token_addr);
 
@@ -2015,7 +2050,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
 
         client.initialize(&admin, &token_addr);
 
@@ -2043,7 +2080,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2086,7 +2125,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2122,7 +2163,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -2168,7 +2211,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -2206,7 +2251,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -2263,7 +2310,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2306,7 +2355,9 @@ mod test {
         let client = VestingContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2371,7 +2422,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2398,7 +2451,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2424,7 +2479,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2455,7 +2512,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
         client.initialize(&admin, &token_addr);
@@ -2483,7 +2542,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
@@ -2512,7 +2573,9 @@ mod test {
 
         let admin = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
         let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 

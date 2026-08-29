@@ -44,7 +44,7 @@ use soroban_token::{TokenContract, TokenContractClient};
 // ---------------------------------------------------------------------------
 
 /// 1 000 000 tokens with 7 decimals.
-const INITIAL_SUPPLY: i128 = 1_000_000_0000000;
+const INITIAL_SUPPLY: i128 = 10_000_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,7 +255,7 @@ proptest! {
     /// A random mint → transfer → burn sequence must keep all invariants.
     #[test]
     fn prop_mint_transfer_burn_sequence(
-        mint_amt     in 1i128..=500_000_0000000i128,
+        mint_amt     in 1i128..=5_000_000_000_000_i128,
         transfer_pct in 1u32..=100u32,
         burn_pct     in 1u32..=100u32,
     ) {
@@ -288,9 +288,9 @@ proptest! {
     /// Repeated small operations across multiple accounts preserve the invariant.
     #[test]
     fn prop_many_transfers_preserve_invariant(
-        a1 in 1i128..=100_0000000i128,
-        a2 in 1i128..=100_0000000i128,
-        a3 in 1i128..=100_0000000i128,
+        a1 in 1i128..=1_000_000_000_i128,
+        a2 in 1i128..=1_000_000_000_i128,
+        a3 in 1i128..=1_000_000_000_i128,
     ) {
         let (_, client, admin, user1, user2) = setup_env();
         let accounts = [&admin, &user1, &user2];
@@ -322,9 +322,9 @@ proptest! {
 
     /// Invariant 6: minting within the remaining cap succeeds and respects the cap.
     #[test]
-    fn prop_mint_within_cap_preserves_invariant(amount in 1i128..=500_0000000i128) {
-        let initial = 500_0000000i128;
-        let cap     = 1_000_0000000i128;
+    fn prop_mint_within_cap_preserves_invariant(amount in 1i128..=5_000_000_000_i128) {
+        let initial = 5_000_000_000_i128;
+        let cap     = 10_000_000_000_i128;
         let (_, client, admin, user) = setup_capped_env(initial, cap);
 
         let remaining = cap - client.total_supply();
@@ -435,8 +435,8 @@ fn test_transfer_underflow_rejected() {
 #[test]
 #[should_panic(expected = "mint would exceed max_supply")]
 fn test_mint_exceeds_max_supply_rejected() {
-    let initial = 500_0000000i128;
-    let cap = 1_000_0000000i128;
+    let initial = 5_000_000_000_i128;
+    let cap = 10_000_000_000_i128;
     let (_, client, _, user) = setup_capped_env(initial, cap);
 
     // Remaining capacity is 500_0000000 — minting 1 more overflows the cap.
