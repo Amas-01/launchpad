@@ -117,6 +117,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
@@ -134,40 +135,22 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 19
+                }
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'decimals must be <= 18' from contract function 'Symbol(obj#11)'"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "string": "failing with contract error"
                 },
                 {
                   "u32": 19
-                },
-                {
-                  "string": "BadToken"
-                },
-                {
-                  "string": "BAD"
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 0
-                  }
-                },
-                "void",
-                {
-                  "bool": false
-                },
-                {
-                  "bool": false
-                },
-                "void"
+                }
               ]
             }
           }
@@ -188,7 +171,32 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 19
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 19
                 }
               }
             ],
@@ -213,7 +221,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 19
                 }
               }
             ],
@@ -252,6 +260,7 @@
                     {
                       "bool": false
                     },
+                    "void",
                     "void"
                   ]
                 }
@@ -275,7 +284,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 19
                 }
               }
             ],

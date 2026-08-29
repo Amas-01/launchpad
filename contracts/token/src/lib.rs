@@ -330,7 +330,6 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
-            .expect("admin revoked");
         Self::_check_compliance(&env, &from, &admin);
         Self::_transfer_bypass_frozen(&env, &from, &admin, amount);
 
@@ -637,7 +636,7 @@ impl TokenContract {
     pub fn update_contract_uri(env: Env, uri: String) {
         Self::_require_admin(&env);
         env.storage().instance().set(&DataKey::ContractUri, &uri);
-        env.events().publish((symbol_short!("update_uri"),), uri);
+        env.events().publish((symbol_short!("upd_uri"),), uri);
     }
 
     /// Upgrade this contract's WASM code hash in place. Admin only.
@@ -775,7 +774,11 @@ impl TokenContract {
                 expiration_ledger,
             };
             env.storage().temporary().set(&key, &value);
-            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            // Clamp to max_ttl so the host does not reject the extend_ttl call
+            // for temporary entries whose expiration_ledger was approved past
+            // the network ceiling (fixes the partial-spend revert — see #344).
+            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
+                .min(env.storage().max_ttl());
             if ttl_ledgers > 0 {
                 env.storage()
                     .temporary()
@@ -825,7 +828,11 @@ impl TokenContract {
                 expiration_ledger,
             };
             env.storage().temporary().set(&key, &value);
-            let ttl_ledgers = expiration_ledger.saturating_sub(current_ledger);
+            // Clamp to max_ttl so the host does not reject the extend_ttl call
+            // for temporary entries whose expiration_ledger was approved past
+            // the network ceiling (fixes the partial-spend revert — see #344).
+            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
+                .min(env.storage().max_ttl());
             if ttl_ledgers > 0 {
                 env.storage()
                     .temporary()

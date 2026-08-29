@@ -38,6 +38,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
@@ -307,6 +308,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
