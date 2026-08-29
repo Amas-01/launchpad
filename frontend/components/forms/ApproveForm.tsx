@@ -10,9 +10,16 @@ import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { useWallet } from "@/app/hooks/useWallet";
 import { buildApproveTransaction, fetchCurrentLedger, fetchTokenDecimals, parseTokenAmount, submitTransaction } from "@/lib/stellar";
-import { daysToLedgers } from "@/lib/soroban";
+import { daysToLedgers, LEDGERS_PER_DAY } from "@/lib/soroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { AlertCircle, CheckCircle, Rocket, Loader2 } from "lucide-react";
+
+/**
+ * Maximum allowance duration enforced by the Stellar network on both
+ * testnet and mainnet (STATE_ARCHIVAL maxEntryTTL = 3,110,400 ledgers).
+ * Expressed in days for the schema bound (3_110_400 / LEDGERS_PER_DAY ≈ 180).
+ */
+const MAX_EXPIRATION_DAYS = Math.floor(3_110_400 / LEDGERS_PER_DAY); // 180
 
 const approveSchema = z.object({
   tokenContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid token contract ID"),
@@ -21,8 +28,11 @@ const approveSchema = z.object({
     .string()
     .refine((v) => !isNaN(parseFloat(v)) && parseFloat(v) > 0, "Amount must be positive"),
   expirationDays: z.string().refine(
-    (v) => !isNaN(parseInt(v)) && parseInt(v) >= 0,
-    "Expiration days must be 0 or more",
+    (v) => {
+      const n = parseInt(v);
+      return !isNaN(n) && n >= 0 && n <= MAX_EXPIRATION_DAYS;
+    },
+    `Expiration must be between 0 and ${MAX_EXPIRATION_DAYS} days (network maximum)`,
   ),
 });
 
@@ -60,7 +70,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
     resolver: zodResolver(approveSchema),
     mode: "onChange",
     defaultValues: {
-      expirationDays: "365",
+      expirationDays: "30",
     },
   });
 
@@ -68,7 +78,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
 
   const getExpirationLedger = async (days: string): Promise<number> => {
     const currentLedger = await fetchCurrentLedger(networkConfig);
-    return daysToLedgers(days || "365", currentLedger);
+    return daysToLedgers(days || "30", currentLedger);
   };
 
   const handleCheck = async () => {
@@ -186,7 +196,7 @@ export function ApproveForm({ onSuccess, onError }: ApproveFormProps) {
           <Input
             label="Expiration (Days)"
             {...register("expirationDays")}
-            placeholder="365"
+            placeholder="30"
             type="number"
             min="0"
             error={errors.expirationDays?.message}
