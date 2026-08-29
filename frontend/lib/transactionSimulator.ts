@@ -504,8 +504,32 @@ export async function simulateApprove(
 }
 
 /**
+ * Build the ScVal arguments for revoking an allowance on a SEP-41 token.
+ *
+ * Revoke is implemented as `approve` with amount = 0. The contract's
+ * `if amount == 0` branch ignores `expiration_ledger`, so we pass 0
+ * for both parameters. Any caller that builds an `approve` transaction
+ * or simulation to revoke an allowance MUST use this helper so that
+ * the preflight and the real submission stay in sync.
+ *
+ * See `contracts/token/src/lib.rs` — the `if amount == 0` branch.
+ */
+export function buildRevokeAllowanceArgs(
+  ownerAddress: string,
+  spenderAddress: string,
+): StellarSdk.xdr.ScVal[] {
+  return [
+    new StellarSdk.Address(ownerAddress).toScVal(),
+    new StellarSdk.Address(spenderAddress).toScVal(),
+    StellarSdk.nativeToScVal(BigInt(0), { type: "i128" }),
+    StellarSdk.nativeToScVal(BigInt(0), { type: "u32" }),
+  ];
+}
+
+/**
  * Simulate a token revoke allowance pre-flight check.
- * Revoke is implemented as approve with 0 amount.
+ * Revoke is implemented as approve with 0 amount — see
+ * `buildRevokeAllowanceArgs` for details.
  */
 export async function simulateRevokeAllowance(
   contractId: string,
@@ -521,12 +545,7 @@ export async function simulateRevokeAllowance(
     };
   }
 
-  const args = [
-    new StellarSdk.Address(ownerAddress).toScVal(),
-    new StellarSdk.Address(spenderAddress).toScVal(),
-    StellarSdk.nativeToScVal(BigInt(0), { type: "i128" }),
-    StellarSdk.nativeToScVal(BigInt(1000), { type: "u32" }),
-  ];
+  const args = buildRevokeAllowanceArgs(ownerAddress, spenderAddress);
 
   return simulateTransaction(contractId, "approve", args, config, ownerAddress);
 }

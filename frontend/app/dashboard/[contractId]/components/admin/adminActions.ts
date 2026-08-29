@@ -1,8 +1,8 @@
 import { rpc, Address, xdr } from "@stellar/stellar-sdk";
+import { addressToScVal, i128ToScVal, nativeToScVal, daysToLedgers } from "@/lib/soroban";
 import { Client as TokenClient } from "@/lib/bindings/token/src/index";
 import type { AssembledTransaction } from "@stellar/stellar-sdk/contract";
 import { Client as VestingClient } from "@/lib/bindings/vesting/src/index";
-import { addressToScVal, i128ToScVal, nativeToScVal } from "@/lib/soroban";
 import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 import type { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import type { BatchMintEntry } from "@/lib/batch";
@@ -14,6 +14,7 @@ import type {
   ManageVestingData,
   MetadataUriData,
   UpgradeData,
+  VestingUpgradeData,
   WhaleCapData,
   ComplianceNodeData,
   AccountData,
@@ -33,8 +34,6 @@ import type {
  * Adding a capability means adding one entry here plus the UI that calls it.
  */
 
-/** Soroban ledgers per day, assuming 5-second ledgers. */
-const LEDGERS_PER_DAY = 17280;
 
 type Simulator = ReturnType<typeof useTransactionSimulator>;
 
@@ -103,6 +102,7 @@ export interface AdminActionData {
   "revoke-auth": AccountData;
   revoke: EmptyData;
   upgrade: UpgradeData;
+  "vesting-upgrade": VestingUpgradeData;
 }
 
 export type AdminActionKey = keyof AdminActionData;
@@ -125,7 +125,7 @@ function indexToScVal(scheduleIndex: string): xdr.ScVal {
 /** "N days from now" as an absolute ledger sequence. */
 async function ledgerInDays(server: rpc.Server, days: string | number) {
   const { sequence } = await server.getLatestLedger();
-  return sequence + Math.round(Number(days) * LEDGERS_PER_DAY);
+  return daysToLedgers(days, sequence);
 }
 
 type AdminActionRegistry = {
@@ -214,8 +214,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Vesting",
     resolve: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
 
       return ctx.getVestingClient(data.vestingContract).create_schedule({
         recipient: data.recipient,
@@ -226,8 +225,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     },
     preflight: async (data, ctx) => {
       const cliffLedger = await ledgerInDays(ctx.server, data.cliffDays);
-      const endLedger =
-        cliffLedger + Math.round(Number(data.durationDays) * LEDGERS_PER_DAY);
+      const endLedger = daysToLedgers(data.durationDays, cliffLedger);
       return ctx.simulator.checkCreateSchedule(
         data.vestingContract,
         data.recipient,
@@ -369,7 +367,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
   /* ── Danger ──────────────────────────────────────────────────── */
 
-  upgrade: {
+   upgrade: {
     label: "Upgrade contract",
     resolve: async (data, ctx) => ctx.tokenClient.upgrade({
       new_wasm_hash: Buffer.from(data.wasmHash, "hex")
@@ -379,6 +377,21 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
       title: "Contract upgraded",
       message:
         "The contract WASM has been replaced. All holders are now on the new logic.",
+    },
+  },
+
+  "vesting-upgrade": {
+    label: "Upgrade vesting contract",
+    resolve: (data) => ({
+      contractId: data.vestingContract,
+      method: "upgrade",
+      args: [xdr.ScVal.scvBytes(Buffer.from(data.wasmHash, "hex"))],
+    }),
+    preflight: "none",
+    successToast: {
+      title: "Vesting contract upgraded",
+      message:
+        "The vesting contract WASM has been replaced. All vesting schedules are now on the new logic.",
     },
   },
 };

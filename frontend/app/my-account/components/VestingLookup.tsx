@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Loader2, Search } from "lucide-react";
 
 export function VestingLookup({
@@ -15,17 +16,19 @@ export function VestingLookup({
   loading: boolean;
   error: string | null;
 }) {
+  const t = useTranslations("myAccount");
+
   return (
     <div className="glass-card p-5">
       <p className="mb-3 text-xs text-gray-400">
-        Enter a vesting contract ID to view your vesting schedule.
+        {t("vestingLookupDescription")}
       </p>
       <div className="flex gap-2">
         <input
           type="text"
           value={vestingContractId}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="Vesting Contract ID (C...)"
+          placeholder={t("vestingPlaceholder")}
           className="flex-1 rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-stellar-400/50 focus:ring-1 focus:ring-stellar-400/30"
         />
         <button
@@ -38,7 +41,7 @@ export function VestingLookup({
           ) : (
             <Search className="h-4 w-4" />
           )}
-          Lookup
+          {t("vestingSchedules")}
         </button>
       </div>
 

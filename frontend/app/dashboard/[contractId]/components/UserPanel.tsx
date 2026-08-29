@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
+import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useWallet } from "@/app/hooks/useWallet";
@@ -50,6 +51,7 @@ interface UserPanelProps {
 }
 
 export function UserPanel({ contractId, decimals }: UserPanelProps) {
+  const t = useTranslations("userPanel");
   const { signTransaction, publicKey } = useWallet();
   const {
     fetchTokenBalance,
@@ -130,7 +132,7 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
       const error = err as Error;
       console.error(`burn failed:`, error);
       toast.show({
-        title: "Burn failed",
+        title: t("burnFailed"),
         message: error.message,
         variant: "error",
       });
@@ -148,11 +150,11 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
           <div className="flex items-center gap-3">
             <Wallet className="w-6 h-6 text-stellar-400" />
             <h2 className="text-2xl font-bold text-white tracking-tight">
-              Your Dashboard
+              {t("yourDashboard")}
             </h2>
           </div>
           <p className="text-sm text-gray-400 mt-2">
-            Balance: {fetchingBalance ? "Loading..." : `${balance} Tokens`}
+            {t("balanceLabel", { balance: fetchingBalance ? t("loadingBalance") : balance })}
           </p>
         </div>
         {lastTxHash && (
@@ -162,7 +164,7 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-xs text-stellar-400 hover:text-stellar-300 transition-colors bg-stellar-400/10 px-3 py-1.5 rounded-full border border-stellar-400/20"
           >
-            Last Tx: {lastTxHash.slice(0, 8)}...{" "}
+            {t("lastTx", { hash: lastTxHash.slice(0, 8) })}
             <ExternalLink className="w-3 h-3" />
           </a>
         )}
@@ -176,16 +178,14 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
               <div className="p-2 bg-red-500/10 rounded-lg group-hover:scale-110 transition-transform">
                 <Flame className="w-5 h-5" />
               </div>
-              <h3 className="font-bold text-lg">Burn Tokens</h3>
+              <h3 className="font-bold text-lg">{t("burnTitle")}</h3>
             </div>
           </div>
 
           <div className="mb-6 flex items-start gap-3 rounded-lg bg-red-500/10 p-3 text-red-400 border border-red-500/20">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
             <p className="text-xs leading-relaxed">
-              <strong>Warning:</strong> This action is permanent and
-              irreversible. Burning tokens will permanently remove them from
-              your balance and reduce the total token supply.
+              {t("burnWarning")}
             </p>
           </div>
 
@@ -194,9 +194,9 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
             className="space-y-4 grow"
           >
             <Input
-              label="Amount to Burn"
+              label={t("burnAmountLabel")}
               type="number"
-              placeholder="0.00"
+              placeholder={t("burnAmountPlaceholder")}
               className="bg-white/5 border-white/10"
               {...burnForm.register("amount")}
               error={burnForm.formState.errors.amount?.message}
@@ -210,10 +210,10 @@ export function UserPanel({ contractId, decimals }: UserPanelProps) {
             >
               {success === "burn" ? (
                 <span className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4" /> Burning Successful
+                  <CheckCircle2 className="w-4 h-4" /> {t("burnSuccessful")}
                 </span>
               ) : (
-                "Confirm & Burn"
+                t("burnButton")
               )}
             </Button>
           </form>

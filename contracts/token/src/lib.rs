@@ -144,6 +144,16 @@ pub enum TokenError {
 #[contractclient(name = "ComplianceNodeClient")]
 pub trait ComplianceNodeInterface {
     fn can_trade(env: Env, from: Address, to: Address) -> bool;
+
+    /// Compliance check for issuance (`mint` / `mint_batch`), asked about the
+    /// recipient only. Minting has no sending holder, so `can_trade` would
+    /// otherwise be asked with the token contract's own address standing in
+    /// for `from` — never a KYC'd holder in an allowlist-style node, which
+    /// would then reject every mint (see issue #405). Nodes written before
+    /// this method existed are not required to implement it: a call that
+    /// fails is treated by the token contract as "not implemented" and it
+    /// falls back to `can_trade(to, to)` instead.
+    fn can_issue(env: Env, to: Address) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +163,7 @@ pub trait ComplianceNodeInterface {
 /// SEP-41 Token Contract — base implementation.
 ///
 /// Contributor issues layered on top:
-/// - #1  freeze_account / unfreeze_account (blacklist: no send or receive)
+/// - #1  freeze_account / unfreeze_account (blacklist: no send, no receive, no mint-in)
 /// - #2  two-step admin transfer (propose_admin / accept_admin)
 /// - #4  max_supply cap enforcement in mint
 /// - #138 clawback() and #163 compliance-node transfer checks
@@ -303,8 +313,12 @@ impl TokenContract {
     /// Forcefully move `amount` tokens from `from` into the admin balance.
     /// Admin only.
     ///
-    /// Bypasses the frozen check on `from` so tokens can be recovered from a
-    /// blacklisted account; the admin recipient must not be frozen.
+    /// Deliberate freeze bypass: this is the sanctioned recovery path, so it
+    /// moves value even when `from` is frozen and even when the admin
+    /// recipient would otherwise be gated by the receive-side freeze check.
+    /// Every other credit path (transfer, transfer_from, mint) refuses a
+    /// frozen recipient; clawback is the single documented exception so an
+    /// issuer can always recover funds from a blacklisted account.
     pub fn clawback(env: Env, from: Address, amount: i128) {
         Self::_check_paused(&env);
         Self::_require_admin(&env);
@@ -318,7 +332,7 @@ impl TokenContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::Locked));
         Self::_check_compliance(&env, &from, &admin);
-        Self::_transfer(&env, &from, &admin, amount);
+        Self::_transfer_bypass_frozen(&env, &from, &admin, amount);
 
         let ttl_ledgers = TTL_LEDGERS;
         let from_key = DataKey::Balance(from.clone());
@@ -480,9 +494,11 @@ impl TokenContract {
         env.events().publish((symbol_short!("revoked"),), true);
     }
 
-    /// Freeze an account (blacklist): it cannot send or receive tokens. Admin only.
+    /// Freeze an account (blacklist): it cannot send or receive tokens, and
+    /// the admin cannot mint into it. Admin only.
     ///
-    /// Admin [`clawback`](Self::clawback) may still pull tokens from a frozen account.
+    /// Admin [`clawback`](Self::clawback) is the sole exception and may still
+    /// pull tokens from a frozen account back to the admin.
     pub fn freeze_account(env: Env, addr: Address) {
         Self::_require_admin(&env);
         env.storage()
@@ -578,6 +594,44 @@ impl TokenContract {
             .unwrap_or(false)
     }
 
+    /// Enable or disable the authorization-gate policy after deploy. Admin
+    /// only. Previously `authorization_required` was written once at
+    /// `initialize` with no way to change it later, so a token deployed
+    /// without gating could never add it for a later regulated raise, and one
+    /// deployed with gating could never turn it off for its holders (issue
+    /// #404). `_require_admin` already covers both the admin check and
+    /// `_require_not_locked`.
+    pub fn set_authorization_required(env: Env, required: bool) {
+        Self::_require_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AuthorizationRequired, &required);
+        env.events().publish((symbol_short!("set_areq"),), required);
+    }
+
+    /// Permanently give up the admin's ability to revoke holder
+    /// authorization. One-way only: this can turn `authorization_revocable`
+    /// from `true` to `false`, never back. That direction only ever *reduces*
+    /// admin power, so it is safe to allow without a second confirmation
+    /// step; the reverse (granting revocation power the deploy-time choice
+    /// declined) is not offered, matching #404's "one-way" requirement.
+    pub fn renounce_authorization_revocable(env: Env) {
+        Self::_require_admin(&env);
+        let revocable: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuthorizationRevocable)
+            .unwrap_or(false);
+        assert!(
+            revocable,
+            "authorization revocation is already permanently disabled"
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::AuthorizationRevocable, &false);
+        env.events().publish((symbol_short!("rvk_rvc"),), ());
+    }
+
     /// Set or update the contract URI pointing to off-chain metadata JSON.
     /// Admin only.
     pub fn update_contract_uri(env: Env, uri: String) {
@@ -659,6 +713,10 @@ impl TokenContract {
 
         let key = DataKey::Allowance(from.clone(), spender.clone());
 
+        // NOTE: frontend clients (buildRevokeAllowanceArgs) pass expiration_ledger = 0
+        // when revoking an allowance.  The 0 is safe because the branch below ignores
+        // expiration_ledger when amount == 0.  Do NOT add an assertion on
+        // expiration_ledger here without also updating the frontend.
         if amount == 0 {
             env.storage().temporary().remove(&key);
         } else {
@@ -1124,14 +1182,47 @@ impl TokenContract {
         }
     }
 
-    /// Compliance check for issuance. Minting has no sending holder, so the
-    /// token contract itself stands in as `from` and the recipient is `to`.
+    /// Compliance check for issuance. Asks the node's `can_issue(to)` — not
+    /// `can_trade` with the token contract's own address standing in for
+    /// `from`, which an allowlist-style node would always reject since the
+    /// token contract itself is never a KYC'd holder (issue #405). A node
+    /// that does not implement `can_issue` (any pre-#405 node) is treated as
+    /// answering via `can_trade(to, to)` instead, so existing deployments
+    /// keep working without a redeploy.
     fn _check_compliance_issue(env: &Env, to: &Address) {
-        let issuer = env.current_contract_address();
-        Self::_check_compliance(env, &issuer, to);
+        let compliance_node: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ComplianceNode)
+            .unwrap_or(None);
+
+        let Some(node) = compliance_node else {
+            return;
+        };
+
+        let client = ComplianceNodeClient::new(env, &node);
+        match client.try_can_issue(to) {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => panic_with_error!(env, TokenError::ComplianceRejected),
+            // Outer `Err` covers a node that has no `can_issue` export at
+            // all — the expected shape for every node deployed before this
+            // method existed. Fall back to asking about the recipient via
+            // `can_trade(to, to)`, the same substitute the issue prescribes.
+            Ok(Err(_)) | Err(_) => match client.try_can_trade(to, to) {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => panic_with_error!(env, TokenError::ComplianceRejected),
+                Ok(Err(_)) | Err(_) => {
+                    panic_with_error!(env, TokenError::ComplianceNodeUnavailable)
+                }
+            },
+        }
     }
 
     fn _mint(env: &Env, to: &Address, amount: i128) {
+        // Receive-side freeze: issuance into a blacklisted account is exactly
+        // the accumulation a freeze exists to prevent, so it is refused here.
+        // Clawback does not mint, so admin recovery is unaffected.
+        assert!(!Self::_is_frozen(env, to), "account is frozen");
         Self::_check_authorized(env, to);
         let supply: i128 = env
             .storage()
@@ -1166,7 +1257,7 @@ impl TokenContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("admin revoked");
+            .unwrap_or_else(|| env.current_contract_address());
         env.events()
             .publish((symbol_short!("mint"), admin, to.clone()), amount);
     }
@@ -1208,7 +1299,28 @@ impl TokenContract {
             .publish((symbol_short!("burn"), from.clone()), amount);
     }
 
+    /// Public transfer path. Enforces the receive-side freeze: a frozen
+    /// recipient cannot be credited. Admin recovery goes through
+    /// [`Self::_transfer_bypass_frozen`] instead, so a blacklisted account's
+    /// tokens can still be clawed back.
     fn _transfer(env: &Env, from: &Address, to: &Address, amount: i128) {
+        assert!(!Self::_is_frozen(env, to), "account is frozen");
+        Self::_transfer_internal(env, from, to, amount);
+    }
+
+    /// Transfer that deliberately skips the recipient freeze check. Only
+    /// reachable from [`Self::clawback`], whose whole purpose is to move value
+    /// out of a frozen account back to the admin. `clawback` already guards
+    /// that the recipient is the caller-controlled admin, so this bypass
+    /// cannot be used to credit an arbitrary frozen third party.
+    fn _transfer_bypass_frozen(env: &Env, from: &Address, to: &Address, amount: i128) {
+        Self::_transfer_internal(env, from, to, amount);
+    }
+
+    /// Shared balance-movement core for both the gated and bypass paths.
+    /// Callers are responsible for any freeze / compliance / authorization
+    /// checks appropriate to their path before calling this.
+    fn _transfer_internal(env: &Env, from: &Address, to: &Address, amount: i128) {
         let from_key = DataKey::Balance(from.clone());
         let to_key = DataKey::Balance(to.clone());
 
@@ -1332,7 +1444,74 @@ mod test {
         }
     }
 
+    /// An allowlist-style node: `can_trade(from, to)` requires *both* sides to
+    /// be KYC'd, and it implements `can_issue(to)` so minting is evaluated on
+    /// the recipient alone (issue #405). This is the shape that exposed the
+    /// original bug — `good_node` above is a deny-list, which never touches
+    /// the token contract's own address either way, so it could never have
+    /// caught this.
+    pub mod allowlist_node {
+        use soroban_sdk::{contract, contractimpl, Address, Env};
+
+        #[contract]
+        pub struct AllowlistComplianceNode;
+
+        #[contractimpl]
+        impl AllowlistComplianceNode {
+            pub fn approve(env: Env, addr: Address) {
+                env.storage().instance().set(&addr, &true);
+            }
+
+            fn is_approved(env: &Env, addr: &Address) -> bool {
+                env.storage()
+                    .instance()
+                    .get::<Address, bool>(addr)
+                    .unwrap_or(false)
+            }
+
+            pub fn can_trade(env: Env, from: Address, to: Address) -> bool {
+                Self::is_approved(&env, &from) && Self::is_approved(&env, &to)
+            }
+
+            pub fn can_issue(env: Env, to: Address) -> bool {
+                Self::is_approved(&env, &to)
+            }
+        }
+    }
+
+    /// The same allowlist policy, but *without* `can_issue` — models every
+    /// compliance node deployed before issue #405, so the token contract's
+    /// `can_trade(to, to)` fallback is exercised against a real allowlist
+    /// shape rather than only against `good_node`'s deny-list.
+    pub mod legacy_allowlist_node {
+        use soroban_sdk::{contract, contractimpl, Address, Env};
+
+        #[contract]
+        pub struct LegacyAllowlistComplianceNode;
+
+        #[contractimpl]
+        impl LegacyAllowlistComplianceNode {
+            pub fn approve(env: Env, addr: Address) {
+                env.storage().instance().set(&addr, &true);
+            }
+
+            pub fn can_trade(env: Env, from: Address, to: Address) -> bool {
+                let approved = |a: &Address| -> bool {
+                    env.storage()
+                        .instance()
+                        .get::<Address, bool>(a)
+                        .unwrap_or(false)
+                };
+                approved(&from) && approved(&to)
+            }
+        }
+    }
+
+    use allowlist_node::{AllowlistComplianceNode, AllowlistComplianceNodeClient};
     use good_node::{MockComplianceNode, MockComplianceNodeClient};
+    use legacy_allowlist_node::{
+        LegacyAllowlistComplianceNode, LegacyAllowlistComplianceNodeClient,
+    };
     use panicking_node::PanickingComplianceNode;
     use wrong_interface::WrongInterfaceContract;
 
@@ -1348,7 +1527,7 @@ mod test {
     // activity. `scripts/generate_events_doc.py --check` re-derives this
     // same set directly from source and fails CI if it and
     // `docs/events.json` disagree.
-    const EXPECTED_TOPICS: [&str; 20] = [
+    const EXPECTED_TOPICS: [&str; 22] = [
         "init",
         "mint",
         "burn",
@@ -1361,14 +1540,17 @@ mod test {
         "unfreeze",
         "pause",
         "unpause",
-        "prop_adm",
-        "cncl_adm",
-        "set_admin",
-        "rev_auth",
+        "authorize",
         "upgrade",
         "set_max_b",
         "set_cnode",
+        "prop_adm",
+        "set_admin",
+        "rvk_auth",
         "upd_uri",
+        "set_areq",
+        "rvk_rvc",
+        "rev_auth",
     ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
@@ -2023,6 +2205,88 @@ mod test {
         );
     }
 
+    // ── Regression tests for issue #397: freeze must block receive + mint ──
+    //
+    // Before this fix, `_is_frozen` was only checked on send-side call sites
+    // (burn, burn_self, transfer, approve, transfer_from, burn_from). Neither
+    // `_transfer`'s recipient nor `_mint`'s recipient was checked, so a frozen
+    // account kept receiving inbound transfers and could still be minted into,
+    // while the header comment claimed a full "no send or receive" blacklist.
+    // These tests pin the receive-side semantics and the deliberate clawback
+    // bypass so the contract, the doc comment, and the SecurityCard copy agree.
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_receive_transfer() {
+        let (_, client, admin, user) = setup();
+        client.freeze_account(&user);
+        // Inbound transfer to a frozen account must fail, not silently credit.
+        client.transfer(&admin, &user, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_receive_transfer_from() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+        client.approve(&admin, &spender, &1_000i128, &1000u32);
+        // Freeze the *recipient*; the sender/allowance side is fine.
+        client.freeze_account(&user);
+        client.transfer_from(&spender, &admin, &user, &500i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_be_minted_into() {
+        let (_, client, _, user) = setup();
+        client.freeze_account(&user);
+        client.mint(&user, &1_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "account is frozen")]
+    fn test_frozen_account_cannot_be_minted_into_via_batch() {
+        let (env, client, _, user) = setup();
+        let ok = Address::generate(&env);
+        client.freeze_account(&user);
+
+        let mut to = soroban_sdk::Vec::new(&env);
+        to.push_back(ok);
+        to.push_back(user);
+
+        let mut amounts = soroban_sdk::Vec::new(&env);
+        amounts.push_back(100i128);
+        amounts.push_back(200i128);
+
+        // One frozen recipient must revert the whole batch.
+        client.mint_batch(&to, &amounts);
+    }
+
+    #[test]
+    fn test_clawback_still_recovers_from_frozen_account() {
+        let (_, client, admin, user) = setup();
+        // Fund the user before freezing (transfer to an unfrozen account is fine).
+        client.transfer(&admin, &user, &1_000i128);
+        let admin_before = client.balance(&admin);
+
+        client.freeze_account(&user);
+        // Clawback must bypass the freeze on both sides and pull funds to admin.
+        client.clawback(&user, &1_000i128);
+
+        assert_eq!(client.balance(&user), 0i128);
+        assert_eq!(client.balance(&admin), admin_before + 1_000i128);
+    }
+
+    #[test]
+    fn test_unfreeze_restores_receive() {
+        let (_, client, admin, user) = setup();
+        client.freeze_account(&user);
+        client.unfreeze_account(&user);
+        // Once unfrozen, the account can receive again.
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
+    }
+
     // ── Revoke admin / lock tests ───────────────────────────────────────
 
     #[test]
@@ -2557,6 +2821,93 @@ mod test {
         assert!(!client.is_authorized(&user));
     }
 
+    // ── set_authorization_required / renounce_authorization_revocable (#404) ─
+
+    #[test]
+    fn test_set_authorization_required_enables_gate_after_deploy() {
+        // Deployed without gating — the deploy-time choice must not be
+        // permanent (issue #404).
+        let (_, client, admin, user) = setup();
+        assert!(!client.authorization_required());
+
+        client.set_authorization_required(&true);
+        assert!(client.authorization_required());
+
+        // The gate now applies to holders who were never explicitly
+        // authorized, exactly as if it had been enabled at deploy time.
+        let err = client.try_transfer(&admin, &user, &100_0000000i128);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_set_authorization_required_disables_gate_after_deploy() {
+        let (_, client, admin, user) = setup_with_auth_required();
+        client.set_authorization_required(&false);
+        assert!(!client.authorization_required());
+
+        // No explicit authorize_holder call — the gate being off means
+        // every holder is treated as authorized.
+        client.transfer(&admin, &user, &100_0000000i128);
+        assert_eq!(client.balance(&user), 100_0000000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_set_authorization_required_after_revoke_panics() {
+        let (_, client, _, _) = setup();
+        client.revoke_admin();
+        client.set_authorization_required(&true);
+    }
+
+    #[test]
+    fn test_renounce_authorization_revocable_disables_future_revokes() {
+        let (_, client, _, user) = setup_with_auth_required();
+        assert!(client.authorization_revocable());
+
+        client.renounce_authorization_revocable();
+        assert!(!client.authorization_revocable());
+
+        let err = client.try_revoke_authorization(&user);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "authorization revocation is already permanently disabled")]
+    fn test_renounce_authorization_revocable_is_one_way() {
+        // Deployed non-revocable — there is deliberately no path back to
+        // `true`, matching the issue's "one-way only" requirement. Renouncing
+        // an already-disabled flag is rejected rather than silently
+        // succeeding, so a caller cannot mistake it for having just done
+        // something.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TokenContract);
+        let client = TokenContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &7u32,
+            &String::from_str(&env, "ReqOnly"),
+            &String::from_str(&env, "ROT"),
+            &0i128,
+            &None,
+            &true,
+            &false, // revocable = false from deploy
+            &None,
+        );
+
+        client.renounce_authorization_revocable();
+    }
+
+    #[test]
+    #[should_panic(expected = "admin revoked: contract is locked")]
+    fn test_renounce_authorization_revocable_after_revoke_panics() {
+        let (_, client, _, _) = setup_with_auth_required();
+        client.revoke_admin();
+        client.renounce_authorization_revocable();
+    }
+
     #[test]
     fn test_revoke_fails_when_not_revocable() {
         let env = Env::default();
@@ -2863,6 +3214,73 @@ mod test {
             client.try_mint(&user, &500i128),
             Err(Ok(TokenError::ComplianceRejected.into()))
         );
+        assert_eq!(client.balance(&user), 500i128);
+    }
+
+    #[test]
+    fn test_allowlist_node_can_issue_gates_mint_by_recipient_only() {
+        // Regression test for issue #405: an allowlist-style node whose
+        // `can_trade(from, to)` requires *both* sides to be approved would,
+        // before the fix, always reject every mint — the token contract's own
+        // address stood in for `from` and was never on the allowlist. With
+        // `can_issue(to)` the node is asked about the recipient alone.
+        let (env, client, _admin, user) = setup();
+        let node = env.register_contract(None, AllowlistComplianceNode);
+        let node_client = AllowlistComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+
+        // Not yet approved: mint is rejected, not silently allowed.
+        assert_eq!(
+            client.try_mint(&user, &500i128),
+            Err(Ok(TokenError::ComplianceRejected.into()))
+        );
+        assert_eq!(client.balance(&user), 0i128);
+
+        // Approve the recipient only — the token contract's own address is
+        // still never on the allowlist, and that must no longer matter.
+        node_client.approve(&user);
+        client.mint(&user, &500i128);
+        assert_eq!(client.balance(&user), 500i128);
+    }
+
+    #[test]
+    fn test_allowlist_node_can_issue_gates_mint_batch_by_recipient_only() {
+        let (env, client, _admin, _user) = setup();
+        let node = env.register_contract(None, AllowlistComplianceNode);
+        let node_client = AllowlistComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+
+        let recipient = Address::generate(&env);
+        node_client.approve(&recipient);
+
+        let to = soroban_sdk::vec![&env, recipient.clone()];
+        let amounts = soroban_sdk::vec![&env, 100i128];
+        client.mint_batch(&to, &amounts);
+        assert_eq!(client.balance(&recipient), 100i128);
+    }
+
+    #[test]
+    fn test_legacy_allowlist_node_without_can_issue_falls_back_to_can_trade_to_to() {
+        // The node predates issue #405 and has no `can_issue` export at all —
+        // `try_can_issue` must fail at the invocation level (function not
+        // found), and the token contract must fall back to `can_trade(to, to)`
+        // rather than treating the missing export as ComplianceNodeUnavailable.
+        let (env, client, _admin, user) = setup();
+        let node = env.register_contract(None, LegacyAllowlistComplianceNode);
+        let node_client = LegacyAllowlistComplianceNodeClient::new(&env, &node);
+        client.set_compliance_node(&Some(node));
+
+        // Before the fix this would panic with ComplianceNodeUnavailable (or,
+        // depending on interpretation, ComplianceRejected) for *every*
+        // recipient, approved or not, because `from` (the token contract's
+        // own address) can never be on the allowlist.
+        assert_eq!(
+            client.try_mint(&user, &500i128),
+            Err(Ok(TokenError::ComplianceRejected.into()))
+        );
+
+        node_client.approve(&user);
+        client.mint(&user, &500i128);
         assert_eq!(client.balance(&user), 500i128);
     }
 

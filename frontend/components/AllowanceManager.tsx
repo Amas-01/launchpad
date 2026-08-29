@@ -11,6 +11,7 @@ import { useWallet } from "@/app/hooks/useWallet";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import {
   buildApproveTransaction,
+  buildRevokeAllowanceTransaction,
   fetchApprovedSpendersFromEvents,
   fetchCurrentLedger,
   fetchTokenDecimals,
@@ -115,12 +116,10 @@ export function AllowanceManager({ contractId: initialContractId }: AllowanceMan
 
     setRevokingSpender(spenderAddress);
     try {
-      const xdr = await buildApproveTransaction({
+      const xdr = await buildRevokeAllowanceTransaction({
         tokenContractId: contractId,
         ownerAddress: publicKey,
         spenderAddress,
-        amount: BigInt(0),
-        expirationLedger: 1000,
         config: networkConfig,
       });
 

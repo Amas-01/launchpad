@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import type { VestingScheduleInfo } from "@/lib/stellar";
 import { VestingCard } from "./VestingCard";
 import { VestingLookup } from "./VestingLookup";
@@ -21,10 +22,12 @@ export function VestingSection({
   schedules: VestingScheduleInfo[];
   currentLedger: number;
 }) {
+  const t = useTranslations("myAccount");
+
   return (
-    <section aria-label="Vesting schedules" className="mb-10">
+    <section aria-label={t("vestingSchedules")} className="mb-10">
       <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-gray-500">
-        Vesting Schedules
+        {t("vestingSchedules")}
       </h2>
       <VestingLookup
         vestingContractId={vestingContractId}

@@ -31,6 +31,11 @@ export interface VestingInfo {
   isPaused: boolean;
 }
 
+export interface VestingAdminState {
+  admin: string | null;
+  pendingAdmin: string | null;
+}
+
 export interface VestingSolvency {
   tokenBalance: bigint;
   totalCommitted: bigint;
@@ -115,6 +120,18 @@ function toU32ScVal(value: number): StellarSdk.xdr.ScVal {
     throw new Error("Invalid u32 value");
   }
   return StellarSdk.nativeToScVal(BigInt(value), { type: "u32" });
+}
+
+async function fetchOptionalAddress(
+  contractId: string,
+  method: string,
+): Promise<string | null> {
+  try {
+    const result = await simulateCall(contractId, method);
+    return decodeAddress(result);
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchScheduleCount(
@@ -283,6 +300,18 @@ export async function fetchVestingInfo(
   };
 }
 
+/** Fetch the vesting contract's admin and any pending admin proposal. */
+export async function fetchVestingAdminState(
+  contractId: string,
+): Promise<VestingAdminState> {
+  const [admin, pendingAdmin] = await Promise.all([
+    fetchOptionalAddress(contractId, "get_admin"),
+    fetchOptionalAddress(contractId, "pending_admin"),
+  ]);
+
+  return { admin, pendingAdmin };
+}
+
 /** Fetch live vesting solvency when supported by the deployed contract. */
 export async function fetchVestingSolvency(
   contractId: string,
@@ -431,3 +460,30 @@ export function truncateAddress(
   if (addr.length <= chars * 2 + 1) return addr;
   return `${addr.slice(0, chars)}…${addr.slice(-chars)}`;
 }
+
+/**
+ * Client-side estimate of the vested amount using the cliff + linear formula.
+ *
+ * This is ONLY for UI animations and "next unlock" previews between RPC polls.
+ * It must NOT be used to display the canonical vested amount to the user —
+ * call the contract's `vested_amount` getter for that. The on-chain formula
+ * is the source of truth and may diverge from this copy if issues #356 or
+ * #357 change the contract logic.
+ *
+ * To catch drift early: if you extend this function, add a fixture test
+ * generated from the contract's own test snapshots so CI fails before
+ * the discrepancy ships.
+ */
+export function estimateVestedAmount(
+  totalAmount: bigint,
+  cliffLedger: number,
+  endLedger: number,
+  currentLedger: number,
+): bigint {
+  if (currentLedger < cliffLedger) return 0n;
+  if (currentLedger >= endLedger) return totalAmount;
+  const elapsed = BigInt(currentLedger - cliffLedger);
+  const duration = BigInt(endLedger - cliffLedger);
+  return (totalAmount * elapsed) / duration;
+}
+

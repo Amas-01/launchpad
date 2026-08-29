@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useTranslations } from "next-intl";
 import { useNetwork } from "../providers/NetworkProvider";
 import { Loader2, TrendingUp, ArrowRight } from "lucide-react";
 import Link from "next/link";
 import type { RecentToken } from "@/lib/recentTokens";
 import { truncateAddress } from "@/lib/stellar";
+import { ContractVerificationBadge } from "@/components/ui/ContractVerificationBadge";
 import { EmptyState } from "@/components/ui/EmptyState";
 
 function timeAgo(iso: string): string {
@@ -18,6 +20,7 @@ function timeAgo(iso: string): string {
 }
 
 export function RecentLaunches() {
+  const t = useTranslations("recentLaunches");
   const { networkConfig } = useNetwork();
   const [tokens, setTokens] = useState<RecentToken[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,17 +37,16 @@ export function RecentLaunches() {
       const data = await res.json();
       setTokens(Array.isArray(data) ? data : []);
 
-      // Check if Mercury is not configured
       const mercuryNote = res.headers.get("X-Note");
       if (mercuryNote && data.length === 0) {
-        setError(null); // Clear error, show empty state instead
+        setError(null);
       }
     } catch {
-      setError("Unable to load recent launches.");
+      setError(t("error"));
     } finally {
       setLoading(false);
     }
-  }, [networkConfig.network]);
+  }, [networkConfig.network, t]);
 
   useEffect(() => {
     load();
@@ -58,9 +60,9 @@ export function RecentLaunches() {
   return (
     <section className="relative mx-auto max-w-6xl px-6 pb-24">
       <div className="mb-10 text-center">
-        <h2 className="text-3xl font-bold text-white">Recent Launches</h2>
+        <h2 className="text-3xl font-bold text-white">{t("title")}</h2>
         <p className="mt-2 text-sm text-gray-400">
-          Tokens recently deployed on Stellar Soroban
+          {t("description")}
         </p>
       </div>
 
@@ -76,9 +78,9 @@ export function RecentLaunches() {
 
       {!loading && !error && tokens.length === 0 && (
         <EmptyState
-          title="No recent launches available"
-          description="Recent token launches require an indexer to be configured. You can still deploy and manage tokens using the dashboard."
-          actionLabel="Deploy a Token"
+          title={t("emptyTitle")}
+          description={t("emptyDescription")}
+          actionLabel={t("emptyAction")}
           actionHref="/deploy"
         />
       )}
@@ -94,7 +96,7 @@ export function RecentLaunches() {
               {token.activityScore >= trendingThreshold && (
                 <span className="absolute right-4 top-4 flex items-center gap-1 rounded-full bg-stellar-500/15 px-2.5 py-0.5 text-xs font-medium text-stellar-300">
                   <TrendingUp className="h-3 w-3" />
-                  Trending
+                  {t("trending")}
                 </span>
               )}
 
@@ -102,28 +104,35 @@ export function RecentLaunches() {
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-stellar-500/10 text-sm font-bold text-stellar-400">
                   {token.symbol.slice(0, 2)}
                 </div>
-                <div className="min-w-0">
-                  <h3 className="truncate font-semibold text-white">
-                    {token.name}
-                  </h3>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="truncate font-semibold text-white">
+                      {token.name}
+                    </h3>
+                    <ContractVerificationBadge
+                      contractId={token.contractId}
+                      networkConfig={networkConfig}
+                      compact
+                    />
+                  </div>
                   <p className="text-xs text-gray-400">{token.symbol}</p>
                 </div>
               </div>
 
               <div className="mt-4 space-y-1.5 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-gray-500">Supply</span>
+                  <span className="text-gray-500">{t("supply")}</span>
                   <span className="text-gray-300">{token.totalSupply}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-500">Contract</span>
+                  <span className="text-gray-500">{t("contract")}</span>
                   <span className="font-mono text-xs text-gray-300">
                     {truncateAddress(token.contractId)}
                   </span>
                 </div>
                 {token.deployedAt && (
                   <div className="flex justify-between">
-                    <span className="text-gray-500">Deployed</span>
+                    <span className="text-gray-500">{t("deployed")}</span>
                     <span className="text-gray-300">
                       {timeAgo(token.deployedAt)}
                     </span>
@@ -132,7 +141,7 @@ export function RecentLaunches() {
               </div>
 
               <div className="mt-4 flex items-center gap-1 text-xs font-medium text-stellar-400 opacity-0 transition-opacity group-hover:opacity-100">
-                View Dashboard
+                {t("viewDashboard")}
                 <ArrowRight className="h-3 w-3" />
               </div>
             </Link>

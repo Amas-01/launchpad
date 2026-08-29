@@ -25,28 +25,6 @@ function randomBytes(length: number): Buffer {
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-
-/**
- * When `"true"`, deploy tokens the legacy way: a plain `createContract` deploy
- * followed by a **separate** `initialize` transaction. This is the pre-#368
- * behaviour and exists as a fallback while the factory contract is rolled out.
- *
- * Defaults to `false` — new deployments go through the factory, which deploys
- * and initialises the token in a single atomic transaction (no front-running
- * window between deploy and initialize).
- *
- * Read at call time rather than module scope: Next.js inlines
- * `NEXT_PUBLIC_*` at build time, so this is equivalent for the shipped app,
- * but makes the hook straight-forward to test by swapping `process.env`.
- */
-function getDeployConfig() {
-  return {
-    useLegacyDeploy: process.env.NEXT_PUBLIC_USE_LEGACY_DEPLOY === "true",
-    factoryAddress: process.env.NEXT_PUBLIC_FACTORY_ADDRESS ?? "",
-    tokenWasmHash: process.env.NEXT_PUBLIC_TOKEN_WASM_HASH ?? "",
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -90,21 +68,59 @@ export function useDeployToken() {
   const { connected, publicKey, signTransaction } = useWallet();
   const { networkConfig } = useNetwork();
 
-  const deployToken = useCallback(
-    async (params: DeployTokenParams): Promise<DeployTokenResult> => {
-      if (!connected || !publicKey) {
+  const networkKey = (networkConfig?.network || networkConfig?.id || "").toLowerCase();
+
+    let TOKEN_WASM_HASH: string | undefined;
+
+    if (networkKey.includes("testnet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_TESTNET;
+    } else if (networkKey.includes("mainnet") || networkKey.includes("public")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_MAINNET;
+    } else if (networkKey.includes("futurenet")) {
+      TOKEN_WASM_HASH = process.env.NEXT_PUBLIC_TOKEN_WASM_HASH_FUTURENET;
+    }
+
+    if (!TOKEN_WASM_HASH) {
+      throw {
+        message: `Token WASM hash not configured for network "${networkConfig?.network || networkConfig?.id || "selected"}". Please set NEXT_PUBLIC_TOKEN_WASM_HASH_${(networkConfig?.network || networkConfig?.id || "NETWORK").toUpperCase()} in your environment.`,
+        type: "validation",
+      } as DeployTokenError;
+    }
+
+      const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
+
+      // ── Step 1: Build Transaction ─────────────────────────────────────
+      // Load the source account to get the current sequence number
+      const sourceAccount = await rpc.getAccount(publicKey);
+
+      // Create a contract deployment transaction using the pre-uploaded WASM hash
+      const wasmHashBuffer = Buffer.from(TOKEN_WASM_HASH, "hex");
+
+      // Build the deployment operation
+      const deployOp = StellarSdk.Operation.createCustomContract({
+        address: new StellarSdk.Address(publicKey),
+        wasmHash: wasmHashBuffer,
+        salt: randomBytes(32),
+      });
+
+      const deployTx = new StellarSdk.TransactionBuilder(sourceAccount, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: networkConfig.passphrase,
+      })
+        .addOperation(deployOp)
+        .setTimeout(30)
+        .build();
+
+      // ── Step 2: Simulate Transaction ──────────────────────────────────
+      let simResult: StellarSdk.rpc.Api.SimulateTransactionResponse;
+      try {
+        simResult = await rpc.simulateTransaction(deployTx);
+      } catch (err) {
         throw {
-          message: "Wallet not connected. Please connect your wallet and try again.",
-          type: "validation",
+          message: `Simulation request failed: ${err instanceof Error ? err.message : String(err)}`,
+          type: "simulation",
         } as DeployTokenError;
       }
-
-      const ctx: DeployContext = {
-        publicKey,
-        signTransaction,
-        rpcUrl: networkConfig.rpcUrl,
-        passphrase: networkConfig.passphrase,
-      };
 
       const { useLegacyDeploy, factoryAddress, tokenWasmHash } = getDeployConfig();
 

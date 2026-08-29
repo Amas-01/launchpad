@@ -1,20 +1,25 @@
 import type { Metadata } from "next";
 import { fetchTokenInfo, validateTokenContract } from "@/lib/stellar";
-import { NETWORKS } from "@/types/network";
+import { NETWORKS, type NetworkType } from "@/types/network";
 import PublicTokenPage from "./PublicTokenPage";
 
 interface PageProps {
-  params: Promise<{ contractId: string }>;
+  params: Promise<{ network: string; contractId: string }>;
+}
+
+function resolveNetwork(network: string): NetworkType {
+  return network === "mainnet" ? "mainnet" : "testnet";
 }
 
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
-  const { contractId } = await params;
+  const { network, contractId } = await params;
+  const resolvedNetwork = resolveNetwork(network);
 
   try {
     // First validate the token contract
-    const validation = await validateTokenContract(contractId, NETWORKS.testnet);
+    const validation = await validateTokenContract(contractId, NETWORKS[resolvedNetwork]);
     
     if (!validation.isValid) {
       // Return fallback metadata for invalid contracts
@@ -29,7 +34,7 @@ export async function generateMetadata({
       };
     }
 
-    const tokenInfo = await fetchTokenInfo(contractId, NETWORKS.testnet);
+    const tokenInfo = await fetchTokenInfo(contractId, NETWORKS[resolvedNetwork]);
 
     return {
       title: `${tokenInfo.name} (${tokenInfo.symbol}) — ${tokenInfo.totalSupply} Supply | SoroPad`,
@@ -41,7 +46,7 @@ export async function generateMetadata({
         images: [
           {
             // Relative URL — resolved to absolute by metadataBase in root layout
-            url: `/api/og/token/${contractId}`,
+            url: `/api/og/token/${network}/${contractId}`,
             width: 1200,
             height: 630,
             alt: `${tokenInfo.name} (${tokenInfo.symbol}) Token`,
@@ -52,7 +57,7 @@ export async function generateMetadata({
         card: "summary_large_image",
         title: `${tokenInfo.name} (${tokenInfo.symbol})`,
         description: `Total Supply: ${tokenInfo.totalSupply} • View token details on Stellar Soroban`,
-        images: [`/api/og/token/${contractId}`],
+        images: [`/api/og/token/${network}/${contractId}`],
       },
     };
   } catch (error) {
@@ -72,7 +77,7 @@ export async function generateMetadata({
 }
 
 export default async function PublicTokenPageRoute({ params }: PageProps) {
-  const { contractId } = await params;
+  const { network, contractId } = await params;
   
-  return <PublicTokenPage contractId={contractId} />;
+  return <PublicTokenPage contractId={contractId} network={network} />;
 }

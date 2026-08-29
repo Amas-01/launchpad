@@ -2,6 +2,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { type NetworkConfig } from "../types/network";
 import { fetchIndexedEvents } from "./indexer";
 import { wrapRpcCall } from "./soroban";
+import { buildRevokeAllowanceArgs } from "./transactionSimulator";
 
 // ---------------------------------------------------------------------------
 // Config — defaults to Stellar Testnet, overridable via localStorage
@@ -19,6 +20,43 @@ function getHorizonUrl(): string {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+export interface VerificationResult {
+  status: "verified" | "modified" | "unknown";
+  deployedHash: string | null;
+  referenceHash: string | null;
+  referenceVersion: string | null;
+  isLocked: boolean;
+}
+
+export interface WasmManifestEntry {
+  wasm_hash: string;
+  source_tag: string;
+  build_ledger: string;
+}
+
+export interface WasmManifest {
+  token: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+  vesting: {
+    latest: string;
+    versions: Record<string, WasmManifestEntry>;
+    build_info: { sdk_version: string; rust_version: string; profile: string };
+  };
+}
+
+export async function fetchWasmManifest(): Promise<WasmManifest | null> {
+  try {
+    const res = await fetch("/api/wasm-manifest");
+    if (!res.ok) return null;
+    return (await res.json()) as WasmManifest;
+  } catch {
+    return null;
+  }
+}
+
 export interface TokenInfo {
   name: string;
   symbol: string;
@@ -138,6 +176,38 @@ export async function simulateCall(
     },
     { operation: `simulate ${method}`, silent: true },
   );
+}
+
+/**
+ * Read the current WASM hash of a deployed Soroban contract.
+ *
+ * Uses the RPC getLedgerEntries endpoint to fetch the contract instance
+ * entry, which contains the executable WASM hash. Returns the hash as a
+ * lowercase hex string, or null when the entry cannot be read.
+ */
+export async function getContractWasmHash(
+  contractId: string,
+  config: NetworkConfig,
+): Promise<string | null> {
+  try {
+    const rpc = new StellarSdk.rpc.Server(config.rpcUrl);
+    const instanceKey = StellarSdk.xdr.ScVal.scvLedgerKeyContractInstance();
+    const entry = await rpc.getContractData(contractId, instanceKey);
+    const contractData = (entry as { val: StellarSdk.xdr.LedgerEntryData }).val.contractData();
+    const scVal = contractData.val();
+    if (scVal.switch() !== StellarSdk.xdr.ScValType.scvContractInstance()) {
+      return null;
+    }
+    const instance = scVal.instance();
+    const executable = instance.executable();
+    if (executable.switch() !== StellarSdk.xdr.ContractExecutableType.contractExecutableWasm()) {
+      return null;
+    }
+    const wasmHashBuf = executable.wasmHash() as Buffer;
+    return Buffer.from(wasmHashBuf).toString("hex");
+  } catch {
+    return null;
+  }
 }
 
 function encodeTopicSymbol(symbol: string): string {
@@ -902,6 +972,36 @@ export async function fetchVestingSchedule(
 }
 
 /**
+ * Fetch the vested amount for a recipient's schedule directly from the
+ * contract's `vested_amount` getter.
+ *
+ * This is the authoritative value — prefer it over any client-side
+ * replication of the vesting formula. The on-chain formula is the source
+ * of truth and may change (see issues #356, #357).
+ */
+export async function fetchVestedAmount(
+  vestingContractId: string,
+  recipient: string,
+  config: NetworkConfig,
+  scheduleIndex?: number,
+): Promise<string> {
+  const resolved = await resolveVestingScheduleIndex({
+    vestingContractId,
+    recipient,
+    config,
+    scheduleIndex,
+  });
+  const recipientScVal = new StellarSdk.Address(recipient).toScVal();
+  const result = await simulateCall(
+    vestingContractId,
+    "vested_amount",
+    config,
+    [recipientScVal, toU32ScVal(resolved.scheduleIndex)],
+  );
+  return decodeI128(result);
+}
+
+/**
  * Fetch transaction history (events) for a token contract via the Mercury indexer.
  * Uses cursor-based pagination to walk past the Soroban RPC retention window.
  */
@@ -917,15 +1017,17 @@ export const TRACKED_EVENT_TOPICS = [
   "pause",
   "unpause",
   "authorize",
-  "revoke_auth",
+  "rvk_auth",
   "revoked",
   "upgrade",
   "approve",
   "set_max_b",
   "set_cnode",
-  "prop_admin",
+  "prop_adm",
   "set_admin",
-  "update_uri",
+  "upd_uri",
+  "set_areq",
+  "rvk_rvc",
 ] as const;
 
 type TrackedTopic = (typeof TRACKED_EVENT_TOPICS)[number];
@@ -1012,7 +1114,7 @@ function decodeActivityEvent(
     case "freeze":
     case "unfreeze":
     case "authorize":
-    case "revoke_auth": {
+    case "rvk_auth": {
       // topic[1] = account address being acted on
       if (topicStrings.length > 1) {
         const addrVal = toScVal(topicStrings[1]);
@@ -1020,8 +1122,8 @@ function decodeActivityEvent(
       }
       break;
     }
-    case "prop_admin": {
-      // topics are ("prop_admin", current_admin, new_admin)
+    case "prop_adm": {
+      // topics are ("prop_adm", current_admin, new_admin)
       if (topicStrings.length > 2) {
         const currentVal = toScVal(topicStrings[1]);
         const newVal = toScVal(topicStrings[2]);
@@ -1048,7 +1150,9 @@ function decodeActivityEvent(
     case "approve":
     case "set_max_b":
     case "set_cnode":
-    case "update_uri":
+    case "upd_uri":
+    case "set_areq":
+    case "rvk_rvc":
       // No address payload or special handling needed for activity feed
       break;
     default:
@@ -1130,21 +1234,7 @@ export async function fetchTransactionHistory(
   return { items: items.reverse(), nextCursor };
 }
 
-export type TokenActivityType =
-  | "mint"
-  | "transfer"
-  | "burn"
-  | "clawback"
-  | "freeze"
-  | "unfreeze"
-  | "pause"
-  | "unpause"
-  | "authorize"
-  | "unauthorize"
-  | "set_admin"
-  | "revoke_admin"
-  | "upgrade"
-  | "other";
+export type TokenActivityType = (typeof TRACKED_EVENT_TOPICS)[number] | "other";
 
 export interface TokenActivityInfo {
   id: string;
@@ -1618,6 +1708,39 @@ export async function buildApproveTransaction(params: {
         expirationScVal,
       ),
     )
+    .setTimeout(30)
+    .build();
+
+  const assembled = await simulateAndAssembleTransaction(tx, config);
+  return assembled.build().toXDR();
+}
+
+/**
+ * Build a transaction XDR that revokes an allowance on a SEP-41 token.
+ *
+ * Delegates argument construction to `buildRevokeAllowanceArgs` so the
+ * preflight simulation and the real submission use identical arguments.
+ * See that function and `contracts/token/src/lib.rs` for the rationale.
+ */
+export async function buildRevokeAllowanceTransaction(params: {
+  tokenContractId: string;
+  ownerAddress: string;
+  spenderAddress: string;
+  config: NetworkConfig;
+}): Promise<string> {
+  const { tokenContractId, ownerAddress, spenderAddress, config } = params;
+
+  const contract = new StellarSdk.Contract(tokenContractId);
+  const args = buildRevokeAllowanceArgs(ownerAddress, spenderAddress);
+
+  const horizon = new StellarSdk.Horizon.Server(config.horizonUrl);
+  const sourceAccount = await horizon.loadAccount(ownerAddress);
+
+  const tx = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: config.passphrase,
+  })
+    .addOperation(contract.call("approve", ...args))
     .setTimeout(30)
     .build();
 

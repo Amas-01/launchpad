@@ -15,6 +15,22 @@ const eslintConfig = defineConfig([
       "no-console": ["error", { "allow": ["warn", "error"] }],
     },
   },
+  {
+    files: ["app/**/*.{ts,tsx}", "components/**/*.{ts,tsx}", "lib/**/*.{ts,tsx}"],
+    rules: {
+      // Enforce i18n: warn on JSX string literals in app/ and components/
+      "react/jsx-no-literals": ["warn", {
+        "noStrings": true,
+        "allowedStrings": ["", "/", ":", ".", "…", " ", "-", "#", "%", "(", ")", "{", "}", "C", "G"]
+      }],
+    },
+  },
+  {
+    files: ["**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/tests/**"],
+    rules: {
+      "react/jsx-no-literals": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
@@ -22,6 +38,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "coverage/**",
   ]),
 ]);
 
