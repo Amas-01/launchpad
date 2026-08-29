@@ -11,6 +11,7 @@ import { PreflightCheckDisplay } from "@/components/ui/PreflightCheck";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { Send } from "lucide-react";
 import { useToast } from "@/app/providers/ToastProvider";
+import { toBaseUnits } from "@/lib/utils";
 
 const transferSchema = z.object({
   tokenContractId: z.string().regex(/^C[A-Z0-9]{55}$/, "Invalid token contract ID"),
@@ -24,10 +25,11 @@ type TransferFormData = z.infer<typeof transferSchema>;
 
 interface TransferFormProps {
   senderAddress: string;
+  tokenDecimals: number;
   onSuccess?: (txHash: string) => void;
 }
 
-export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
+export function TransferForm({ senderAddress, tokenDecimals, onSuccess }: TransferFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const toast = useToast();
   const [preflightResult, setPreflightResult] = useState<{
@@ -64,7 +66,7 @@ export function TransferForm({ senderAddress, onSuccess }: TransferFormProps) {
         formData.tokenContractId,
         senderAddress,
         formData.toAddress,
-        BigInt(Math.floor(parseFloat(formData.amount) * 1e7)),
+        toBaseUnits(formData.amount, tokenDecimals),
       );
 
       setPreflightResult({

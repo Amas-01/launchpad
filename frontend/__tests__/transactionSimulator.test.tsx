@@ -267,7 +267,7 @@ describe("MintForm with Pre-flight Checks", () => {
   it("renders check button and submit button", () => {
     render(
       <ToastProvider>
-        <MintForm adminAddress="GABC123..." />
+        <MintForm adminAddress="GABC123..." tokenDecimals={7} />
       </ToastProvider>,
     );
     expect(screen.getByText("Check Transaction")).toBeInTheDocument();
@@ -275,7 +275,7 @@ describe("MintForm with Pre-flight Checks", () => {
   });
 
   // it("disables submit button until check succeeds", async () => {
-  //   // const { container } = render(<MintForm adminAddress="GABC123..." />);
+  //   // const { container } = render(<MintForm adminAddress="GABC123..." tokenDecimals={7} />);
 
   //   const submitButton = screen.getByText("Mint Tokens") as HTMLButtonElement;
   //   expect(submitButton.disabled).toBe(true);
@@ -287,7 +287,7 @@ describe("MintForm with Pre-flight Checks", () => {
   it("shows pre-flight results after check", async () => {
     render(
       <ToastProvider>
-        <MintForm adminAddress="GABC123..." />
+        <MintForm adminAddress="GABC123..." tokenDecimals={7} />
       </ToastProvider>,
     );
   });

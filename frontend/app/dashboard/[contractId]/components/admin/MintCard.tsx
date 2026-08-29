@@ -12,6 +12,7 @@ import {
   parseBatchMintFile,
   type BatchMintEntry,
 } from "@/lib/batch";
+import { toBaseUnits } from "@/lib/utils";
 import { useToast } from "../../../../providers/ToastProvider";
 import type { UseAdminActionResult } from "../../hooks/useAdminAction";
 import { AdminCard, ModeToggle } from "./AdminCard";
@@ -192,7 +193,7 @@ export function MintCard({
               <span className="text-[10px] text-green-500/70">
                 Total:{" "}
                 {parsedEntries
-                  .reduce((acc, curr) => acc + Number(curr.amount), 0)
+                  .reduce((acc, curr) => acc + parseFloat(curr.amount || "0"), 0)
                   .toLocaleString()}
               </span>
             </div>
