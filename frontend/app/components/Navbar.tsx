@@ -22,6 +22,7 @@ export function Navbar() {
     { href: "/deploy", label: t("deploy") },
     { href: "/dashboard", label: t("dashboard") },
     { href: "/dashboard/allowances", label: t("allowances") },
+    { href: "/airdrop", label: t("airdrop") },
     { href: "/my-account", label: t("myAccount") },
   ] as const;
 
