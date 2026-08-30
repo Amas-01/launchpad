@@ -28,6 +28,7 @@ import {
 } from "recharts";
 import { AdminCard } from "./AdminCard";
 import { ExplorerLink } from "@/components/ui/ExplorerLink";
+import { fromBaseUnits } from "@/lib/utils";
 import {
   useVestingDashboard,
   type RecipientRow,
@@ -188,7 +189,7 @@ function ProjectionChart({
 }) {
   const data = projection.map((p) => ({
     label: p.label,
-    amount: Number(p.amount) / 10 ** decimals,
+    amount: parseFloat(fromBaseUnits(p.amount, decimals)),
   }));
 
   const hasData = data.some((d) => d.amount > 0);
