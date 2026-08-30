@@ -1,16 +1,58 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Map, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env, Map, Vec,
+};
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Typed contract errors for the vesting contract.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VestingError {
+    /// `initialize` was called on a contract that is already initialized.
+    AlreadyInitialized = 1,
+    /// Operation attempted before `initialize` was called.
+    NotInitialized = 2,
+    /// The vesting contract is paused.
+    Paused = 3,
+    /// Amount is zero or negative where a positive value is required.
+    InvalidAmount = 4,
+    /// `end_ledger` is not strictly after `cliff_ledger`.
+    InvalidLedgerRange = 5,
+    /// `accept_admin` was called with no pending proposal.
+    NoPendingAdmin = 6,
+    /// Operation attempted on a revoked vesting schedule.
+    ScheduleRevoked = 7,
+    /// Schedule has already been revoked.
+    AlreadyRevoked = 8,
+    /// `release` was called but no vested tokens are available.
+    NothingToRelease = 9,
+    /// No schedule found for recipient.
+    ScheduleNotFound = 10,
+    /// Schedule index is out of bounds for recipient.
+    ScheduleIndexOutOfBounds = 11,
+    /// Batch schedules list is empty.
+    BatchEmpty = 12,
+    /// Batch schedules size exceeds maximum of 50.
+    BatchTooLarge = 13,
+    /// `extend_cliff` called after the cliff ledger has passed.
+    CliffPassed = 14,
+    /// New cliff ledger is not strictly later than the current cliff ledger.
+    CliffNotExtended = 15,
+    /// New cliff ledger is not strictly before the end ledger.
+    CliffAfterEnd = 16,
+    /// `prune_recipient` called for a recipient that is not tracked.
+    RecipientNotTracked = 17,
+}
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/// Soroban's network-enforced ceiling on how far into the future a ledger
-/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
-/// network config; 6,312,000 ledgers on mainnet). Passing a value above
-/// this to `extend_ttl` fails the transaction.
-const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
 
 /// Largest schedule amount that can be linearly interpolated without an
 /// `i128` overflow for any valid pair of `u32` ledger sequence numbers.
@@ -20,20 +62,24 @@ const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
 /// below this ceiling makes that intermediate multiplication safe.
 const MAX_VESTING_AMOUNT: i128 = i128::MAX / u32::MAX as i128;
 
-/// Fallback TTL extension used when a schedule's `end_ledger` doesn't give
-/// us a more precise target (e.g. it's already in the past): about a year.
+/// Desired lifetime for the ledger entries this contract keeps alive:
+/// about a year, assuming Stellar's ~5s ledger close time.
 ///
-/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
-/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
-/// will accept even if the formula above or the network parameter changes.
-const TTL_LEDGERS: u32 = {
-    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
-    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
-        YEAR_LEDGERS as u32
-    } else {
-        MAX_ENTRY_TTL_LEDGERS
-    }
-};
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers.
+///
+/// This is only a *request*. The effective window is whatever the network
+/// allows — `env.storage().max_ttl()`, read at call time — and every
+/// `extend_ttl` site clamps to it. On testnet and mainnet today
+/// `max_entry_ttl` is 3,110,400 ledgers, so entries actually live **about
+/// 180 days, not a year**. Holders who need their balance to outlive that
+/// must interact with the contract at least once per window.
+///
+/// Deliberately not compared against a hardcoded ceiling: the previous
+/// constant here (6,312,000) was the soroban-sdk *test harness* default
+/// (`soroban-sdk/src/env.rs`), not a network value, so the clamp it fed
+/// could never fire. The test environment still reports 6,312,000, which is
+/// why no test in this file asserts a specific network figure.
+const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -163,7 +209,7 @@ impl VestingContract {
         end_ledger: u32,
     ) {
         Self::_check_paused(&env);
-        Self::_require_admin(&env);
+        let admin = Self::_require_admin(&env);
 
         Self::_validate_total_amount(total_amount);
         assert!(
@@ -227,7 +273,7 @@ impl VestingContract {
     /// with a clear error rather than an opaque resource failure.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         Self::_check_paused(&env);
-        Self::_require_admin(&env);
+        let admin = Self::_require_admin(&env);
 
         if schedules.is_empty() {
             panic_with_error!(&env, VestingError::BatchEmpty);
@@ -783,8 +829,10 @@ impl VestingContract {
                     schedule.released += releasable;
                     env.storage().persistent().set(&key, &schedule);
 
-                    let remaining_ledgers =
-                        schedule.end_ledger.saturating_sub(env.ledger().sequence());
+                    let remaining_ledgers = schedule
+                        .end_ledger
+                        .saturating_sub(env.ledger().sequence())
+                        .min(env.storage().max_ttl());
                     if remaining_ledgers > 0 {
                         env.storage().persistent().extend_ttl(
                             &key,
@@ -819,7 +867,9 @@ impl VestingContract {
 
     // ── Internals ───────────────────────────────────────────────────────
 
-    fn _require_admin(env: &Env) {
+    /// Authorises the current admin and returns it, so callers that move
+    /// tokens *from* the admin can bind it without re-reading storage.
+    fn _require_admin(env: &Env) -> Address {
         Self::_require_not_locked(env);
         let admin: Address = env
             .storage()
@@ -827,6 +877,7 @@ impl VestingContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(env, VestingError::NotInitialized));
         admin.require_auth();
+        admin
     }
 
     fn _require_not_locked(env: &Env) {
@@ -1004,7 +1055,7 @@ impl VestingContract {
         let key = DataKey::RecipientAt(count);
         env.storage().persistent().set(&key, recipient);
 
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = TTL_LEDGERS.min(env.storage().max_ttl());
         Self::_extend_persistent_ttl(env, &key, ttl_ledgers);
 
         let count_key = DataKey::RecipientCount;
@@ -1020,6 +1071,7 @@ impl VestingContract {
 #[cfg(test)]
 mod test {
     use super::*;
+    use soroban_sdk::IntoVal;
     use soroban_sdk::{testutils::Address as _, testutils::Events as _, testutils::Ledger, Env};
 
     // ── Event topic fixture ─────────────────────────────────────────────
@@ -1118,10 +1170,40 @@ mod test {
     // ── TTL constant tests ──────────────────────────────────────────────
 
     #[test]
-    fn test_ttl_ledgers_is_about_one_year() {
-        // 5s per ledger is the assumption baked into TTL_LEDGERS; if that
-        // assumption or the formula ever changes, this test catches it
-        // instead of the archival-window math silently rotting again.
+    fn test_ttl_requests_are_clamped_to_the_network_ceiling() {
+        // See the token contract's equivalent test for why this asserts a
+        // relationship rather than a network figure (#398).
+        let env = Env::default();
+        let contract_id = env.register_contract(None, VestingContract);
+
+        env.as_contract(&contract_id, || {
+            let network_max = env.storage().max_ttl();
+
+            // A schedule ending far beyond the ceiling is capped at it.
+            assert_eq!(
+                VestingContract::_ttl_ledgers(&env, u32::MAX),
+                network_max,
+                "a far-future schedule must be capped at the network ceiling"
+            );
+
+            // One already in the past falls back to the request, itself clamped.
+            assert_eq!(
+                VestingContract::_ttl_ledgers(&env, 0),
+                TTL_LEDGERS.min(network_max),
+                "the fallback TTL must also be clamped"
+            );
+
+            // Whatever the schedule, the result never exceeds the ceiling.
+            for end_ledger in [0u32, 1, 1_000, TTL_LEDGERS, u32::MAX] {
+                assert!(VestingContract::_ttl_ledgers(&env, end_ledger) <= network_max);
+            }
+        });
+    }
+
+    #[test]
+    fn test_ttl_ledgers_encodes_a_one_year_request() {
+        // Documents intent only; the effective window is whatever the network
+        // allows, currently about 180 days.
         let days = (TTL_LEDGERS as u64 * 5) / (24 * 60 * 60);
         assert_eq!(days, 365);
     }
@@ -1259,134 +1341,134 @@ mod test {
         assert!(!schedule.revoked);
     }
 
-#[test]
-fn test_pending_admin_getter_and_cancel() {
-    let env = Env::default();
-    env.mock_all_auths();
+    #[test]
+    fn test_pending_admin_getter_and_cancel() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VestingContract);
-    let client = VestingContractClient::new(&env, &contract_id);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
 
-    let admin = Address::generate(&env);
-    let proposed = Address::generate(&env);
-    let token = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        let token = Address::generate(&env);
 
-    client.initialize(&admin, &token);
+        client.initialize(&admin, &token);
 
-    assert_eq!(client.pending_admin(), None);
+        assert_eq!(client.pending_admin(), None);
 
-    client.propose_admin(&proposed);
-    assert_eq!(client.pending_admin(), Some(proposed.clone()));
+        client.propose_admin(&proposed);
+        assert_eq!(client.pending_admin(), Some(proposed.clone()));
 
-    client.cancel_admin_proposal();
-    assert_eq!(client.pending_admin(), None);
+        client.cancel_admin_proposal();
+        assert_eq!(client.pending_admin(), None);
 
-    client.propose_admin(&proposed);
-    client.accept_admin();
-    assert_eq!(client.pending_admin(), None);
-}
+        client.propose_admin(&proposed);
+        client.accept_admin();
+        assert_eq!(client.pending_admin(), None);
+    }
 
-#[test]
-fn test_total_committed_tracks_schedule_lifecycle() {
-    let env = Env::default();
-    env.mock_all_auths();
+    #[test]
+    fn test_total_committed_tracks_schedule_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VestingContract);
-    let client = VestingContractClient::new(&env, &contract_id);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
 
-    let admin = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let other = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract(admin.clone());
-    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
-    client.initialize(&admin, &token_addr);
-    asset_client.mint(&admin, &5_000);
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &5_000);
 
-    assert_eq!(client.total_committed(), 0);
+        assert_eq!(client.total_committed(), 0);
 
-    client.create_schedule(&recipient, &1_000, &100, &200);
-    assert_eq!(client.total_committed(), 1_000);
-    assert_eq!(token_client.balance(&contract_id), 1_000);
-    assert_eq!(
-        client.solvency(),
-        Solvency {
-            token_balance: 1_000,
-            total_committed: 1_000,
-            solvent: true,
-        }
-    );
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        assert_eq!(client.total_committed(), 1_000);
+        assert_eq!(token_client.balance(&contract_id), 1_000);
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 1_000,
+                total_committed: 1_000,
+                solvent: true,
+            }
+        );
 
-    env.ledger().set_sequence_number(150);
-    release_latest(&client, &recipient);
-    assert_eq!(client.total_committed(), 500);
-    assert_eq!(token_client.balance(&contract_id), 500);
+        env.ledger().set_sequence_number(150);
+        release_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 500);
+        assert_eq!(token_client.balance(&contract_id), 500);
 
-    client.create_schedule(&other, &300, &200, &300);
-    assert_eq!(client.total_committed(), 800);
-    assert_eq!(token_client.balance(&contract_id), 800);
+        client.create_schedule(&other, &300, &200, &300);
+        assert_eq!(client.total_committed(), 800);
+        assert_eq!(token_client.balance(&contract_id), 800);
 
-    revoke_latest(&client, &recipient);
-    assert_eq!(client.total_committed(), 300);
-    assert_eq!(token_client.balance(&contract_id), 300);
-}
+        revoke_latest(&client, &recipient);
+        assert_eq!(client.total_committed(), 300);
+        assert_eq!(token_client.balance(&contract_id), 300);
+    }
 
-#[test]
-fn test_solvency_reports_external_token_drain() {
-    let env = Env::default();
-    env.mock_all_auths();
+    #[test]
+    fn test_solvency_reports_external_token_drain() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VestingContract);
-    let client = VestingContractClient::new(&env, &contract_id);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
 
-    let admin = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract(admin.clone());
-    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
-    client.initialize(&admin, &token_addr);
-    asset_client.mint(&admin, &1_000);
-    client.create_schedule(&recipient, &1_000, &100, &200);
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &1_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
 
-    // Models any token-side admin action that drains already committed funds
-    // from the vesting contract, such as clawback on a clawbackable token.
-    token_client.transfer(&contract_id, &admin, &400);
+        // Models any token-side admin action that drains already committed funds
+        // from the vesting contract, such as clawback on a clawbackable token.
+        token_client.transfer(&contract_id, &admin, &400);
 
-    assert_eq!(
-        client.solvency(),
-        Solvency {
-            token_balance: 600,
-            total_committed: 1_000,
-            solvent: false,
-        }
-    );
-}
+        assert_eq!(
+            client.solvency(),
+            Solvency {
+                token_balance: 600,
+                total_committed: 1_000,
+                solvent: false,
+            }
+        );
+    }
 
-#[test]
-#[should_panic(expected = "vesting contract underfunded")]
-fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
-    let env = Env::default();
-    env.mock_all_auths();
+    #[test]
+    #[should_panic(expected = "vesting contract underfunded")]
+    fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VestingContract);
-    let client = VestingContractClient::new(&env, &contract_id);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
 
-    let admin = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    let other = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract(admin.clone());
-    let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
-    let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        let admin = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let other = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract(admin.clone());
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+        let asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
 
-    client.initialize(&admin, &token_addr);
-    asset_client.mint(&admin, &2_000);
-    client.create_schedule(&recipient, &1_000, &100, &200);
-    token_client.transfer(&contract_id, &admin, &400);
+        client.initialize(&admin, &token_addr);
+        asset_client.mint(&admin, &2_000);
+        client.create_schedule(&recipient, &1_000, &100, &200);
+        token_client.transfer(&contract_id, &admin, &400);
 
-    client.create_schedule(&other, &100, &100, &200);
-}
+        client.create_schedule(&other, &100, &100, &200);
+    }
 
     #[test]
     fn test_vested_before_cliff() {
@@ -2307,7 +2389,6 @@ fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
         assert_eq!(token_client.balance(&admin), 250);
     }
 
-   
     // ── #359: initialize auth guard ───────────────────────────────────
 
     #[test]
@@ -2335,7 +2416,7 @@ fn test_create_schedule_rejects_when_existing_commitments_are_underfunded() {
     }
 
     // ── Regression tests for issue #324: TTL clamp for long schedules ──
- // ── Upgrade tests ───────────────────────────────────────────
+    // ── Upgrade tests ───────────────────────────────────────────
     #[test]
     fn test_upgrade_rejects_zero_hash() {
         let env = Env::default();

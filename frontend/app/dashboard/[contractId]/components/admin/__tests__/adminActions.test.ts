@@ -1,8 +1,8 @@
 import {
   ADMIN_ACTIONS,
-  scaleAmount,
   type AdminActionKey,
 } from "../adminActions";
+import { toBaseUnits } from "@/lib/utils";
 import { LEDGERS_PER_DAY } from "@/lib/soroban";
 
 /**
@@ -38,10 +38,10 @@ function addressOf(value: xdr.ScVal): string {
   return Address.fromScVal(value).toString();
 }
 
-describe("scaleAmount", () => {
+describe("toBaseUnits (scaling primitive)", () => {
   it("scales a decimal string into base units", () => {
-    expect(scaleAmount("1.5", 7)).toBe(15_000_000n);
-    expect(scaleAmount("100", 0)).toBe(100n);
+    expect(toBaseUnits("1.5", 7)).toBe(15_000_000n);
+    expect(toBaseUnits("100", 0)).toBe(100n);
   });
 });
 

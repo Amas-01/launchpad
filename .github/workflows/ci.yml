@@ -78,6 +78,7 @@ jobs:
             # Map soroban-token -> token, soroban-vesting -> vesting
             manifest_key=""
             case "$name" in
+              *airdrop*) manifest_key="airdrop" ;;
               *token*) manifest_key="token" ;;
               *vesting*) manifest_key="vesting" ;;
               *) manifest_key="$name" ;;

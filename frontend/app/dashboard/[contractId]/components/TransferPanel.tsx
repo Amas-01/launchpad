@@ -25,6 +25,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { getTokenActionBlockedReason } from "@/components/TokenStatusBanner";
 import type { TokenInfo, WalletTokenState } from "@/lib/stellar";
+import { toBaseUnits } from "@/lib/utils";
 
 const transferSchema = z.object({
   to: z.string().regex(/^G[A-Z2-7]{55}$/, "Invalid Stellar address (must start with G)"),
@@ -121,7 +122,7 @@ export function TransferPanel({
     try {
       const StellarSdk = await import("@stellar/stellar-sdk");
       const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
-      const rawAmount = BigInt(Math.round(parseFloat(data.amount) * 10 ** tokenDecimals));
+      const rawAmount = toBaseUnits(data.amount, tokenDecimals);
       const account = await rpc.getAccount(publicKey);
       const contract = new Contract(contractId);
       const tx = new TransactionBuilder(account, { fee: StellarSdk.BASE_FEE, networkPassphrase: networkConfig.passphrase })

@@ -11,6 +11,7 @@ import { useWallet } from "@/app/hooks/useWallet";
 import { useSoroban } from "@/hooks/useSoroban";
 import { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import { buildApproveTransaction, fetchTokenAllowance, fetchApprovedSpendersFromEvents } from "@/lib/stellar";
+import { fromBaseUnits } from "@/lib/utils";
 
 interface AllowanceItem {
   tokenContractId: string;
@@ -59,7 +60,7 @@ export function OutgoingAllowancesSection({ onRefresh }: OutgoingAllowancesSecti
         try {
           const amount = await fetchTokenAllowance(tokenContractId.trim(), publicKey, spender, networkConfig);
           if (amount === BigInt(0)) return null;
-          const formattedAmount = (Number(amount) / 10 ** tokenInfo.decimals).toFixed(tokenInfo.decimals);
+          const formattedAmount = fromBaseUnits(amount, tokenInfo.decimals);
           return { tokenContractId: tokenContractId.trim(), tokenSymbol: tokenInfo.symbol, spenderAddress: spender, amount: formattedAmount, expirationLedger: ledger + 1000000, isExpired: false };
         } catch { return null; }
       });

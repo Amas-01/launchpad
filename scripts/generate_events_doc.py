@@ -91,13 +91,36 @@ def render_notes(contract_fixture: dict) -> str:
     return "\n" + "\n".join(f"> {n}\n" for n in notes)
 
 
+def contract_names(fixture: dict) -> list[str]:
+    """Every contract documented in the fixture, in file order.
+
+    Keys starting with `$` are metadata (e.g. `$schema_note`), not contracts,
+    so a new contract is picked up just by adding it to docs/events.json.
+    """
+    return [name for name in fixture if not name.startswith("$")]
+
+
+def section_title(name: str, contract_fixture: dict) -> str:
+    return contract_fixture.get("title") or f"{name.capitalize()} Contract"
+
+
+def render_section(name: str, contract_fixture: dict) -> str:
+    topic_cols = max(len(e["topics"]) for e in contract_fixture["events"])
+    return (
+        f"## {section_title(name, contract_fixture)}\n\n"
+        f"{render_table(contract_fixture, topic_cols)}\n"
+        f"{render_notes(contract_fixture)}"
+    )
+
+
 def generate_doc(fixture: dict) -> str:
-    token_topic_cols = max(len(e["topics"]) for e in fixture["token"]["events"])
-    vesting_topic_cols = max(len(e["topics"]) for e in fixture["vesting"]["events"])
+    sections = "\n---\n\n".join(
+        render_section(name, fixture[name]) for name in contract_names(fixture)
+    )
 
     return f"""# Event Schema
 
-All state-changing operations in the token and vesting contracts emit structured
+All state-changing operations in the launchpad's contracts emit structured
 Soroban events. Each event uses `env.events().publish(topics, data)` where
 **topics** is a tuple whose first element is the event name (a `symbol_short!`
 value) and **data** carries the payload.
@@ -110,16 +133,7 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 
 ---
 
-## Token Contract
-
-{render_table(fixture["token"], token_topic_cols)}
-{render_notes(fixture["token"])}
----
-
-## Vesting Contract
-
-{render_table(fixture["vesting"], vesting_topic_cols)}
-{render_notes(fixture["vesting"])}
+{sections}
 ---
 
 ### Conventions
@@ -138,8 +152,8 @@ def main() -> int:
     fixture = json.loads(FIXTURE_PATH.read_text())
 
     problems = []
-    problems += check_source_matches_fixture("token", fixture["token"])
-    problems += check_source_matches_fixture("vesting", fixture["vesting"])
+    for name in contract_names(fixture):
+        problems += check_source_matches_fixture(name, fixture[name])
 
     if problems:
         print("docs/events.json is out of sync with the contract source:", file=sys.stderr)

@@ -6,6 +6,7 @@ import { Client as VestingClient } from "@/lib/bindings/vesting/src/index";
 import type { PreflightCheckResult } from "@/lib/transactionSimulator";
 import type { useTransactionSimulator } from "@/hooks/useTransactionSimulator";
 import type { BatchMintEntry } from "@/lib/batch";
+import { toBaseUnits } from "@/lib/utils";
 import type {
   MintData,
   BurnData,
@@ -107,11 +108,6 @@ export interface AdminActionData {
 
 export type AdminActionKey = keyof AdminActionData;
 
-/** Scale a human-entered decimal string into the token's base units. */
-export function scaleAmount(amount: string, decimals: number): bigint {
-  return BigInt(Math.round(parseFloat(amount) * 10 ** decimals));
-}
-
 /**
  * Encode an optional vesting schedule index as Soroban `Option<u32>`.
  * Soroban represents `None` as a Void ScVal and `Some(n)` as the inner value.
@@ -139,13 +135,13 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Mint",
     resolve: async (data, ctx) => ctx.tokenClient.mint({
       to: data.to,
-      amount: scaleAmount(data.amount, ctx.decimals)
+      amount: toBaseUnits(data.amount, ctx.decimals)
     }),
     preflight: (data, ctx) =>
       ctx.simulator.checkMint(
         ctx.contractId,
         data.to,
-        scaleAmount(data.amount, ctx.decimals),
+        toBaseUnits(data.amount, ctx.decimals),
         ctx.publicKey,
       ),
   },
@@ -154,7 +150,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Batch mint",
     resolve: async (data, ctx) => ctx.tokenClient.mint_batch({
       to: data.entries.map((e) => e.address),
-      amounts: data.entries.map((e) => scaleAmount(e.amount, ctx.decimals))
+      amounts: data.entries.map((e) => toBaseUnits(e.amount, ctx.decimals))
     }),
     preflight: "none",
   },
@@ -163,7 +159,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Clawback",
     resolve: async (data, ctx) => ctx.tokenClient.clawback({
       from: data.from,
-      amount: scaleAmount(data.amount, ctx.decimals)
+      amount: toBaseUnits(data.amount, ctx.decimals)
     }),
   },
 
@@ -171,7 +167,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
     label: "Burn (admin)",
     resolve: async (data, ctx) => ctx.tokenClient.burn_admin({
       from: data.from,
-      amount: scaleAmount(data.amount, ctx.decimals)
+      amount: toBaseUnits(data.amount, ctx.decimals)
     }),
   },
 
@@ -218,7 +214,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
 
       return ctx.getVestingClient(data.vestingContract).create_schedule({
         recipient: data.recipient,
-        total_amount: scaleAmount(data.amount, ctx.decimals),
+        total_amount: toBaseUnits(data.amount, ctx.decimals),
         cliff_ledger: cliffLedger,
         end_ledger: endLedger
       });
@@ -229,7 +225,7 @@ export const ADMIN_ACTIONS: AdminActionRegistry = {
       return ctx.simulator.checkCreateSchedule(
         data.vestingContract,
         data.recipient,
-        scaleAmount(data.amount, ctx.decimals),
+        toBaseUnits(data.amount, ctx.decimals),
         cliffLedger,
         endLedger,
         ctx.publicKey,

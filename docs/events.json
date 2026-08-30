@@ -67,7 +67,7 @@
       },
       {
         "functions": ["revoke_authorization"],
-        "topics": ["rvk_auth", "holder: Address"],
+        "topics": ["rev_auth", "holder: Address"],
         "data": "()"
       },
       {
@@ -88,6 +88,11 @@
       {
         "functions": ["propose_admin"],
         "topics": ["prop_adm", "current_admin: Address", "new_admin: Address"],
+        "data": "()"
+      },
+      {
+        "functions": ["cancel_admin_proposal"],
+        "topics": ["cncl_adm"],
         "data": "()"
       },
       {
@@ -171,6 +176,43 @@
         "topics": ["prune"],
         "data": "recipient: Address",
         "note": "Removes a fully-settled recipient from the enumeration index only; it does not touch the recipient's own schedules."
+      },
+      {
+        "functions": ["upgrade"],
+        "topics": ["upgrade"],
+        "data": "new_wasm_hash: BytesN<32>"
+      },
+      {
+        "functions": ["revoke_admin"],
+        "topics": ["revoked"],
+        "data": "bool (always true)"
+      }
+    ]
+  },
+  "airdrop": {
+    "source": "contracts/airdrop/src/lib.rs",
+    "title": "Airdrop Contract",
+    "events": [
+      {
+        "functions": ["initialize"],
+        "topics": ["init", "admin: Address"],
+        "data": "(token: Address, merkle_root: BytesN<32>, deadline_ledger: u32)"
+      },
+      {
+        "functions": ["fund"],
+        "topics": ["fund", "from: Address"],
+        "data": "amount: i128"
+      },
+      {
+        "functions": ["claim"],
+        "topics": ["claim", "recipient: Address"],
+        "data": "amount: i128",
+        "note": "claim also emits the token contract's own `transfer` event in the same transaction, so a claimed allocation shows up as both events."
+      },
+      {
+        "functions": ["reclaim_unclaimed"],
+        "topics": ["reclaim", "admin: Address"],
+        "data": "amount: i128"
       }
     ]
   }
