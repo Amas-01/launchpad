@@ -36,7 +36,7 @@
 //!    wrapping silently.
 
 use proptest::prelude::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String};
 use soroban_token::{TokenContract, TokenContractClient};
 
 // ---------------------------------------------------------------------------
@@ -494,4 +494,118 @@ fn test_initialize_accepts_decimals_at_boundary() {
     );
 
     assert_eq!(client.decimals(), 18u32);
+}
+
+// ===========================================================================
+// Regression: partial transfer_from / burn_from with above-max-TTL allowance
+// (#344 / #400)
+//
+// approve correctly clamps the TTL it writes but stores the *unclamped*
+// expiration_ledger in AllowanceValue.  transfer_from and burn_from were
+// calling extend_ttl with that unclamped delta, which the host rejects for
+// Temporary entries.  A full spend escaped via the remove() branch; a
+// partial spend always reverted.
+//
+// The test sets the ledger's max_entry_ttl to the real mainnet value
+// (3,110,400) so the default harness ceiling (6,312,000) cannot hide the
+// regression, then asserts that a partial spend succeeds.
+// ===========================================================================
+
+/// Real Soroban mainnet max_entry_ttl (seconds / 5 s per ledger ≈ 180 days).
+const MAINNET_MAX_ENTRY_TTL: u32 = 3_110_400;
+
+/// Approve for 365 days, which is ~6,307,200 ledgers — well above
+/// MAINNET_MAX_ENTRY_TTL.  This is exactly what ApproveForm defaults to
+/// (see issue #400).
+const APPROVE_LEDGERS_365_DAYS: u32 = 365 * 24 * 60 * 60 / 5; // 6,307,200
+
+#[test]
+fn test_partial_transfer_from_succeeds_with_above_max_ttl_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Force max_entry_ttl to the real mainnet value so the harness default
+    // (6,312,000) cannot mask the regression.
+    env.ledger().set_max_entry_ttl(MAINNET_MAX_ENTRY_TTL);
+
+    let id = env.register_contract(None, TokenContract);
+    let client = TokenContractClient::new(&env, &id);
+
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    let initial_supply = 10_000i128;
+    client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "TestToken"),
+        &String::from_str(&env, "TST"),
+        &initial_supply,
+        &None,
+        &false,
+        &false,
+        &None,
+        &None,
+    );
+
+    // Fund the owner account.
+    client.transfer(&admin, &owner, &1_000i128);
+
+    // Approve spender for 1,000 tokens with a 365-day expiry
+    // (6,307,200 ledgers from now — above MAINNET_MAX_ENTRY_TTL).
+    let current = env.ledger().sequence();
+    let expiration = current + APPROVE_LEDGERS_365_DAYS;
+    client.approve(&owner, &spender, &1_000i128, &expiration);
+
+    // Partial spend: take 400.  Before the fix this reverted with
+    // Storage/InvalidAction because extend_ttl was called with a delta that
+    // exceeded max_entry_ttl.
+    let recipient = Address::generate(&env);
+    client.transfer_from(&spender, &owner, &recipient, &400i128);
+
+    assert_eq!(client.balance(&recipient), 400i128);
+    assert_eq!(client.allowance(&owner, &spender), 600i128);
+}
+
+#[test]
+fn test_partial_burn_from_succeeds_with_above_max_ttl_allowance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Same real-mainnet ceiling.
+    env.ledger().set_max_entry_ttl(MAINNET_MAX_ENTRY_TTL);
+
+    let id = env.register_contract(None, TokenContract);
+    let client = TokenContractClient::new(&env, &id);
+
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+
+    let initial_supply = 10_000i128;
+    client.initialize(
+        &admin,
+        &7u32,
+        &String::from_str(&env, "TestToken"),
+        &String::from_str(&env, "TST"),
+        &initial_supply,
+        &None,
+        &false,
+        &false,
+        &None,
+        &None,
+    );
+
+    client.transfer(&admin, &owner, &1_000i128);
+
+    let current = env.ledger().sequence();
+    let expiration = current + APPROVE_LEDGERS_365_DAYS;
+    client.approve(&owner, &spender, &1_000i128, &expiration);
+
+    // Partial burn: destroy 400 of the 1,000 allowance.
+    client.burn_from(&spender, &owner, &400i128);
+
+    assert_eq!(client.balance(&owner), 600i128);
+    assert_eq!(client.allowance(&owner, &spender), 600i128);
 }

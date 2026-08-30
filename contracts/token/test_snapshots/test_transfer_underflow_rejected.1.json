@@ -38,6 +38,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
@@ -355,6 +356,7 @@
                 {
                   "bool": false
                 },
+                "void",
                 "void"
               ]
             }
@@ -481,25 +483,21 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 8
+                }
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'insufficient balance' from contract function 'Symbol(transfer)'"
+                  "string": "failing with contract error"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 1
-                  }
+                  "u32": 8
                 }
               ]
             }
@@ -521,7 +519,32 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 8
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 8
                 }
               }
             ],
@@ -546,7 +569,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
@@ -594,7 +617,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
