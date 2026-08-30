@@ -1,7 +1,14 @@
+import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { fetchTokenInfo, validateTokenContract } from "@/lib/stellar";
+import { isValidContractId } from "@/lib/contractValidation";
 import { NETWORKS, type NetworkType } from "@/types/network";
 import PublicTokenPage from "./PublicTokenPage";
+
+// Cache each token page for 60 seconds, matching the precedent set by the
+// /api/tokens/recent in-memory cache.  Prevents every crawler hit from
+// triggering a fresh RPC round-trip.
+export const revalidate = 60;
 
 interface PageProps {
   params: Promise<{ network: string; contractId: string }>;
@@ -15,12 +22,21 @@ export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
   const { network, contractId } = await params;
+
+  // Reject malformed contract IDs before touching RPC.
+  if (!isValidContractId(contractId)) {
+    return {
+      title: "Invalid Contract ID | SoroPad",
+      description: "The supplied contract ID is not a valid Stellar contract address.",
+    };
+  }
+
   const resolvedNetwork = resolveNetwork(network);
 
   try {
-    // First validate the token contract
+    // SEP-41 compliance check (on-chain) before fetching full token info.
     const validation = await validateTokenContract(contractId, NETWORKS[resolvedNetwork]);
-    
+
     if (!validation.isValid) {
       // Return fallback metadata for invalid contracts
       return {
@@ -78,6 +94,11 @@ export async function generateMetadata({
 
 export default async function PublicTokenPageRoute({ params }: PageProps) {
   const { network, contractId } = await params;
-  
+
+  // Reject malformed contract IDs with a 404 before any RPC work.
+  if (!isValidContractId(contractId)) {
+    notFound();
+  }
+
   return <PublicTokenPage contractId={contractId} network={network} />;
 }

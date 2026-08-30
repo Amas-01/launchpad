@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useCallback } from "react";
 import { Search, ArrowRight, AlertCircle } from "lucide-react";
 import { RecentLaunches } from "./components/RecentLaunches";
-
-const CONTRACT_ID_REGEX = /^C[A-Z2-7]{55}$/;
+import { CONTRACT_ID_REGEX } from "@/lib/contractValidation";
 
 export default function Home() {
   const t = useTranslations("home");
