@@ -65,9 +65,12 @@ export function LocaleProvider({ children }: LocaleProviderProps) {
   const [locale, setLocaleState] = useState<Locale>("en");
   const [messages, setMessages] = useState<AbstractIntlMessages>(MESSAGE_MAP.en);
 
+  // Seed from localStorage only after mount to avoid hydration mismatch; a
+  // lazy initializer would read a different value on server vs client.
   useEffect(() => {
     const storedLocale = getInitialLocale();
     if (storedLocale !== "en") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- external-store seed (localStorage), must run post-hydration
       setLocaleState(storedLocale);
       setMessages(MESSAGE_MAP[storedLocale]);
     }

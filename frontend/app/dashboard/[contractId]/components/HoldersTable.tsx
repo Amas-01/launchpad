@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { ArrowUpDown, Snowflake } from "lucide-react";
 import { type TokenHolder } from "@/lib/stellar";
@@ -86,10 +86,6 @@ export function HoldersTable({
   const endIndex = startIndex + itemsPerPage;
   const paginatedHolders = sorted.slice(startIndex, endIndex);
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery]);
-
   if (holders.length === 0) {
     return (
       <div className="glass-card p-8 text-center text-gray-500">
@@ -112,7 +108,10 @@ export function HoldersTable({
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
               placeholder={t("searchPlaceholder")}
               className="w-full rounded-lg border border-white/10 bg-void-800 px-4 py-2 pl-10 text-sm text-white placeholder-gray-500 outline-none focus:border-stellar-500 focus:ring-1 focus:ring-stellar-500"
               aria-label={t("searchAria")}

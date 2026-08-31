@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Upload, Lock } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -22,6 +22,10 @@ export function VestingUpgradeCard({
 }) {
   const form = useForm<VestingUpgradeData>({
     resolver: zodResolver(vestingUpgradeSchema),
+  });
+  const watchedVestingContract = useWatch({
+    control: form.control,
+    name: "vestingContract",
   });
   const [showConfirm, setShowConfirm] = useState(false);
 
@@ -116,7 +120,7 @@ export function VestingUpgradeCard({
                 <p className="text-xs text-center text-gray-300 leading-relaxed">
                   Type the vesting contract address{" "}
                   <span className="font-mono font-bold text-purple-300">
-                    {form.watch("vestingContract") ?? "C..."}
+                    {watchedVestingContract ?? "C..."}
                   </span>{" "}
                   to confirm you understand this is irreversible.
                 </p>

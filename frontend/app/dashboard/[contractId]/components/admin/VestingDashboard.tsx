@@ -289,6 +289,36 @@ function SortIcon({
   );
 }
 
+// Module-level sortable header cell so it is NOT re-created on every render
+// (react-hooks/static-components). Receives what it needs via props.
+function SortableTh({
+  field,
+  children,
+  className = "",
+  active,
+  dir,
+  onSort,
+}: {
+  field: SortField;
+  children: React.ReactNode;
+  className?: string;
+  active: SortField;
+  dir: SortDir;
+  onSort: (field: SortField) => void;
+}) {
+  return (
+    <th
+      className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-300 ${className}`}
+      onClick={() => onSort(field)}
+    >
+      <span className="inline-flex items-center gap-1">
+        {children}
+        <SortIcon field={field} active={active} dir={dir} />
+      </span>
+    </th>
+  );
+}
+
 function VestingTable({
   rows,
   decimals,
@@ -358,26 +388,6 @@ function VestingTable({
     page * ITEMS_PER_PAGE,
   );
 
-  const Th = ({
-    field,
-    children,
-    className = "",
-  }: {
-    field: SortField;
-    children: React.ReactNode;
-    className?: string;
-  }) => (
-    <th
-      className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-300 ${className}`}
-      onClick={() => toggleSort(field)}
-    >
-      <span className="inline-flex items-center gap-1">
-        {children}
-        <SortIcon field={field} active={sortField} dir={sortDir} />
-      </span>
-    </th>
-  );
-
   return (
     <div className="space-y-3">
       {/* Search */}
@@ -394,14 +404,14 @@ function VestingTable({
         <table className="w-full min-w-[720px] text-sm">
           <thead className="border-b border-white/5 bg-white/2">
             <tr>
-              <Th field="address">Recipient</Th>
-              <Th field="trancheCount" className="text-center">Tranches</Th>
-              <Th field="totalAmount">Total</Th>
-              <Th field="vested">Vested</Th>
-              <Th field="released">Released</Th>
-              <Th field="remaining">Remaining</Th>
-              <Th field="nextUnlockDate">Next unlock</Th>
-              <Th field="status">Status</Th>
+              <SortableTh field="address" active={sortField} dir={sortDir} onSort={toggleSort}>Recipient</SortableTh>
+              <SortableTh field="trancheCount" className="text-center" active={sortField} dir={sortDir} onSort={toggleSort}>Tranches</SortableTh>
+              <SortableTh field="totalAmount" active={sortField} dir={sortDir} onSort={toggleSort}>Total</SortableTh>
+              <SortableTh field="vested" active={sortField} dir={sortDir} onSort={toggleSort}>Vested</SortableTh>
+              <SortableTh field="released" active={sortField} dir={sortDir} onSort={toggleSort}>Released</SortableTh>
+              <SortableTh field="remaining" active={sortField} dir={sortDir} onSort={toggleSort}>Remaining</SortableTh>
+              <SortableTh field="nextUnlockDate" active={sortField} dir={sortDir} onSort={toggleSort}>Next unlock</SortableTh>
+              <SortableTh field="status" active={sortField} dir={sortDir} onSort={toggleSort}>Status</SortableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-white/5">
@@ -553,9 +563,13 @@ export function VestingDashboard({
     initialVestingContractId ?? "",
   );
 
-  // Propagate external prop changes into the input.
+  // Propagate external prop changes into the input. This is the documented
+  // "adjust state when a prop changes" pattern (an admin-editable input seeded
+  // from an external default) — there is no render-time derivation that keeps
+  // the field editable without an effect.
   useEffect(() => {
     if (initialVestingContractId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- prop -> state sync for an editable controlled input
       setVestingInput(initialVestingContractId);
     }
   }, [initialVestingContractId]);

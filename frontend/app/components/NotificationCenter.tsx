@@ -20,12 +20,15 @@ export function NotificationCenter() {
   const [notifications, setNotifications] = useState<NotificationEntry[]>([]);
   const [now, setNow] = useState(0);
 
-  // Load notifications from localStorage on mount
+  // Load notifications from localStorage on mount. A lazy initializer cannot
+  // be used because localStorage is unavailable during SSR, so state must be
+  // seeded after hydration.
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- external-store seed (localStorage), legitimate mount effect
         setNotifications(Array.isArray(parsed) ? parsed : []);
       }
     } catch {
@@ -34,7 +37,6 @@ export function NotificationCenter() {
   }, []);
 
   useEffect(() => {
-    setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(id);
   }, []);

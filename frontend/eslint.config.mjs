@@ -1,17 +1,25 @@
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
+import reactHooks from "eslint-plugin-react-hooks";
 
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
+    plugins: {
+      "react-hooks": reactHooks,
+    },
+    // React Compiler rules are disabled repo-wide without comment (#413).
+    // These rules catch real defects (setState in effects, broken memoization,
+    // incompatible libraries). All hits have been fixed or documented with
+    // inline disables below, so the rules are enabled as errors.
     rules: {
-      "react-hooks/set-state-in-effect": "off",
-      "react-hooks/refs": "off",
-      "react-hooks/static-components": "off",
-      "react-hooks/preserve-manual-memoization": "off",
-      "react-hooks/incompatible-library": "off",
+      "react-hooks/set-state-in-effect": "error",
+      "react-hooks/refs": "error",
+      "react-hooks/static-components": "error",
+      "react-hooks/preserve-manual-memoization": "error",
+      "react-hooks/incompatible-library": "error",
       "no-console": ["error", { "allow": ["warn", "error"] }],
     },
   },

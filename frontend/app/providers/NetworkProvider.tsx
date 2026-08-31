@@ -39,9 +39,13 @@ export function NetworkProvider({ children }: { children: ReactNode }) {
   const [customRpcUrl, setCustomRpcUrlState] = useState<string | null>(null);
   const [customHorizonUrl, setCustomHorizonUrlState] = useState<string | null>(null);
 
+  // Seed persisted network+mounted flag only after mount to avoid hydration
+  // mismatch (localStorage is unavailable during SSR). Legitimate sync with an
+  // external store rather than a cascading render defect.
   useEffect(() => {
     const saved = localStorage.getItem("soropad:network") as NetworkType | null;
     if (saved === "testnet" || saved === "mainnet") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- external-store seed (localStorage), post-hydration only
       setNetworkState(saved);
     }
     setMounted(true);

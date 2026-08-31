@@ -75,7 +75,11 @@ export function useTokenAdminState(read: ReadFn): TokenAdminState {
     setComplianceNode(toAddressString(await read("compliance_node")));
   }, [read]);
 
+  // Kick off the initial on-chain reads. These are async calls that setState
+  // only after an awaited RPC round-trip, so this is a legitimate
+  // fetch-on-mount effect rather than a cascading setState-in-effect.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch-on-mount effect, setState occurs after await
     refreshLocked();
     refreshPaused();
     refreshPendingAdmin();

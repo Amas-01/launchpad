@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Clock } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -25,10 +25,10 @@ export function VestingCard({
   const preflight = admin.preflight.vesting;
 
   // Live values for the vesting curve preview chart.
-  const [watchedCliff, watchedDuration] = form.watch([
-    "cliffDays",
-    "durationDays",
-  ]);
+  const [watchedCliff, watchedDuration] = useWatch({
+    control: form.control,
+    name: ["cliffDays", "durationDays"],
+  });
   const chartCliffDays = Math.max(0, Number(watchedCliff) || 0);
   const chartDurationDays = Math.max(0, Number(watchedDuration) || 0);
 

@@ -9,7 +9,6 @@ import { AccessibilityProvider } from "./providers/AccessibilityProvider";
 import { LocaleProvider } from "./providers/LocaleProvider";
 import { I18nProvider } from "./providers/I18nProvider";
 import { ToastProvider } from "./providers/ToastProvider";
-import { NotificationProvider } from "./providers/NotificationProvider";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Navbar } from "./components/Navbar";
 import { MainnetWarning } from "./components/MainnetWarning";
@@ -53,26 +52,24 @@ export default function RootLayout({
           Skip to main content
         </a>
         <LocaleProvider>
-          <NotificationProvider>
-            <ToastProvider>
-              <I18nProvider>
-                <NetworkProvider>
-                  <SettingsProvider>
-                    <WalletProvider>
-                      <AccessibilityProvider>
-                        <Navbar />
-                        <MainnetWarning />
-                        <main id="main-content" className="pt-16" role="main">
-                          <ErrorBoundary>{children}</ErrorBoundary>
-                        </main>
-                        <Footer />
-                      </AccessibilityProvider>
-                    </WalletProvider>
-                  </SettingsProvider>
-                </NetworkProvider>
-              </I18nProvider>
-            </ToastProvider>
-          </NotificationProvider>
+          <ToastProvider>
+            <I18nProvider>
+              <NetworkProvider>
+                <SettingsProvider>
+                  <WalletProvider>
+                    <AccessibilityProvider>
+                      <Navbar />
+                      <MainnetWarning />
+                      <main id="main-content" className="pt-16" role="main">
+                        <ErrorBoundary>{children}</ErrorBoundary>
+                      </main>
+                      <Footer />
+                    </AccessibilityProvider>
+                  </WalletProvider>
+                </SettingsProvider>
+              </NetworkProvider>
+            </I18nProvider>
+          </ToastProvider>
         </LocaleProvider>
       </body>
     </html>

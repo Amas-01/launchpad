@@ -143,6 +143,11 @@ export const StepAdmin = ({ register, errors, control }: StepProps) => {
                     error={errors.adminAddress?.message as string}
                 />
             ) : (
+                // react-hook-form's `useController` controlled-field props
+                // (value/onChange/onBlur/name/ref) are read onto the input during
+                // render. This is the documented RHF controlled-field pattern; the
+                // compiler cannot model RHF's internal ref handling.
+                /* eslint-disable react-hooks/refs -- RHF controlled field pattern */
                 <Input
                     label="Admin Address or DAO Contract"
                     placeholder="e.g. G... or C..."
@@ -153,6 +158,7 @@ export const StepAdmin = ({ register, errors, control }: StepProps) => {
                     ref={adminAddressField.ref}
                     error={errors.adminAddress?.message as string}
                 />
+                /* eslint-enable react-hooks/refs */
             )}
 
             <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl">
