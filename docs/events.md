@@ -72,15 +72,43 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 
 ## Airdrop Contract
 
-| Function | Topic 0 | Topic 1 | Data |
-|---|---|---|---|
-| `initialize` | `init` | `admin: Address` | (token: Address, merkle_root: BytesN<32>, deadline_ledger: u32) |
-| `fund` | `fund` | `from: Address` | amount: i128 |
-| `claim` | `claim` | `recipient: Address` | amount: i128 |
-| `reclaim_unclaimed` | `reclaim` | `admin: Address` | amount: i128 |
-| `extend_deadline` | `extend` | `admin: Address` | (old_deadline: u32, new_deadline: u32) |
+| Function | Topic 0 | Topic 1 | Topic 2 | Data |
+|---|---|---|---|---|
+| `initialize` | `init` | `admin: Address` | — | (token: Address, merkle_root: BytesN<32>, deadline_ledger: u32) |
+| `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
+| `cancel_admin_proposal` | `cncl_adm` | — | — | () |
+| `accept_admin` | `set_admin` | `old_admin: Address` | `new_admin: Address` | () |
+| `revoke_admin` | `revoked` | — | — | bool (always true) |
+| `pause` | `pause` | — | — | () |
+| `unpause` | `unpause` | — | — | () |
+| `upgrade` | `upgrade` | — | — | new_wasm_hash: BytesN<32> |
+| `fund` | `fund` | `from: Address` | — | amount: i128 |
+| `claim` | `claim` | `recipient: Address` | — | amount: i128 |
+| `reclaim_unclaimed` | `reclaim` | `admin: Address` | — | amount: i128 |
+| `extend_deadline` | `extend` | `admin: Address` | — | (old_deadline: u32, new_deadline: u32) |
+
+> Irreversible. On the airdrop call `reclaim_unclaimed` first — `reclaim_unclaimed` needs an admin to sweep to, so revoking before it strands whatever is still unclaimed.
 
 > claim also emits the token contract's own `transfer` event in the same transaction, so a claimed allocation shows up as both events.
+
+---
+
+## Factory Contract
+
+| Function | Topic 0 | Topic 1 | Topic 2 | Data |
+|---|---|---|---|---|
+| `initialize` | `init` | — | — | admin: Address |
+| `set_token_wasm_hash` | `set_wasm` | — | — | wasm_hash: BytesN<32> |
+| `deploy_token` | `deploy` | `deployer: Address` | `salt: BytesN<32>` | token_address: Address |
+| `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
+| `cancel_admin_proposal` | `cncl_adm` | — | — | () |
+| `accept_admin` | `set_admin` | `old_admin: Address` | `new_admin: Address` | () |
+| `revoke_admin` | `revoked` | — | — | bool (always true) |
+| `pause` | `pause` | — | — | () |
+| `unpause` | `unpause` | — | — | () |
+| `upgrade` | `upgrade` | — | — | new_wasm_hash: BytesN<32> |
+
+> Irreversible. `deploy_token` keeps working against the already-recorded WASM hash — revoking freezes the factory's configuration, not the deployment service.
 
 ---
 

@@ -30,12 +30,8 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "set_token_wasm_hash",
-              "args": [
-                {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
-                }
-              ]
+              "function_name": "revoke_admin",
+              "args": []
             }
           },
           "sub_invocations": []
@@ -81,18 +77,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Admin"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Initialized"
                             }
                           ]
@@ -105,12 +89,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "TokenWasmHash"
+                              "symbol": "Locked"
                             }
                           ]
                         },
                         "val": {
-                          "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                          "bool": true
                         }
                       }
                     ]
@@ -295,12 +279,10 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "set_token_wasm_hash"
+                "symbol": "revoke_admin"
               }
             ],
-            "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
-            }
+            "data": "void"
           }
         }
       },
@@ -315,11 +297,11 @@
           "v0": {
             "topics": [
               {
-                "symbol": "set_wasm"
+                "symbol": "revoked"
               }
             ],
             "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+              "bool": true
             }
           }
         }
@@ -338,7 +320,7 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "set_token_wasm_hash"
+                "symbol": "revoke_admin"
               }
             ],
             "data": "void"
@@ -362,7 +344,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "get_token_wasm_hash"
+                "symbol": "get_admin"
               }
             ],
             "data": "void"
@@ -380,14 +362,108 @@
           "v0": {
             "topics": [
               {
-                "symbol": "fn_return"
+                "symbol": "error"
               },
               {
-                "symbol": "get_token_wasm_hash"
+                "error": {
+                  "contract": 4
+                }
               }
             ],
             "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+              "vec": [
+                {
+                  "string": "failing with contract error"
+                },
+                {
+                  "u32": 4
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 4
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 4
+                }
+              }
+            ],
+            "data": {
+              "string": "caught error from function"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 4
+                }
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "string": "contract try_call failed"
+                },
+                {
+                  "symbol": "get_admin"
+                },
+                {
+                  "vec": []
+                }
+              ]
             }
           }
         }
