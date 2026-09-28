@@ -78,6 +78,7 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `fund` | `fund` | `from: Address` | amount: i128 |
 | `claim` | `claim` | `recipient: Address` | amount: i128 |
 | `reclaim_unclaimed` | `reclaim` | `admin: Address` | amount: i128 |
+| `extend_deadline` | `extend` | `admin: Address` | (old_deadline: u32, new_deadline: u32) |
 
 > claim also emits the token contract's own `transfer` event in the same transaction, so a claimed allocation shows up as both events.
 

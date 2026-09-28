@@ -31,8 +31,9 @@ The airdrop module replaces that with a Merkle claim:
 | Function | Auth | Purpose |
 | --- | --- | --- |
 | `initialize(token, admin, merkle_root, deadline_ledger)` | admin | Publish the airdrop. One-shot. |
-| `fund(from, amount)` | `from` | Move tokens into the contract so there is something to claim. |
+| `fund(from, amount)` | `from` | Move tokens into the contract so there is something to claim. Refused once the airdrop is reclaimed. |
 | `claim(recipient, amount, proof)` | recipient | Claim an allocation against a proof. |
+| `extend_deadline(deadline_ledger)` | admin | Push the deadline further out for a second round. Bounded, and refused once reclaimed. |
 | `reclaim_unclaimed()` | admin | After the deadline, sweep the remainder back to the admin. Returns the amount swept. |
 | `verify_proof(recipient, amount, proof)` | — | Read-only: is this proof accepted? |
 | `is_claimed(recipient)` / `claimed_amount(recipient)` | — | Read-only claim state. |
@@ -52,15 +53,16 @@ The airdrop module replaces that with a Merkle claim:
 | 6 | `InvalidProof` | The proof does not authenticate `(recipient, amount)`. |
 | 7 | `DeadlinePassed` | `claim` after the deadline. |
 | 8 | `DeadlineNotReached` | `reclaim_unclaimed` at or before the deadline. |
-| 9 | `AlreadyReclaimed` | The remainder was already swept. |
+| 9 | `AlreadyReclaimed` | The airdrop was reclaimed, which is final: `reclaim_unclaimed`, `fund` and `extend_deadline` all refuse after it. |
 | 10 | `NothingToReclaim` | Nothing left to sweep. |
 | 11 | `ProofTooLong` | Proof longer than 32 hashes. |
 | 12 | `AddressTooLong` | Recipient strkey longer than 64 bytes. |
 | 13 | `AmountOverflow` | `total_claimed` would overflow `i128`. |
+| 14 | `DeadlineTooFar` | `extend_deadline` beyond the extension bound (current ledger + 2 × the original horizon). |
 
 ### Events
 
-See [`events.md`](./events.md) — `init`, `fund`, `claim`, `reclaim`.
+See [`events.md`](./events.md) — `init`, `fund`, `claim`, `reclaim`, `extend`.
 
 ---
 
@@ -134,9 +136,21 @@ the airdrop silently becoming unclaimable.
 
 4. **Publish and fund.** Point the page at a deployed airdrop contract, set the
    deadline ledger, publish the root, then fund the contract with the total.
+   Under-funded? `fund` again whenever you need to — including after the
+   deadline, provided it has been extended first so the second round has
+   somewhere to claim against.
 
-5. **Reclaim.** After the deadline, call `reclaim_unclaimed()` to sweep the
-   remainder back.
+5. **Extend the deadline (optional).** Running out of time? Before
+   reclaiming, call `extend_deadline(new_deadline)` to push the deadline out
+   and keep claims open — then top up with `fund` and let a second round run
+   on the same deployment. The new deadline must be in the future, must move
+   forward only, and can reach at most the current ledger + 2 × the horizon
+   `initialize` was given; going further needs a new contract.
+
+6. **Reclaim.** After the deadline, call `reclaim_unclaimed()` to sweep the
+   remainder back. This closes the airdrop for good: `fund` and
+   `extend_deadline` both refuse with `AlreadyReclaimed` afterwards, so a
+   reclaimed contract takes a redeploy rather than a top-up.
 
 ---
 
@@ -171,7 +185,10 @@ stellar contract deploy \
 ```
 
 Deploy a fresh contract per airdrop: `initialize` is one-shot, so a contract
-is bound to a single root and deadline for its lifetime.
+is bound to a single root for its lifetime. The deadline is the part that can
+still move — `extend_deadline` pushes it out while the airdrop is open — but
+once `reclaim_unclaimed` has closed the contract there is no way to fund it
+again, and a new deployment is the only option.
 
 ---
 
@@ -181,6 +198,21 @@ is bound to a single root and deadline for its lifetime.
 treasury is topped up, and so an under-funded airdrop can be topped up again
 without redeploying. Nothing stops an admin transferring to the contract
 address directly; `fund` just makes it one flow and emits an event to index.
+
+**Why does `fund` refuse once the airdrop is reclaimed?** Because reclaiming
+is single-shot: a reclaimed contract has no function that can move tokens out
+of it again, so every token accepted after the sweep would be stuck there
+until an upgrade this contract does not have. The invariant is that the
+contract never holds a balance it cannot move — a closed airdrop takes a
+redeploy, not a top-up. That is also why `extend_deadline` refuses: reopening
+the claim window would make `fund` look safe again while the balance is still
+unmovable.
+
+**Why is `extend_deadline` bounded?** So a second round can run on the same
+deployment without the deadline becoming unbounded. The new deadline must be
+in the future, must move forward only (it is a promise to recipients), and
+can reach at most the current ledger + 2 × the horizon `initialize` was
+called with — a one-week airdrop can be given two weeks, not a decade.
 
 **Why is `claim` marked before the transfer?** Checks-effects-interactions: the
 claim marker is written before any value moves, so a re-entrant token callback

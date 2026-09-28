@@ -346,6 +346,8 @@
     "fundSuccess": "空投已注资",
     "fundSuccessMessage": "合约现已持有全部分配额度。",
     "fundFailed": "无法为空投注资",
+    "fundClosedTitle": "空投已被回收",
+    "fundClosedMessage": "回收是最终操作：该合约已无法再注资或重新开放。请部署新的空投合约以进行第二轮。",
     "invalidContractId": "合约 ID 无效",
     "invalidContractIdMessage": "请输入有效的 Soroban 合约 ID（56 个字符，以 C 开头）。",
     "invalidDeadline": "截止账本无效",

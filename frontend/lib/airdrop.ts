@@ -332,6 +332,34 @@ export async function submitTx(
   throw new Error("Transaction timed out waiting for confirmation");
 }
 
+/* ── Contract errors ─────────────────────────────────────────────── */
+
+/** `AirdropError::AlreadyReclaimed`, from `contracts/airdrop/src/lib.rs`. */
+const ALREADY_RECLAIMED = 9;
+
+/**
+ * Whether `err` is the airdrop saying it has been closed by
+ * `reclaim_unclaimed`.
+ *
+ * Reclaiming is single-shot, so a closed contract can neither be funded
+ * again nor have its deadline pushed out — anything accepted after the sweep
+ * would be stranded in a contract with no function left to move it. The
+ * only answer that works is a fresh deployment, which is what the UI says.
+ *
+ * Soroban reports contract failures as `Error(Contract, #9)` without naming
+ * the contract, so this may only be read where the airdrop itself is the
+ * contract that failed. In `fund` that holds: the sole other contract it
+ * invokes is the token, whose `transfer` never consults the allowance entry
+ * carrying the token's own `#9`.
+ */
+export function isAirdropClosedError(err: unknown): boolean {
+  const message =
+    typeof err === "string" ? err : err instanceof Error ? err.message : "";
+  return new RegExp(`Error\\(Contract,\\s*#${ALREADY_RECLAIMED}\\)`).test(
+    message,
+  );
+}
+
 /* ── Formatting ────────────────────────────────────────────────────── */
 
 /** Format a raw i128 token amount with decimals (default 7 for Stellar). */
