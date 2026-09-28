@@ -1,0 +1,9 @@
+Add these errors after line 47 (RecipientNotTracked):
+    /// Recipient has unsettled schedules (must fully vest and release before pruning).
+    RecipientNotSettled = 18,
+    /// Overflow in ledger arithmetic (e.g., extend_cliff delta too large).
+    LedgerOverflow = 19,
+    /// Admin proposal to current admin (self-proposal not allowed).
+    AlreadyAdmin = 20,
+    /// Admin proposal has expired.
+    ProposalExpired = 21,
