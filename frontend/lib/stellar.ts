@@ -900,9 +900,24 @@ async function resolveVestingScheduleIndex(params: {
   return { scheduleIndex: scheduleCount - 1, scheduleCount };
 }
 
+/** Entries per `get_schedules_paginated` call. Matches the dashboard page size. */
+const SCHEDULE_PAGE_SIZE = 20;
+
 /**
- * Fetch all vesting schedules for a recipient using the aggregate getter.
+ * Fetch all vesting schedules for a recipient.
  * Replaces the N+1 pattern (get_schedule_count + N × get_schedule).
+ *
+ * Pages through `get_schedules_paginated` rather than calling
+ * `get_all_schedules` (#466). The contract caps a recipient at
+ * `MAX_SCHEDULES_PER_RECIPIENT` schedules, so the aggregate getter is now
+ * bounded — but one response carrying the whole set still costs a simulation
+ * proportional to their total grants, and the dashboard renders a screenful at
+ * a time. Paging keeps each response small and per-call work constant as
+ * grants accumulate.
+ *
+ * Pages are followed until one comes back shorter than the page size, which is
+ * the only reliable "no more" signal: a short page can still be followed by
+ * more entries.
  */
 export async function fetchAllVestingSchedules(
   vestingContractId: string,
@@ -910,16 +925,38 @@ export async function fetchAllVestingSchedules(
   config: NetworkConfig,
 ): Promise<VestingScheduleInfo[]> {
   const recipientScVal = new StellarSdk.Address(recipient).toScVal();
-  const result = await simulateCall(
+
+  // Callers use `scheduleCount` for "x of y", so it has to be the recipient's
+  // real total rather than the size of whichever page happened to land last.
+  const scheduleCount = await fetchVestingScheduleCount(
     vestingContractId,
-    "get_all_schedules",
+    recipient,
     config,
-    [recipientScVal],
   );
+  if (scheduleCount <= 0) {
+    return [];
+  }
 
   const schedules: VestingScheduleInfo[] = [];
-  const vec = result.vec();
-  if (vec) {
+  for (let start = 0; start < scheduleCount; start += SCHEDULE_PAGE_SIZE) {
+    const result = await simulateCall(
+      vestingContractId,
+      "get_schedules_paginated",
+      config,
+      [
+        recipientScVal,
+        nativeToScVal(BigInt(start), { type: "u32" }),
+        nativeToScVal(BigInt(SCHEDULE_PAGE_SIZE), { type: "u32" }),
+      ],
+    );
+
+    const vec = result.vec();
+    if (!vec || vec.length === 0) {
+      // The count said there was more; a short read here means the index moved
+      // under us. Stop rather than spin.
+      break;
+    }
+
     for (let i = 0; i < vec.length; i++) {
       const fields = vec[i].map()!;
       schedules.push({
@@ -929,8 +966,10 @@ export async function fetchAllVestingSchedules(
         endLedger: decodeU32(getStructField(fields, "end_ledger")),
         released: decodeI128(getStructField(fields, "released")),
         revoked: getStructField(fields, "revoked").b(),
-        scheduleIndex: i,
-        scheduleCount: vec.length,
+        // Global index, not page-relative: this value is passed back to
+        // `release`, which addresses schedules absolutely.
+        scheduleIndex: start + i,
+        scheduleCount,
       });
     }
   }
