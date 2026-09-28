@@ -388,16 +388,19 @@ impl TokenContract {
     /// Burn `amount` tokens from the caller's own balance. Refuses to
     /// run when the account is frozen so a holder cannot dodge a freeze
     /// by destroying tokens.
+    ///
+    /// **Alias for `burn`, not a second implementation of it.** `burn` is the
+    /// SEP-41 entry point; this name is not, and it is not on the standard
+    /// for any wallet to discover. The two were byte-identical including their
+    /// doc comments, which made the choice between them arbitrary at the API
+    /// surface and doubled the test suite over one body (#107, #468).
+    ///
+    /// Retained because the launchpad's own UI calls this name
+    /// (`buildBurnTransaction` in `frontend/lib/stellar.ts`). Forwarding keeps
+    /// that working with `burn` as the single implementation and `burn`'s
+    /// suite as the single test suite.
     pub fn burn_self(env: Env, from: Address, amount: i128) {
-        Self::_check_paused(&env);
-        from.require_auth();
-        if amount <= 0 {
-            panic_with_error!(&env, TokenError::InvalidAmount);
-        }
-        if Self::_is_frozen(&env, &from) {
-            panic_with_error!(&env, TokenError::Frozen);
-        }
-        Self::_burn(&env, &from, amount);
+        Self::burn(env, from, amount)
     }
 
     /// Propose a new admin. Must be called by the current admin.
@@ -760,38 +763,7 @@ impl TokenContract {
         Self::_check_compliance(&env, &from, &to);
         Self::_check_authorized(&env, &to);
 
-        let key = DataKey::Allowance(from.clone(), spender.clone());
-        let current_ledger = env.ledger().sequence();
-        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
-        let allowance = match &stored {
-            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
-            _ => 0,
-        };
-        if allowance < amount {
-            panic_with_error!(&env, TokenError::InsufficientAllowance);
-        }
-
-        let remaining = allowance - amount;
-        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
-        if remaining > 0 {
-            let value = AllowanceValue {
-                amount: remaining,
-                expiration_ledger,
-            };
-            env.storage().temporary().set(&key, &value);
-            // Clamp to max_ttl so the host does not reject the extend_ttl call
-            // for temporary entries whose expiration_ledger was approved past
-            // the network ceiling (fixes the partial-spend revert — see #344).
-            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
-                .min(env.storage().max_ttl());
-            if ttl_ledgers > 0 {
-                env.storage()
-                    .temporary()
-                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
-            }
-        } else {
-            env.storage().temporary().remove(&key);
-        }
+        Self::_spend_allowance(&env, &spender, &from, amount);
 
         Self::_transfer(&env, &from, &to, amount);
 
@@ -816,36 +788,7 @@ impl TokenContract {
         assert!(amount > 0, "amount must be positive");
         assert!(!Self::_is_frozen(&env, &from), "account is frozen");
 
-        let key = DataKey::Allowance(from.clone(), spender.clone());
-        let current_ledger = env.ledger().sequence();
-        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
-        let allowance = match &stored {
-            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
-            _ => 0,
-        };
-        assert!(allowance >= amount, "insufficient allowance");
-
-        let remaining = allowance - amount;
-        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
-        if remaining > 0 {
-            let value = AllowanceValue {
-                amount: remaining,
-                expiration_ledger,
-            };
-            env.storage().temporary().set(&key, &value);
-            // Clamp to max_ttl so the host does not reject the extend_ttl call
-            // for temporary entries whose expiration_ledger was approved past
-            // the network ceiling (fixes the partial-spend revert — see #344).
-            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
-                .min(env.storage().max_ttl());
-            if ttl_ledgers > 0 {
-                env.storage()
-                    .temporary()
-                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
-            }
-        } else {
-            env.storage().temporary().remove(&key);
-        }
+        Self::_spend_allowance(&env, &spender, &from, amount);
 
         Self::_burn(&env, &from, amount);
     }
@@ -1294,6 +1237,68 @@ impl TokenContract {
             .unwrap_or_else(|| env.current_contract_address());
         env.events()
             .publish((symbol_short!("mint"), admin, to.clone()), amount);
+    }
+
+    /// Consume `amount` of `spender`'s allowance on `from`.
+    ///
+    /// `transfer_from` and `burn_from` differ only in what they do with the
+    /// tokens afterwards, but the whole allowance path — the guard, the
+    /// temporary-storage read, the expiry comparison, the remaining-allowance
+    /// rewrite, the `max_ttl` clamp and the zero-case removal — is identical
+    /// and used to be written out twice. That duplication is not cosmetic: it
+    /// is why the #344 `max_ttl` clamp had to be applied in two places, and
+    /// it means any future fix to this path has to be remembered in both
+    /// functions (issue #467).
+    ///
+    /// An expired or absent entry reads as an allowance of zero, per SEP-41
+    /// ("an expired entry … should be treated as a 0 amount allowance"), so
+    /// both the `allowance` getter and this spend agree on the same rule.
+    ///
+    /// **Precondition:** the caller has already rejected `amount <= 0`. That
+    /// is what keeps the `expect` honest — with no entry the allowance is 0,
+    /// and 0 is already `< amount`, so `InsufficientAllowance` is raised
+    /// before the unwrap can be reached. A future caller that skips the
+    /// positive-amount check would turn it into a panic instead.
+    ///
+    /// Note this preserves `expiration_ledger` on a partial spend, so a
+    /// spender cannot extend an allowance's life by spending it — SEP-41:
+    /// "Reduces the allowance by `amount` without changing when it expires."
+    fn _spend_allowance(env: &Env, spender: &Address, from: &Address, amount: i128) {
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        let current_ledger = env.ledger().sequence();
+        let stored: Option<AllowanceValue> = env.storage().temporary().get(&key);
+        let allowance = match &stored {
+            Some(v) if v.expiration_ledger >= current_ledger => v.amount,
+            _ => 0,
+        };
+        if allowance < amount {
+            panic_with_error!(env, TokenError::InsufficientAllowance);
+        }
+
+        let remaining = allowance - amount;
+        let expiration_ledger = stored.expect("allowance checked above").expiration_ledger;
+        if remaining > 0 {
+            let value = AllowanceValue {
+                amount: remaining,
+                expiration_ledger,
+            };
+            env.storage().temporary().set(&key, &value);
+            // Clamp to max_ttl so the host does not reject the extend_ttl call
+            // for temporary entries whose expiration_ledger was approved past
+            // the network ceiling (fixes the partial-spend revert — see #344).
+            let ttl_ledgers =
+                (expiration_ledger.saturating_sub(current_ledger)).min(env.storage().max_ttl());
+            if ttl_ledgers > 0 {
+                env.storage()
+                    .temporary()
+                    .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
+            }
+        } else {
+            // Spending the allowance down to zero is a revocation, so the
+            // entry is removed rather than left as a 0-amount, still-dated
+            // record.
+            env.storage().temporary().remove(&key);
+        }
     }
 
     fn _burn(env: &Env, from: &Address, amount: i128) {
@@ -1835,12 +1840,53 @@ mod test {
         );
     }
 
+    /// `burn_self` is a non-SEP-41 alias for `burn` (#468). Its only purpose is
+    /// to keep the name working for the launchpad's own UI, which calls it
+    /// from `buildBurnTransaction` in `frontend/lib/stellar.ts` — so the thing
+    /// worth testing is that it still reaches `burn`, not that it has its own
+    /// behaviour. `test_burn` and the rest of that suite cover the behaviour
+    /// itself; the five near-duplicate `burn_self` suites that used to sit
+    /// alongside them were deleted.
     #[test]
-    fn test_burn_self() {
-        let (_, client, _, user) = setup();
-        client.mint(&user, &1000i128);
-        client.burn_self(&user, &500i128);
-        assert_eq!(client.balance(&user), 500i128);
+    fn test_burn_self_forwards_to_burn() {
+        let (env, client, admin, user) = setup();
+        client.transfer(&admin, &user, &1_000i128);
+
+        let supply_before = client.total_supply();
+        client.burn_self(&user, &400i128);
+
+        assert_eq!(client.balance(&user), 600i128);
+        assert_eq!(client.total_supply(), supply_before - 400i128);
+        assert_eq!(client.total_burned(), 400i128);
+
+        // Same rejection paths as `burn`, because it is the same code path.
+        assert_eq!(
+            client.try_burn_self(&user, &0i128),
+            Err(Ok(TokenError::InvalidAmount.into()))
+        );
+        client.freeze_account(&user);
+        assert_eq!(
+            client.try_burn_self(&user, &100i128),
+            Err(Ok(TokenError::Frozen.into()))
+        );
+
+        // The forwarded call really is `burn`: the same failure surfaces for
+        // both, which is the whole point of collapsing them.
+        let other = Address::generate(&env);
+        client.transfer(&admin, &other, &10i128);
+        assert_eq!(
+            client.try_burn_self(&other, &0i128),
+            client.try_burn(&other, &0i128)
+        );
+    }
+
+    #[test]
+    fn test_burn_rejects_zero() {
+        let (_, client, admin, _) = setup();
+        assert_eq!(
+            client.try_burn(&admin, &0i128),
+            Err(Ok(TokenError::InvalidAmount.into()))
+        );
     }
 
     #[test]
@@ -1976,49 +2022,6 @@ mod test {
     }
 
     #[test]
-    fn test_burn_self_reduces_balance_and_supply() {
-        let (_, client, admin, user) = setup();
-        // Admin sends some tokens to user, who then burns them themselves.
-        client.transfer(&admin, &user, &5_000_000_000_i128);
-        let supply_before = client.total_supply();
-
-        client.burn_self(&user, &2_000_000_000_i128);
-
-        assert_eq!(client.balance(&user), 3_000_000_000_i128);
-        assert_eq!(client.total_supply(), supply_before - 2_000_000_000_i128);
-    }
-
-    #[test]
-    fn test_burn_self_rejects_zero() {
-        let (_, client, _, user) = setup();
-        assert_eq!(
-            client.try_burn_self(&user, &0i128),
-            Err(Ok(TokenError::InvalidAmount.into()))
-        );
-    }
-
-    #[test]
-    fn test_burn_self_insufficient_balance() {
-        let (_, client, _, user) = setup();
-        // user has zero balance; should fail.
-        assert_eq!(
-            client.try_burn_self(&user, &1i128),
-            Err(Ok(TokenError::InsufficientBalance.into()))
-        );
-    }
-
-    #[test]
-    fn test_burn_self_blocked_when_frozen() {
-        let (_, client, admin, user) = setup();
-        client.transfer(&admin, &user, &1_000i128);
-        client.freeze_account(&user);
-        assert_eq!(
-            client.try_burn_self(&user, &500i128),
-            Err(Ok(TokenError::Frozen.into()))
-        );
-    }
-
-    #[test]
     fn test_burn_blocked_when_frozen() {
         let (_, client, admin, user) = setup();
         client.transfer(&admin, &user, &1_000i128);
@@ -2068,6 +2071,117 @@ mod test {
         );
     }
 
+    // ── `_spend_allowance` — the four branches of the shared allowance path ──
+    //
+    // `transfer_from` and `burn_from` both delegate here (#467), so the logic
+    // is covered once, against the helper, and each entry point's own tests
+    // only have to cover where the tokens go. The helper writes to temporary
+    // storage belonging to the contract, so it has to be driven through
+    // `env.as_contract` to get at the real entries.
+    //
+    // The two panicking branches are asserted through the public `try_*`
+    // surface rather than by calling the helper directly: that is the same
+    // panic either way, but it also lets the test prove nothing was written
+    // on the way out, which a `should_panic` test cannot check.
+
+    #[test]
+    fn test_spend_allowance_leaves_remainder_and_preserves_expiry() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        let contract_id = client.address.clone();
+
+        client.approve(&admin, &spender, &1_000i128, &1_000u32);
+
+        // Sufficient branch: a partial spend rewrites the entry at the
+        // reduced amount. SEP-41 requires the expiry to be left alone — a
+        // spender must not be able to extend an allowance's life by using it
+        // — which `allowance()` alone cannot show, because it reports 0 for
+        // an expired entry as well as for a missing one.
+        env.as_contract(&contract_id, || {
+            TokenContract::_spend_allowance(&env, &spender, &admin, 400i128);
+        });
+
+        assert_eq!(client.allowance(&admin, &spender), 600i128);
+        env.as_contract(&contract_id, || {
+            let stored: Option<AllowanceValue> = env
+                .storage()
+                .temporary()
+                .get(&DataKey::Allowance(admin.clone(), spender.clone()));
+            let stored = stored.expect("a partial spend must leave an entry behind");
+            assert_eq!(stored.amount, 600i128);
+            assert_eq!(stored.expiration_ledger, 1_000u32);
+        });
+    }
+
+    #[test]
+    fn test_spend_allowance_zeroing_out_removes_the_entry() {
+        let (env, client, admin, _) = setup();
+        let spender = Address::generate(&env);
+        let contract_id = client.address.clone();
+
+        client.approve(&admin, &spender, &500i128, &1_000u32);
+
+        // Zeroing branch: spending the allowance down to exactly zero is a
+        // revocation, so the entry is deleted rather than left behind as a
+        // 0-amount record with a live expiry. `allowance()` returns 0 for
+        // both shapes, so the removal itself has to be asserted.
+        env.as_contract(&contract_id, || {
+            TokenContract::_spend_allowance(&env, &spender, &admin, 500i128);
+        });
+
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+        env.as_contract(&contract_id, || {
+            assert!(!env
+                .storage()
+                .temporary()
+                .has(&DataKey::Allowance(admin.clone(), spender.clone())));
+        });
+    }
+
+    #[test]
+    fn test_spend_allowance_rejects_insufficient_without_touching_state() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        // Insufficient branch: the guard fires before any write, so the
+        // allowance survives intact and no tokens move.
+        client.approve(&admin, &spender, &10i128, &1_000u32);
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &11i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
+        assert_eq!(client.allowance(&admin, &spender), 10i128);
+        assert_eq!(client.balance(&user), 0i128);
+        assert_eq!(client.balance(&admin), 10_000_000_000_000_i128);
+    }
+
+    #[test]
+    fn test_spend_allowance_treats_expired_entry_as_zero() {
+        let (env, client, admin, user) = setup();
+        let spender = Address::generate(&env);
+
+        // Expired branch: SEP-41 says an expired entry reads as a 0 amount
+        // allowance, so the same guard as above fires — and it is the reason
+        // the helper's `expect("allowance checked above")` is safe to keep
+        // even though `stored` is `None` here.
+        client.approve(&admin, &spender, &1_000i128, &100u32);
+        env.ledger().set_sequence_number(101);
+
+        assert_eq!(client.allowance(&admin, &spender), 0i128);
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &1i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
+
+        // A large amount fails for the same reason, not by exhausting the
+        // allowance arithmetic: the guard is the expiry, and the read is
+        // genuinely 0.
+        assert_eq!(
+            client.try_transfer_from(&spender, &admin, &user, &999_999i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
+    }
+
     #[test]
     fn test_transfer_from_exceeds_allowance() {
         let (env, client, admin, user) = setup();
@@ -2102,13 +2216,27 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "insufficient allowance")]
     fn test_burn_from_exceeds_allowance() {
         let (env, client, admin, _) = setup();
         let spender = Address::generate(&env);
 
         client.approve(&admin, &spender, &10i128, &1000u32);
-        client.burn_from(&spender, &admin, &11i128);
+        // The allowance path is now shared with `transfer_from` (#467), so a
+        // short allowance surfaces as the typed `InsufficientAllowance` rather
+        // than a panic string. Asserting the code — the same way
+        // `transfer_from`'s own test does — is what makes it a contract for
+        // clients to depend on, and it is exactly what a release WASM with
+        // panic messages stripped would report.
+        assert_eq!(
+            client.try_burn_from(&spender, &admin, &11i128),
+            Err(Ok(TokenError::InsufficientAllowance.into()))
+        );
+        // The rejected spend must leave both the allowance and the balances
+        // untouched, not half-applied.
+        assert_eq!(client.allowance(&admin, &spender), 10i128);
+        assert_eq!(client.balance(&admin), 10_000_000_000_000_i128);
+        assert_eq!(client.total_supply(), 10_000_000_000_000_i128);
+        assert_eq!(client.total_burned(), 0i128);
     }
 
     #[test]
