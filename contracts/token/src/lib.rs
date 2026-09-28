@@ -143,6 +143,8 @@ pub enum TokenError {
     ContractUriNotSet = 22,
     /// A storage getter was called before `initialize`.
     NotInitialized = 23,
+    /// `revoke_admin` requires the compliance node to be cleared first.
+    ComplianceNodeMustBeCleared = 24,
 }
 
 #[contractclient(name = "ComplianceNodeClient")]
@@ -369,7 +371,7 @@ impl TokenContract {
         if to.len() > 100 {
             panic_with_error!(&env, TokenError::BatchTooLarge);
         }
-        let ttl_ledgers = 52 * 7 * 24 * 60 / 5; // ~52 weeks (assuming 5-second ledgers)
+        let ttl_ledgers = Self::_ttl_ledgers(&env);
         for i in 0..to.len() {
             let recipient = to.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
@@ -479,8 +481,11 @@ impl TokenContract {
     /// - The Admin storage entry is removed and a `Locked` flag is set.
     /// - `is_locked()` returns `true` from then on.
     ///
-    /// Holders can still `transfer`, `approve`, `transfer_from`, `burn`,
-    /// and `burn_self`. The token becomes trustless / immutable.
+    /// A configured compliance node must be cleared first. Its failure mode is
+    /// fail-closed, and no administrator remains after this call to clear it.
+    /// Once revocation succeeds, holders can still `transfer`, `approve`,
+    /// `transfer_from`, `burn`, and `burn_self`; the token becomes trustless /
+    /// immutable.
     ///
     /// Any max-balance-per-account cap set via
     /// [`set_max_balance_per_account`](Self::set_max_balance_per_account) is
@@ -489,6 +494,9 @@ impl TokenContract {
     /// **This action is irreversible.**
     pub fn revoke_admin(env: Env) {
         Self::_require_admin(&env);
+        if env.storage().instance().has(&DataKey::ComplianceNode) {
+            panic_with_error!(&env, TokenError::ComplianceNodeMustBeCleared);
+        }
         env.storage().instance().set(&DataKey::Locked, &true);
         env.storage().instance().remove(&DataKey::Admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
@@ -505,9 +513,9 @@ impl TokenContract {
     /// pull tokens from a frozen account back to the admin.
     pub fn freeze_account(env: Env, addr: Address) {
         Self::_require_admin(&env);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Frozen(addr.clone()), &true);
+        let key = DataKey::Frozen(addr.clone());
+        env.storage().persistent().set(&key, &true);
+        Self::_touch_policy_entry(&env, &key);
         env.events().publish((symbol_short!("freeze"), addr), ());
     }
 
@@ -538,9 +546,9 @@ impl TokenContract {
     /// `authorization_required` is enabled. Admin only.
     pub fn authorize_holder(env: Env, holder: Address) {
         Self::_require_admin(&env);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AuthorizedHolder(holder.clone()), &true);
+        let key = DataKey::AuthorizedHolder(holder.clone());
+        env.storage().persistent().set(&key, &true);
+        Self::_touch_policy_entry(&env, &key);
         env.events()
             .publish((symbol_short!("authorize"), holder), ());
     }
@@ -575,10 +583,12 @@ impl TokenContract {
         if !required {
             return true;
         }
-        env.storage()
-            .persistent()
-            .get(&DataKey::AuthorizedHolder(holder))
-            .unwrap_or(false)
+        let key = DataKey::AuthorizedHolder(holder);
+        let authorized = env.storage().persistent().get(&key).unwrap_or(false);
+        if authorized {
+            Self::_touch_policy_entry(&env, &key);
+        }
+        authorized
     }
 
     /// Returns `true` if this token requires holders to be authorized before
@@ -782,8 +792,8 @@ impl TokenContract {
             // Clamp to max_ttl so the host does not reject the extend_ttl call
             // for temporary entries whose expiration_ledger was approved past
             // the network ceiling (fixes the partial-spend revert — see #344).
-            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
-                .min(env.storage().max_ttl());
+            let ttl_ledgers =
+                (expiration_ledger.saturating_sub(current_ledger)).min(env.storage().max_ttl());
             if ttl_ledgers > 0 {
                 env.storage()
                     .temporary()
@@ -836,8 +846,8 @@ impl TokenContract {
             // Clamp to max_ttl so the host does not reject the extend_ttl call
             // for temporary entries whose expiration_ledger was approved past
             // the network ceiling (fixes the partial-spend revert — see #344).
-            let ttl_ledgers = (expiration_ledger.saturating_sub(current_ledger))
-                .min(env.storage().max_ttl());
+            let ttl_ledgers =
+                (expiration_ledger.saturating_sub(current_ledger)).min(env.storage().max_ttl());
             if ttl_ledgers > 0 {
                 env.storage()
                     .temporary()
@@ -1083,14 +1093,12 @@ impl TokenContract {
             .get(&DataKey::AuthorizationRequired)
             .unwrap_or(false);
         if required {
-            let authorized: bool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::AuthorizedHolder(holder.clone()))
-                .unwrap_or(false);
+            let key = DataKey::AuthorizedHolder(holder.clone());
+            let authorized: bool = env.storage().persistent().get(&key).unwrap_or(false);
             if !authorized {
                 panic_with_error!(env, TokenError::NotAuthorizedHolder);
             }
+            Self::_touch_policy_entry(env, &key);
         }
     }
 
@@ -1116,6 +1124,16 @@ impl TokenContract {
         TTL_LEDGERS.min(env.storage().max_ttl())
     }
 
+    /// Keep a persistent compliance-policy entry alive after it is written or
+    /// successfully read. Blacklist and allowlist keys share this helper so a
+    /// new policy cannot silently fall back to the host's short minimum TTL.
+    fn _touch_policy_entry(env: &Env, key: &DataKey) {
+        let ttl_ledgers = Self::_ttl_ledgers(env);
+        env.storage()
+            .persistent()
+            .extend_ttl(key, ttl_ledgers, ttl_ledgers);
+    }
+
     fn _require_not_locked(env: &Env) {
         let locked: bool = env
             .storage()
@@ -1128,10 +1146,12 @@ impl TokenContract {
     }
 
     fn _is_frozen(env: &Env, addr: &Address) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Frozen(addr.clone()))
-            .unwrap_or(false)
+        let key = DataKey::Frozen(addr.clone());
+        let frozen = env.storage().persistent().get(&key).unwrap_or(false);
+        if frozen {
+            Self::_touch_policy_entry(env, &key);
+        }
+        frozen
     }
 
     fn _check_paused(env: &Env) {
@@ -2353,6 +2373,19 @@ mod test {
         assert_eq!(client.balance(&user), 1_000i128);
     }
 
+    #[test]
+    fn test_frozen_entry_survives_the_minimum_persistent_ttl() {
+        let (env, client, _, user) = setup();
+        let min_ttl = env.ledger().get().min_persistent_entry_ttl;
+
+        client.freeze_account(&user);
+        // A bare persistent `set` would archive at this point. The freeze
+        // policy must instead retain the clamped long-lived TTL.
+        env.ledger().set_sequence_number(min_ttl + 1);
+
+        assert!(client.is_frozen(&user));
+    }
+
     // ── Revoke admin / lock tests ───────────────────────────────────────
 
     #[test]
@@ -2361,6 +2394,23 @@ mod test {
         assert!(!client.is_locked());
         client.revoke_admin();
         assert!(client.is_locked());
+    }
+
+    #[test]
+    fn test_revoke_admin_requires_compliance_node_to_be_cleared() {
+        let (env, client, admin, user) = setup();
+        let node = register_good_node(&env);
+        client.set_compliance_node(&Some(node));
+
+        assert_eq!(
+            client.try_revoke_admin(),
+            Err(Ok(TokenError::ComplianceNodeMustBeCleared.into()))
+        );
+
+        client.set_compliance_node(&None);
+        client.revoke_admin();
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
     }
 
     #[test]
@@ -2903,6 +2953,19 @@ mod test {
         assert!(client.is_authorized(&user));
         client.transfer(&admin, &user, &1_000_000_000_i128);
         assert_eq!(client.balance(&user), 1_000_000_000_i128);
+    }
+
+    #[test]
+    fn test_authorized_holder_survives_the_minimum_persistent_ttl() {
+        let (env, client, _, user) = setup_with_auth_required();
+        let min_ttl = env.ledger().get().min_persistent_entry_ttl;
+
+        client.authorize_holder(&user);
+        // A newly written persistent allowlist entry only gets this short
+        // lifetime unless authorize_holder extends it explicitly.
+        env.ledger().set_sequence_number(min_ttl + 1);
+
+        assert!(client.is_authorized(&user));
     }
 
     #[test]
