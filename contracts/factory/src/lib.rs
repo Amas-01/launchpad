@@ -9,26 +9,25 @@ use soroban_sdk::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Soroban's network-enforced ceiling on how far into the future a ledger
-/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
-/// network config; 6,312,000 ledgers on mainnet). Passing a value above
-/// this fails the transaction.
-const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
-
-/// TTL extension applied to deployment records so a factory that has been
-/// idle for a while never silently loses its index.
+/// Desired lifetime for the ledger entries this contract keeps alive:
+/// about a year, assuming Stellar's ~5s ledger close time.
 ///
-/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
-/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
-/// will accept.
-const TTL_LEDGERS: u32 = {
-    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
-    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
-        YEAR_LEDGERS as u32
-    } else {
-        MAX_ENTRY_TTL_LEDGERS
-    }
-};
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers.
+///
+/// This is only a *request*. The effective window is whatever the network
+/// allows — `env.storage().max_ttl()`, read at call time — and every
+/// `extend_ttl` site clamps to it. On testnet and mainnet today
+/// `max_entry_ttl` is 3,110,400 ledgers (a network setting, changed by
+/// validator vote), so a deployment record actually lives **about 180
+/// days, not a year**. Each deployment refreshes the count key, but not
+/// records written earlier, so a factory idle that long loses its index.
+///
+/// Deliberately not compared against a hardcoded ceiling: the previous
+/// constant here (6,312,000) was the soroban-sdk *test harness* default
+/// (`soroban-sdk/src/env.rs`), not a network value, so the clamp it fed
+/// could never fire. The test environment still reports 6,312,000, which is
+/// why no test in this file asserts a specific network figure.
+const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -322,6 +321,18 @@ impl FactoryContract {
             .unwrap_or(0)
     }
 
+    /// The TTL to request for a deployment record: our desired window, capped
+    /// at what the network will actually honour.
+    ///
+    /// `soroban-env-host` silently lowers an over-long `extend_ttl` on a
+    /// persistent entry rather than erroring, so an unclamped call is not a
+    /// hard failure — it just quietly gets you a shorter entry than the code
+    /// appears to ask for. Clamping here keeps the requested and effective
+    /// values the same, so the archival window is legible from the source.
+    fn _ttl_ledgers(env: &Env) -> u32 {
+        TTL_LEDGERS.min(env.storage().max_ttl())
+    }
+
     fn _record_deployment(env: &Env, token: &Address) {
         let count = Self::_deployment_count(env);
 
@@ -331,7 +342,7 @@ impl FactoryContract {
         let count_key = DataKey::DeploymentCount;
         env.storage().persistent().set(&count_key, &(count + 1));
 
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(env);
         env.storage()
             .persistent()
             .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
