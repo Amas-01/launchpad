@@ -1,7 +1,7 @@
 {
   "generators": {
-    "address": 3,
-    "nonce": 1
+    "address": 2,
+    "nonce": 0
   },
   "auth": [
     [
@@ -23,6 +23,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -123,38 +124,6 @@
             "ext": "v0"
           },
           6311999
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-            "key": "ledger_key_contract_instance",
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-                "key": "ledger_key_contract_instance",
-                "durability": "persistent",
-                "val": {
-                  "contract_instance": {
-                    "executable": {
-                      "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                    },
-                    "storage": null
-                  }
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
         ]
       ],
       [
@@ -263,7 +232,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "set_token_wasm_hash"
+                "symbol": "propose_token_wasm_hash"
               }
             ],
             "data": {
@@ -287,17 +256,17 @@
               },
               {
                 "error": {
-                  "auth": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
             "data": {
               "vec": [
                 {
-                  "string": "Unauthorized function call for address"
+                  "string": "failing with contract error"
                 },
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "u32": 8
                 }
               ]
             }
@@ -319,7 +288,7 @@
               },
               {
                 "error": {
-                  "auth": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
@@ -344,7 +313,7 @@
               },
               {
                 "error": {
-                  "auth": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
@@ -369,7 +338,7 @@
               },
               {
                 "error": {
-                  "auth": "invalid_action"
+                  "contract": 8
                 }
               }
             ],
@@ -379,7 +348,7 @@
                   "string": "contract try_call failed"
                 },
                 {
-                  "symbol": "set_token_wasm_hash"
+                  "symbol": "propose_token_wasm_hash"
                 },
                 {
                   "vec": [
@@ -390,6 +359,51 @@
                 }
               ]
             }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "pending_token_wasm_hash"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "pending_token_wasm_hash"
+              }
+            ],
+            "data": "void"
           }
         }
       },
