@@ -44,15 +44,21 @@ export default function ActivityFeed({
   vestingContractId?: string;
 }) {
   const { fetchAccountOperations } = useSoroban();
-  const { events: liveEvents } = useContractEvents(accountId, {
-    intervalMs: 10000,
-    vestingContractId,
-  });
   const [operations, setOperations] = useState<TokenActivityInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [liveStartLedger, setLiveStartLedger] = useState<number>();
+  const { events: liveEvents, droppedEventCount } = useContractEvents(
+    accountId,
+    {
+      intervalMs: 10000,
+      vestingContractId,
+      enabled: !loading,
+      startLedger: liveStartLedger,
+    },
+  );
 
   // Use refs to avoid closure stale state in intervals
   const cursorRef = useRef<string | null>(null);
@@ -83,6 +89,12 @@ export default function ActivityFeed({
           // If refresh, we might want to smartly prepend, but replacing is simpler for pagination reset.
           // Actually, just leaving it be or updating if head is different is better UX.
           setOperations(records);
+          setLiveStartLedger(
+            records.reduce(
+              (latest, record) => Math.max(latest, record.ledger ?? 0),
+              0,
+            ) || undefined,
+          );
         }
 
         if (!isRefresh || isLoadMore) {
@@ -134,7 +146,13 @@ export default function ActivityFeed({
   if (operations.length === 0) {
     return (
       <div className="glass-card p-8 text-center text-sm text-gray-500">
-        No token activity found for this account/contract.
+        <p>No token activity found for this account/contract.</p>
+        {droppedEventCount > 0 && (
+          <p className="mt-2 text-amber-400">
+            The contract emitted {droppedEventCount} event
+            {droppedEventCount === 1 ? "" : "s"} this app does not decode.
+          </p>
+        )}
       </div>
     );
   }

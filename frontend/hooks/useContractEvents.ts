@@ -14,6 +14,10 @@ import {
 
 interface UseContractEventsOptions {
   intervalMs?: number;
+  /** Ledger of the newest event already loaded by the paged activity feed. */
+  startLedger?: number;
+  /** Delay polling until the paged activity feed has completed its first load. */
+  enabled?: boolean;
   /**
    * Vesting contract to poll alongside the token, when the token has one.
    * Its events are decoded as vesting events and typed `vesting:*`.
@@ -32,6 +36,45 @@ interface RpcEvent {
   txHash?: string;
 }
 
+interface RpcEventPage {
+  events?: RpcEvent[];
+}
+
+type GetEvents = (request: unknown) => Promise<RpcEventPage>;
+
+/** Drain event pages without advancing past a saturated page. */
+export async function collectContractEventPages(
+  getEvents: GetEvents,
+  rpc: unknown,
+  startLedger: number,
+  filters: unknown[],
+  initialCursor?: string,
+  maxPages = 20,
+): Promise<{ events: RpcEvent[]; nextCursor?: string }> {
+  const events: RpcEvent[] = [];
+  let cursor = initialCursor;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const response = await getEvents.call(rpc, {
+      startLedger,
+      filters,
+      pagination: { limit: 100, ...(cursor ? { cursor } : {}) },
+    });
+    const pageEvents = response?.events ?? [];
+    events.push(...pageEvents);
+
+    if (pageEvents.length < 100) return { events };
+
+    const nextCursor = pageEvents.at(-1)?.pagingToken;
+    if (!nextCursor || nextCursor === cursor) {
+      throw new Error("Saturated getEvents page did not advance its cursor");
+    }
+    cursor = nextCursor;
+  }
+
+  return { events, nextCursor: cursor };
+}
+
 /**
  * Poll a token contract — and optionally the vesting contract holding its
  * tokens — for new events.
@@ -48,13 +91,22 @@ export function useContractEvents(
   const { networkConfig } = useNetwork();
   const [events, setEvents] = useState<TokenActivityInfo[]>([]);
   const [error, setError] = useState<Error | null>(null);
+  const [droppedEventCount, setDroppedEventCount] = useState(0);
 
   const vestingContractId = options?.vestingContractId;
   const startLedgerRef = useRef<number | null>(null);
+  const cursorRef = useRef<string | undefined>(undefined);
   const intervalMs = options?.intervalMs ?? 10000;
+  const initialStartLedger = options?.startLedger;
+  const enabled = options?.enabled ?? true;
 
   useEffect(() => {
-    if (!contractId || !networkConfig?.rpcUrl) return;
+    if (!enabled || !contractId || !networkConfig?.rpcUrl) return;
+
+    startLedgerRef.current = initialStartLedger ?? null;
+    cursorRef.current = undefined;
+    setEvents([]);
+    setDroppedEventCount(0);
 
     /** Which contract an event came from, so the decoder can disambiguate. */
     const sourceOf = (id: string | undefined): ActivitySource =>
@@ -67,7 +119,7 @@ export function useContractEvents(
     const rpc = new StellarSdk.rpc.Server(networkConfig.rpcUrl);
     const getEvents = (
       rpc as unknown as {
-        getEvents?: (req: unknown) => Promise<{ events?: RpcEvent[] }>;
+        getEvents?: GetEvents;
       }
     ).getEvents;
 
@@ -80,20 +132,6 @@ export function useContractEvents(
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let isPolling = false;
 
-    const safeGetEvents = async (startLedger: number) => {
-      try {
-        const response = await getEvents.call(rpc, {
-          startLedger,
-          filters: [{ type: "contract", contractIds: watchedIds }],
-          pagination: { limit: 100 },
-        });
-        return response?.events ?? [];
-      } catch (err) {
-        console.error("Error polling getEvents:", err);
-        return [];
-      }
-    };
-
     const poll = async () => {
       if (!isMounted || isPolling) return;
       isPolling = true;
@@ -104,11 +142,19 @@ export function useContractEvents(
           startLedgerRef.current = sequence;
         }
 
-        const rawEvents = await safeGetEvents(startLedgerRef.current);
+        const pageResult = await collectContractEventPages(
+          getEvents,
+          rpc,
+          startLedgerRef.current,
+          [{ type: "contract", contractIds: watchedIds }],
+          cursorRef.current,
+        );
+        const rawEvents = pageResult.events;
 
         if (!isMounted) return;
 
         const newRecords: TokenActivityInfo[] = [];
+        let dropped = 0;
         let maxLedgerSeen = startLedgerRef.current;
 
         for (const evt of rawEvents) {
@@ -116,7 +162,10 @@ export function useContractEvents(
           if (evtLedger > maxLedgerSeen) maxLedgerSeen = evtLedger;
 
           const topics = readEventTopics(evt);
-          if (topics.length === 0) continue;
+          if (topics.length === 0) {
+            dropped += 1;
+            continue;
+          }
 
           const rawValue =
             (evt as { value?: unknown; data?: unknown }).value ??
@@ -135,16 +184,22 @@ export function useContractEvents(
             },
             sourceOf(evt.contractId),
           );
-          if (!record) continue;
+          if (!record || record.type === "other") {
+            dropped += 1;
+            continue;
+          }
 
           record.pagingToken = evt.pagingToken ?? "";
 
           newRecords.push(record);
         }
 
-        if (maxLedgerSeen >= startLedgerRef.current) {
+        cursorRef.current = pageResult.nextCursor;
+        if (!pageResult.nextCursor && maxLedgerSeen >= startLedgerRef.current) {
           startLedgerRef.current = maxLedgerSeen + 1;
         }
+
+        if (dropped > 0) setDroppedEventCount((count) => count + dropped);
 
         if (newRecords.length > 0) {
           setEvents((prev: TokenActivityInfo[]) => {
@@ -153,7 +208,12 @@ export function useContractEvents(
               (r: TokenActivityInfo) => !addedIds.has(r.id),
             );
             if (uniqueNew.length === 0) return prev;
-            return [...uniqueNew.reverse(), ...prev];
+            return [...uniqueNew, ...prev].sort(
+              (a, b) =>
+                (b.ledger ?? 0) - (a.ledger ?? 0) ||
+                Date.parse(b.timestamp) - Date.parse(a.timestamp) ||
+                b.id.localeCompare(a.id),
+            );
           });
         }
 
@@ -173,7 +233,7 @@ export function useContractEvents(
       isMounted = false;
       if (timerId) clearInterval(timerId);
     };
-  }, [contractId, vestingContractId, networkConfig, intervalMs]);
+  }, [contractId, vestingContractId, networkConfig, intervalMs, initialStartLedger, enabled]);
 
-  return { events, error };
+  return { events, error, droppedEventCount };
 }
