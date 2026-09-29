@@ -28,7 +28,20 @@ export const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
 /** Everything the claim page needs about an airdrop, in one shot. */
 export interface AirdropInfo {
   token: string;
-  admin: string;
+  /**
+   * The current admin, or `null` when there is none.
+   *
+   * `get_admin` panics once `revoke_admin` has removed the entry, so a locked
+   * airdrop reads back as "no admin" rather than failing the whole page —
+   * recipients still need the rest of this data to claim.
+   */
+  admin: string | null;
+  /** The wallet a two-step transfer is waiting on, or `null`. */
+  pendingAdmin: string | null;
+  /** True once `revoke_admin` has permanently locked the contract. */
+  isLocked: boolean;
+  /** True while claims, funding and sweeping are halted. */
+  isPaused: boolean;
   merkleRoot: string;
   deadlineLedger: number;
   currentLedger: number;
@@ -68,6 +81,11 @@ function decodeBool(val: StellarSdk.xdr.ScVal): boolean {
 
 function decodeBytes(val: StellarSdk.xdr.ScVal): string {
   return Buffer.from(val.bytes()).toString("hex");
+}
+
+/** A Soroban `Option<Address>`: `void` for `None`, an address for `Some`. */
+function decodeOptionAddress(val: StellarSdk.xdr.ScVal): string | null {
+  return val.switch().name === "scvVoid" ? null : decodeAddress(val);
 }
 
 function toAddressScVal(address: string): StellarSdk.xdr.ScVal {
@@ -134,13 +152,24 @@ async function simulateCall(
   return result.retval;
 }
 
-/** Fetch an airdrop's configuration and live totals. */
+/**
+ * Fetch an airdrop's configuration and live totals.
+ *
+ * The three admin getters added by the admin surface degrade to their
+ * "nothing pending / not locked / not paused" values when they cannot be
+ * read, so a deployment predating them still renders. `get_admin` is treated
+ * the same way for the reason documented on `AirdropInfo.admin`. Everything
+ * else is fatal: if `get_token` fails, the address is not an airdrop.
+ */
 export async function fetchAirdropInfo(
   contractId: string,
 ): Promise<AirdropInfo> {
   const [
     token,
     admin,
+    pendingAdmin,
+    isLocked,
+    isPaused,
     merkleRoot,
     deadlineLedger,
     totalClaimed,
@@ -149,7 +178,14 @@ export async function fetchAirdropInfo(
     latestLedger,
   ] = await Promise.all([
     simulateCall(contractId, "get_token").then(decodeAddress),
-    simulateCall(contractId, "get_admin").then(decodeAddress),
+    simulateCall(contractId, "get_admin")
+      .then(decodeAddress)
+      .catch(() => null),
+    simulateCall(contractId, "pending_admin")
+      .then(decodeOptionAddress)
+      .catch(() => null),
+    simulateCall(contractId, "is_locked").then(decodeBool).catch(() => false),
+    simulateCall(contractId, "is_paused").then(decodeBool).catch(() => false),
     simulateCall(contractId, "get_merkle_root").then(decodeBytes),
     simulateCall(contractId, "get_deadline_ledger").then(decodeU32),
     simulateCall(contractId, "total_claimed").then(decodeI128),
@@ -161,6 +197,9 @@ export async function fetchAirdropInfo(
   return {
     token,
     admin,
+    pendingAdmin,
+    isLocked,
+    isPaused,
     merkleRoot,
     deadlineLedger,
     currentLedger: latestLedger.sequence,
@@ -301,6 +340,77 @@ export async function buildReclaimTx(
   return prepare(admin, contract.call("reclaim_unclaimed"));
 }
 
+/** Build an `extend_deadline(deadline_ledger)` transaction. */
+export async function buildExtendDeadlineTx(
+  contractId: string,
+  admin: string,
+  deadlineLedger: number,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(
+    admin,
+    contract.call("extend_deadline", toU32ScVal(deadlineLedger)),
+  );
+}
+
+/** Build a `propose_admin(new_admin)` transaction, signed by the admin. */
+export async function buildProposeAdminTx(
+  contractId: string,
+  admin: string,
+  newAdmin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(
+    admin,
+    contract.call("propose_admin", toAddressScVal(newAdmin)),
+  );
+}
+
+/** Build an `accept_admin()` transaction, signed by the pending admin. */
+export async function buildAcceptAdminTx(
+  contractId: string,
+  pendingAdmin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(pendingAdmin, contract.call("accept_admin"));
+}
+
+/** Build a `cancel_admin_proposal()` transaction, signed by the admin. */
+export async function buildCancelAdminProposalTx(
+  contractId: string,
+  admin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(admin, contract.call("cancel_admin_proposal"));
+}
+
+/** Build a `revoke_admin()` transaction. Irreversible. */
+export async function buildRevokeAdminTx(
+  contractId: string,
+  admin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(admin, contract.call("revoke_admin"));
+}
+
+/** Build a `pause()` transaction. */
+export async function buildPauseTx(
+  contractId: string,
+  admin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(admin, contract.call("pause"));
+}
+
+/** Build an `unpause()` transaction. */
+export async function buildUnpauseTx(
+  contractId: string,
+  admin: string,
+): Promise<string> {
+  const contract = new StellarSdk.Contract(contractId);
+  return prepare(admin, contract.call("unpause"));
+}
+
 /** Submit a signed transaction XDR and wait for confirmation. */
 export async function submitTx(
   signedXdr: string,
@@ -330,6 +440,77 @@ export async function submitTx(
   }
 
   throw new Error("Transaction timed out waiting for confirmation");
+}
+
+/* ── Contract errors ─────────────────────────────────────────────── */
+
+/**
+ * Error numbers from `AirdropError` in `contracts/airdrop/src/lib.rs`.
+ *
+ * Every variant is listed, not just the ones the UI can explain, because
+ * `lib/__tests__/airdrop.test.ts` compares this table against the Rust enum
+ * — a variant added there has to be added here too.
+ *
+ * Soroban reports these as `Error(Contract, #n)` with no contract name, so a
+ * number only means "the airdrop said this" where the airdrop is the sole
+ * contract that could have failed. Callers that also touch the token —
+ * `fund` and `reclaim_unclaimed` — must not read a code as theirs without
+ * the checks documented on [`airdropErrorCode`].
+ */
+export const AirdropErrorCode = {
+  AlreadyInitialized: 1,
+  NotInitialized: 2,
+  InvalidDeadline: 3,
+  InvalidAmount: 4,
+  AlreadyClaimed: 5,
+  InvalidProof: 6,
+  DeadlinePassed: 7,
+  DeadlineNotReached: 8,
+  AlreadyReclaimed: 9,
+  NothingToReclaim: 10,
+  ProofTooLong: 11,
+  AddressTooLong: 12,
+  AmountOverflow: 13,
+  DeadlineTooFar: 14,
+  Locked: 15,
+  Paused: 16,
+  NoPendingAdmin: 17,
+  ProposalExpired: 18,
+  InvalidWasmHash: 19,
+  InvalidAdmin: 20,
+} as const;
+
+/**
+ * The contract error number carried by `err`, or `null` when it carries none.
+ *
+ * Matches both the simulation form (`Simulation failed: HostError:
+ * Error(Contract, #9)`) and the submission form (`Transaction failed
+ * on-chain` has no number at all, so it yields `null`).
+ */
+export function airdropErrorCode(err: unknown): number | null {
+  const message =
+    typeof err === "string" ? err : err instanceof Error ? err.message : "";
+  const match = /Error\(Contract,\s*#(\d+)\)/.exec(message);
+  return match === null ? null : Number(match[1]);
+}
+
+/**
+ * Whether `err` is the airdrop saying it has been closed by
+ * `reclaim_unclaimed`.
+ *
+ * Reclaiming is single-shot, so a closed contract can neither be funded
+ * again nor have its deadline pushed out — anything accepted after the sweep
+ * would be stranded in a contract with no function left to move it. The
+ * only answer that works is a fresh deployment, which is what the UI says.
+ *
+ * Soroban reports contract failures as `Error(Contract, #9)` without naming
+ * the contract, so this may only be read where the airdrop itself is the
+ * contract that failed. In `fund` that holds: the sole other contract it
+ * invokes is the token, whose `transfer` never consults the allowance entry
+ * carrying the token's own `#9`.
+ */
+export function isAirdropClosedError(err: unknown): boolean {
+  return airdropErrorCode(err) === AirdropErrorCode.AlreadyReclaimed;
 }
 
 /* ── Formatting ────────────────────────────────────────────────────── */

@@ -234,36 +234,63 @@ export async function fetchReleasedAmount(
   return decodeI128(result);
 }
 
-/** Fetch all vesting schedules from the contract (single call, no N+1). */
+/** Entries per `get_schedules_paginated` call. Matches the dashboard page size. */
+const SCHEDULE_PAGE_SIZE = 20;
+
+/**
+ * Fetch all vesting schedules for a recipient.
+ *
+ * Pages through `get_schedules_paginated` rather than calling
+ * `get_all_schedules` (#466). The contract caps a recipient at
+ * `MAX_SCHEDULES_PER_RECIPIENT` schedules, so the aggregate getter is now
+ * bounded — but one response carrying the whole set still costs the recipient
+ * a simulation proportional to their total grants, and the UI only renders a
+ * screenful at a time. Paging keeps each response small and the per-call work
+ * constant as grants accumulate.
+ *
+ * Pages are followed until one comes back shorter than the page size, which is
+ * the only reliable "no more" signal: a short page can still be followed by
+ * more entries.
+ */
 export async function fetchAllVestingSchedules(
   contractId: string,
   recipientAddress: string,
 ): Promise<VestingSchedule[]> {
   const addressVal = new StellarSdk.Address(recipientAddress).toScVal();
-  const result = await simulateCall(contractId, "get_all_schedules", [
-    addressVal,
-  ]);
-
   const schedules: VestingSchedule[] = [];
-  const vec = result.vec();
-  if (vec) {
-    for (const entry of vec) {
-      const fields = entry.map();
-      if (!fields) continue;
-      const fieldMap = new Map<string, StellarSdk.xdr.ScVal>();
-      for (const f of fields) {
-        fieldMap.set(f.key().sym().toString(), f.val());
+
+  for (let start = 0; ; start += SCHEDULE_PAGE_SIZE) {
+    const result = await simulateCall(contractId, "get_schedules_paginated", [
+      addressVal,
+      toU32ScVal(start),
+      toU32ScVal(SCHEDULE_PAGE_SIZE),
+    ]);
+
+    const page = result.vec();
+    const decoded: VestingSchedule[] = [];
+    if (page) {
+      for (const entry of page) {
+        const fields = entry.map();
+        if (!fields) continue;
+        const fieldMap = new Map<string, StellarSdk.xdr.ScVal>();
+        for (const f of fields) {
+          fieldMap.set(f.key().sym().toString(), f.val());
+        }
+        decoded.push({
+          recipient: decodeAddress(fieldMap.get("recipient")!),
+          totalAmount: decodeI128(fieldMap.get("total_amount")!),
+          cliffLedger: decodeU32(fieldMap.get("cliff_ledger")!),
+          endLedger: decodeU32(fieldMap.get("end_ledger")!),
+          released: decodeI128(fieldMap.get("released")!),
+          revoked: decodeBool(fieldMap.get("revoked")!),
+        });
       }
-      schedules.push({
-        recipient: decodeAddress(fieldMap.get("recipient")!),
-        totalAmount: decodeI128(fieldMap.get("total_amount")!),
-        cliffLedger: decodeU32(fieldMap.get("cliff_ledger")!),
-        endLedger: decodeU32(fieldMap.get("end_ledger")!),
-        released: decodeI128(fieldMap.get("released")!),
-        revoked: decodeBool(fieldMap.get("revoked")!),
-      });
     }
+
+    schedules.push(...decoded);
+    if (decoded.length < SCHEDULE_PAGE_SIZE) break;
   }
+
   return schedules;
 }
 

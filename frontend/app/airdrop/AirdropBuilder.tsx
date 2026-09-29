@@ -20,6 +20,7 @@ import {
   buildFundTx,
   buildInitializeTx,
   formatTokenAmount,
+  isAirdropClosedError,
   submitTx,
 } from "@/lib/airdrop";
 
@@ -202,9 +203,17 @@ export function AirdropBuilder() {
         variant: "success",
       });
     } catch (err) {
+      // A reclaimed airdrop refuses `fund` rather than swallowing tokens it
+      // can never move again — send the admin to redeploy instead of at a
+      // raw `Error(Contract, #9)`.
+      const closed = isAirdropClosedError(err);
       toast.show({
-        title: t("fundFailed"),
-        message: err instanceof Error ? err.message : t("fundFailed"),
+        title: closed ? t("fundClosedTitle") : t("fundFailed"),
+        message: closed
+          ? t("fundClosedMessage")
+          : err instanceof Error
+            ? err.message
+            : t("fundFailed"),
         variant: "error",
       });
     } finally {
