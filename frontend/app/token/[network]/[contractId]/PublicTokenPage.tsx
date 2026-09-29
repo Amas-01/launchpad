@@ -17,6 +17,7 @@ import {
   type TokenHolder,
   type WalletTokenState,
 } from "@/lib/stellar";
+import { isValidContractId } from "@/lib/contractValidation";
 import { useSoroban } from "@/hooks/useSoroban";
 import { useNetwork } from "@/app/providers/NetworkProvider";
 import { useWallet } from "@/app/hooks/useWallet";
@@ -29,6 +30,13 @@ import InvalidTokenContract from "../../../components/InvalidTokenContract";
 // ---------------------------------------------------------------------------
 type SortField = "address" | "balance" | "sharePercent";
 type SortDir = "asc" | "desc";
+
+type ContractValidationState =
+  | { status: "checking" }
+  | { status: "not-a-contract"; error?: string }
+  | { status: "no-token-interface"; error?: string }
+  | { status: "valid" }
+  | { status: "transport-error"; error: string };
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -341,6 +349,7 @@ export default function PublicTokenPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isValidToken, setIsValidToken] = useState<boolean | null>(null);
+  const [validationState, setValidationState] = useState<ContractValidationState>({ status: "checking" });
 
   useEffect(() => {
     setNetwork(network === "mainnet" ? "mainnet" : "testnet");
@@ -350,6 +359,7 @@ export default function PublicTokenPage({
     setLoading(true);
     setError(null);
     setIsValidToken(null);
+    setValidationState({ status: "checking" });
 
     try {
       // First validate the token contract
@@ -357,12 +367,25 @@ export default function PublicTokenPage({
       
       if (!validation.isValid) {
         setIsValidToken(false);
-        setError(validation.error || "Invalid token contract");
+        const message = validation.error || "Invalid token contract";
+        setError(message);
+        // Distinguish "not a contract" from "a contract without a token interface"
+        // so the UI can render the appropriate copy instead of a generic error.
+        if (/not a contract|no contract|not found|missing/i.test(message)) {
+          setValidationState({ status: "not-a-contract", error: message });
+        } else if (/token interface|name\(\)|symbol\(\)|decimals\(\)|not a token/i.test(message)) {
+          setValidationState({ status: "no-token-interface", error: message });
+        } else if (/rpc|network|timeout|unreachable|fetch/i.test(message)) {
+          setValidationState({ status: "transport-error", error: message });
+        } else {
+          setValidationState({ status: "no-token-interface", error: message });
+        }
         setLoading(false);
         return;
       }
 
       setIsValidToken(true);
+      setValidationState({ status: "valid" });
 
       // If validation passes, fetch token info
       const info = await fetchTokenInfo(contractId);
@@ -376,12 +399,14 @@ export default function PublicTokenPage({
       if (err instanceof Error && err.message.includes("Invalid token contract")) {
         setIsValidToken(false);
         setError(err.message);
+        setValidationState({ status: "no-token-interface", error: err.message });
       } else {
-        setError(
+        const message =
           err instanceof Error
             ? err.message
-            : "Failed to fetch token data. Please check the contract ID and try again.",
-        );
+            : "Failed to fetch token data. Please check the contract ID and try again.";
+        setError(message);
+        setValidationState({ status: "transport-error", error: message });
       }
     } finally {
       setLoading(false);
@@ -412,9 +437,23 @@ export default function PublicTokenPage({
 
   if (loading) return <LoadingState />;
   
-  // Show invalid token component if validation failed
-  if (isValidToken === false) {
-    return <InvalidTokenContract contractId={contractId} error={error || undefined} />;
+  // Cheap pre-flight: reject anything that is not even shaped like a contract ID.
+  if (!isValidContractId(contractId)) {
+    return (
+      <InvalidTokenContract
+        contractId={contractId}
+        error="This does not look like a Stellar contract ID."
+      />
+    );
+  }
+
+  // Show invalid token component if validation failed, distinguishing the
+  // "not a contract" case from the "contract without a token interface" case.
+  if (validationState.status === "not-a-contract") {
+    return <InvalidTokenContract contractId={contractId} error={validationState.error} />;
+  }
+  if (validationState.status === "no-token-interface") {
+    return <InvalidTokenContract contractId={contractId} error={validationState.error} />;
   }
   
   if (error) return <ErrorState message={error} onRetry={loadData} />;
