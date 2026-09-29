@@ -346,6 +346,8 @@
     "fundSuccess": "Airdrop financiado",
     "fundSuccessMessage": "El contrato ya contiene la asignación completa.",
     "fundFailed": "No se pudo financiar el airdrop",
+    "fundClosedTitle": "Airdrop ya recuperado",
+    "fundClosedMessage": "Recuperarlo es definitivo: este contrato ya no puede recibir fondos ni reabrirse. Despliega un contrato de airdrop nuevo para una segunda ronda.",
     "invalidContractId": "ID de contrato no válido",
     "invalidContractIdMessage": "Introduce un ID de contrato Soroban válido (56 caracteres, empieza por C).",
     "invalidDeadline": "Fecha límite no válida",

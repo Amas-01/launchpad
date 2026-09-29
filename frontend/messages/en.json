@@ -346,6 +346,8 @@
     "fundSuccess": "Airdrop funded",
     "fundSuccessMessage": "The contract now holds the full allocation.",
     "fundFailed": "Could not fund the airdrop",
+    "fundClosedTitle": "Airdrop already reclaimed",
+    "fundClosedMessage": "Reclaiming is final: this contract can no longer be funded or re-opened. Deploy a fresh airdrop contract for a second round.",
     "invalidContractId": "Invalid contract ID",
     "invalidContractIdMessage": "Enter a valid Soroban contract ID (56 characters, starts with C).",
     "invalidDeadline": "Invalid deadline",

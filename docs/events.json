@@ -213,6 +213,11 @@
         "functions": ["reclaim_unclaimed"],
         "topics": ["reclaim", "admin: Address"],
         "data": "amount: i128"
+      },
+      {
+        "functions": ["extend_deadline"],
+        "topics": ["extend", "admin: Address"],
+        "data": "(old_deadline: u32, new_deadline: u32)"
       }
     ]
   }

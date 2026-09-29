@@ -346,6 +346,8 @@
     "fundSuccess": "Airdrop approvisionné",
     "fundSuccessMessage": "Le contrat détient désormais l'allocation complète.",
     "fundFailed": "Approvisionnement impossible",
+    "fundClosedTitle": "Airdrop déjà récupéré",
+    "fundClosedMessage": "La récupération est définitive : ce contrat ne peut plus être financé ni rouvert. Déployez un nouveau contrat d'airdrop pour un second tour.",
     "invalidContractId": "ID de contrat invalide",
     "invalidContractIdMessage": "Saisissez un ID de contrat Soroban valide (56 caractères, commence par C).",
     "invalidDeadline": "Échéance invalide",

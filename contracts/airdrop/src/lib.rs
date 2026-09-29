@@ -54,6 +54,14 @@ const NODE_DOMAIN: u8 = 0x01;
 /// 64 leaves headroom without reaching for the heap in a `no_std` contract.
 const MAX_STRKEY_LEN: usize = 64;
 
+/// How far `extend_deadline` may push the deadline past the *current* ledger,
+/// expressed as a multiple of the claim horizon `initialize` was called with.
+///
+/// Two, so an airdrop that turns out to need twice as long can be given it on
+/// the same deployment — while a horizon meant to be a week can never quietly
+/// become a decade.
+const DEADLINE_EXTENSION_FACTOR: u32 = 2;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -67,7 +75,8 @@ pub enum AirdropError {
     AlreadyInitialized = 1,
     /// Operation attempted before `initialize` was called.
     NotInitialized = 2,
-    /// `deadline_ledger` is not strictly after the current ledger.
+    /// `deadline_ledger` is not strictly after the current ledger (or, for
+    /// `extend_deadline`, not strictly after the deadline already in force).
     InvalidDeadline = 3,
     /// Amount is zero or negative where a positive value is required.
     InvalidAmount = 4,
@@ -80,7 +89,8 @@ pub enum AirdropError {
     DeadlinePassed = 7,
     /// `reclaim_unclaimed` was called at or before `deadline_ledger`.
     DeadlineNotReached = 8,
-    /// The unclaimed remainder has already been swept back to the admin.
+    /// The airdrop has been closed by `reclaim_unclaimed`, which is
+    /// single-shot: afterwards `fund` and `extend_deadline` are refused too.
     AlreadyReclaimed = 9,
     /// `reclaim_unclaimed` was called with an empty contract balance.
     NothingToReclaim = 10,
@@ -90,6 +100,10 @@ pub enum AirdropError {
     AddressTooLong = 12,
     /// An `i128` addition overflowed while accumulating claimed totals.
     AmountOverflow = 13,
+    /// `extend_deadline` was asked for a deadline beyond the extension bound
+    /// (the current ledger plus [`DEADLINE_EXTENSION_FACTOR`] × the original
+    /// claim horizon).
+    DeadlineTooFar = 14,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +117,10 @@ pub enum DataKey {
     Token,
     MerkleRoot,
     DeadlineLedger,
+    /// The claim window `initialize` was called with, in ledgers —
+    /// `deadline_ledger` minus the ledger it was set on. Recorded once so
+    /// `extend_deadline` has an original horizon to bound itself against.
+    DeadlineHorizon,
     /// Set once on the first successful `initialize` and never removed.
     Initialized,
     /// Set to `true` by `reclaim_unclaimed`, making the sweep single-shot.
@@ -172,6 +190,12 @@ impl AirdropContract {
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::MerkleRoot, &merkle_root);
         storage.set(&DataKey::DeadlineLedger, &deadline_ledger);
+        // The check above makes this subtraction exact; it is the horizon
+        // `extend_deadline` measures its bound against.
+        storage.set(
+            &DataKey::DeadlineHorizon,
+            &(deadline_ledger - env.ledger().sequence()),
+        );
         storage.set(&DataKey::TotalClaimed, &0i128);
         storage.set(&DataKey::Reclaimed, &false);
         let ttl = Self::_ttl_ledgers(&env);
@@ -188,13 +212,23 @@ impl AirdropContract {
     ///
     /// Separate from `initialize` so the root can be published before the
     /// treasury is topped up, and so an under-funded airdrop can be topped up
-    /// again later without redeploying.
+    /// again later without redeploying — including after the deadline passes,
+    /// provided `extend_deadline` has pushed it back out first.
+    ///
+    /// Refused once `reclaim_unclaimed` has closed the airdrop, with
+    /// [`AirdropError::AlreadyReclaimed`]: a reclaimed contract can move
+    /// nothing out of itself any more, so every token accepted here would be
+    /// stuck until an upgrade this contract does not have. A closed airdrop
+    /// needs a fresh deployment instead.
     pub fn fund(env: Env, from: Address, amount: i128) {
         Self::_require_initialized(&env);
         from.require_auth();
 
         if amount <= 0 {
             panic_with_error!(&env, AirdropError::InvalidAmount);
+        }
+        if Self::_is_reclaimed(&env) {
+            panic_with_error!(&env, AirdropError::AlreadyReclaimed);
         }
 
         let token_addr = Self::_token(&env);
@@ -268,7 +302,9 @@ impl AirdropContract {
     /// return the amount swept.
     ///
     /// Single-shot: once reclaimed, the airdrop is closed for good and any
-    /// later `claim` fails rather than draining a re-funded balance.
+    /// later `claim` fails rather than draining a re-funded balance. `fund`
+    /// and `extend_deadline` refuse afterwards too, so no tokens can be added
+    /// to a balance this contract can no longer sweep out.
     pub fn reclaim_unclaimed(env: Env) -> i128 {
         Self::_require_initialized(&env);
         let admin = Self::_admin(&env);
@@ -296,6 +332,51 @@ impl AirdropContract {
             .publish((symbol_short!("reclaim"), admin), remaining);
 
         remaining
+    }
+
+    /// Push `deadline_ledger` further out so the airdrop can run another round
+    /// on this deployment.
+    ///
+    /// Admin-only, and refused once `reclaim_unclaimed` has closed the
+    /// airdrop: reclaiming is single-shot, so a closed airdrop stays closed
+    /// and anything funded after it would be stranded (see `fund`).
+    ///
+    /// The new deadline must be in the future and strictly later than the one
+    /// already in force — the deadline is a promise to recipients, so this
+    /// moves only one way — and it may not pass the current ledger plus
+    /// [`DEADLINE_EXTENSION_FACTOR`] × the horizon `initialize` was called
+    /// with. The bound is what keeps a week-long airdrop from being extended
+    /// into a decade; going further needs a new deployment.
+    pub fn extend_deadline(env: Env, deadline_ledger: u32) {
+        Self::_require_initialized(&env);
+        let admin = Self::_admin(&env);
+        admin.require_auth();
+
+        if Self::_is_reclaimed(&env) {
+            panic_with_error!(&env, AirdropError::AlreadyReclaimed);
+        }
+
+        let current = env.ledger().sequence();
+        let previous = Self::_deadline(&env);
+        if deadline_ledger <= current || deadline_ledger <= previous {
+            panic_with_error!(&env, AirdropError::InvalidDeadline);
+        }
+
+        let bound =
+            current.saturating_add(Self::_horizon(&env).saturating_mul(DEADLINE_EXTENSION_FACTOR));
+        if deadline_ledger > bound {
+            panic_with_error!(&env, AirdropError::DeadlineTooFar);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DeadlineLedger, &deadline_ledger);
+
+        Self::_bump_instance(&env);
+        env.events().publish(
+            (symbol_short!("extend"), admin),
+            (previous, deadline_ledger),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -407,6 +488,15 @@ impl AirdropContract {
             .unwrap_or_else(|| panic_with_error!(env, AirdropError::NotInitialized))
     }
 
+    /// The claim horizon `initialize` recorded: how many ledgers the original
+    /// deadline was set out from the ledger it was set on.
+    fn _horizon(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DeadlineHorizon)
+            .unwrap_or_else(|| panic_with_error!(env, AirdropError::NotInitialized))
+    }
+
     fn _is_reclaimed(env: &Env) -> bool {
         env.storage()
             .instance()
@@ -503,7 +593,11 @@ impl AirdropContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::Address as _, testutils::Ledger as _, token::StellarAssetClient, String,
+        testutils::Address as _,
+        testutils::Ledger as _,
+        testutils::{MockAuth, MockAuthInvoke},
+        token::StellarAssetClient,
+        IntoVal, String,
     };
 
     // ── Off-chain tree builder ──────────────────────────────────────────
@@ -732,6 +826,10 @@ mod test {
             client.try_reclaim_unclaimed(),
             Err(Ok(AirdropError::NotInitialized.into()))
         );
+        assert_eq!(
+            client.try_extend_deadline(&(DEADLINE + 1)),
+            Err(Ok(AirdropError::NotInitialized.into()))
+        );
     }
 
     // ── Funding ─────────────────────────────────────────────────────────
@@ -758,6 +856,28 @@ mod test {
             a.client.try_fund(&a.admin, &-1),
             Err(Ok(AirdropError::InvalidAmount.into()))
         );
+    }
+
+    /// The regression this whole path exists for: reclaim sweeps the balance
+    /// out and closes the airdrop, so a later top-up must not be able to park
+    /// tokens in a contract that can no longer move them.
+    #[test]
+    fn test_fund_after_reclaim_fails() {
+        let a = setup(4);
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+        a.client.reclaim_unclaimed();
+        assert!(a.client.is_reclaimed());
+
+        a.token_admin.mint(&a.admin, &500);
+        let admin_before = balance_of(&a.env, &a.token, &a.admin);
+        assert_eq!(
+            a.client.try_fund(&a.admin, &500),
+            Err(Ok(AirdropError::AlreadyReclaimed.into()))
+        );
+
+        // Nothing moved: the contract still holds nothing it cannot sweep.
+        assert_eq!(a.client.remaining_balance(), 0);
+        assert_eq!(balance_of(&a.env, &a.token, &a.admin), admin_before);
     }
 
     // ── Claiming ────────────────────────────────────────────────────────
@@ -1000,6 +1120,116 @@ mod test {
         );
     }
 
+    // ── Extending the deadline ──────────────────────────────────────────
+
+    /// The second round `extend_deadline` exists for: the deadline passes
+    /// before the admin has swept, so the deadline is pushed out and the
+    /// treasury topped up on the same deployment rather than stranding it.
+    #[test]
+    fn test_extend_deadline_reopens_claiming_for_a_second_round() {
+        let a = setup(4);
+        let who = a.recipients.get(0).unwrap();
+        let amount = a.amounts.get(0).unwrap();
+        let proof = proof_for(&a.env, &a.leaves, 0);
+
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+        assert_eq!(
+            a.client.try_claim(&who, &amount, &proof),
+            Err(Ok(AirdropError::DeadlinePassed.into()))
+        );
+
+        let new_deadline = DEADLINE + 5_000;
+        a.client.extend_deadline(&new_deadline);
+        assert_eq!(a.client.get_deadline_ledger(), new_deadline);
+
+        a.token_admin.mint(&a.admin, &100);
+        a.client.fund(&a.admin, &100);
+        assert_eq!(a.client.remaining_balance(), 1_100);
+
+        a.client.claim(&who, &amount, &proof);
+        assert_eq!(balance_of(&a.env, &a.token, &who), amount);
+
+        // Reclaiming re-opens only after the *new* deadline.
+        assert_eq!(
+            a.client.try_reclaim_unclaimed(),
+            Err(Ok(AirdropError::DeadlineNotReached.into()))
+        );
+    }
+
+    #[test]
+    fn test_extend_deadline_rejects_a_deadline_that_is_not_in_the_future() {
+        let a = setup(4);
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+        assert_eq!(
+            a.client.try_extend_deadline(&DEADLINE),
+            Err(Ok(AirdropError::InvalidDeadline.into()))
+        );
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
+    }
+
+    /// The deadline is a promise to recipients, so it moves one way only.
+    #[test]
+    fn test_extend_deadline_cannot_pull_the_deadline_in() {
+        let a = setup(4);
+        a.env.ledger().set_sequence_number(DEADLINE - 5_000);
+        // In the future, but earlier than the deadline already in force.
+        assert_eq!(
+            a.client.try_extend_deadline(&(DEADLINE - 1_000)),
+            Err(Ok(AirdropError::InvalidDeadline.into()))
+        );
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
+    }
+
+    #[test]
+    fn test_extend_deadline_is_bounded_by_twice_the_original_horizon() {
+        let a = setup(4);
+        a.env.ledger().set_sequence_number(1_000);
+        // Original horizon: 10_000 (deadline) − 0 (ledger at initialize),
+        // so the cap is 1_000 + 2 × 10_000 = 21_000.
+        assert_eq!(
+            a.client.try_extend_deadline(&21_001),
+            Err(Ok(AirdropError::DeadlineTooFar.into()))
+        );
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
+
+        a.client.extend_deadline(&21_000);
+        assert_eq!(a.client.get_deadline_ledger(), 21_000);
+    }
+
+    /// Once reclaimed the airdrop is closed for good — reopening it would let
+    /// `fund` in behind a balance nothing can sweep out again.
+    #[test]
+    fn test_extend_deadline_after_reclaim_fails() {
+        let a = setup(4);
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+        a.client.reclaim_unclaimed();
+
+        assert_eq!(
+            a.client.try_extend_deadline(&(DEADLINE + 100)),
+            Err(Ok(AirdropError::AlreadyReclaimed.into()))
+        );
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
+    }
+
+    #[test]
+    fn test_extend_deadline_requires_admin_auth() {
+        let a = setup(4);
+        let stranger = Address::generate(&a.env);
+
+        a.env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &a.client.address,
+                fn_name: "extend_deadline",
+                args: (DEADLINE + 100u32,).into_val(&a.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(a.client.try_extend_deadline(&(DEADLINE + 100)).is_err());
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
+    }
+
     // ── Read-only helpers ───────────────────────────────────────────────
 
     #[test]
@@ -1112,7 +1342,7 @@ mod test {
 
     // ── Event schema ────────────────────────────────────────────────────
 
-    const EXPECTED_TOPICS: [&str; 4] = ["init", "fund", "claim", "reclaim"];
+    const EXPECTED_TOPICS: [&str; 5] = ["init", "fund", "claim", "reclaim", "extend"];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
     /// this file's production code (everything before the test module)
