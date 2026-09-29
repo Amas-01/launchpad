@@ -153,6 +153,10 @@ npm test
 npm run test:e2e
 ```
 
+### Test snapshot policy
+
+The `contracts/*/test_snapshots/` trees (token, vesting, factory, airdrop) are **tracked**, not ignored. A snapshot diff is the review artefact for any contract behaviour change: if `cargo test` rewrites snapshots, commit them and explain the change in the PR. Do not add `test_snapshots/` to `.gitignore`. Build artefacts such as `*.tsbuildinfo` and `*.stackdump` stay ignored.
+
 ---
 
 ## Submitting a PR

@@ -41,6 +41,7 @@
     "no": "否"
   },
   "navigation": {
+    "explore": "探索",
     "deploy": "部署",
     "dashboard": "仪表板",
     "allowances": "配额",

@@ -45,6 +45,14 @@ export interface WasmManifest {
     versions: Record<string, WasmManifestEntry>;
     build_info: { sdk_version: string; rust_version: string; profile: string };
   };
+  factory?: {
+    deployments: Record<string, FactoryManifestEntry | undefined>;
+  };
+}
+
+export interface FactoryManifestEntry {
+  address: string;
+  wasm_hash: string;
 }
 
 export async function fetchWasmManifest(): Promise<WasmManifest | null> {
@@ -208,6 +216,57 @@ export async function getContractWasmHash(
   } catch {
     return null;
   }
+}
+
+export type FactoryVerification =
+  | { ok: true; verified: boolean }
+  | { ok: false; reason: string; expected?: string; actual?: string };
+
+/**
+ * Check the configured factory against the audited manifest for the active
+ * network: the address must be the one the manifest names and the on-chain
+ * WASM hash must equal the manifest hash. Fields the manifest leaves blank
+ * are not checked (`verified: false` when nothing could be compared).
+ */
+export async function verifyFactory(
+  factoryAddress: string,
+  config: NetworkConfig,
+): Promise<FactoryVerification> {
+  const manifest = await fetchWasmManifest();
+  const entry = manifest?.factory?.deployments?.[config.network];
+  if (!entry || (!entry.address && !entry.wasm_hash)) {
+    return { ok: true, verified: false };
+  }
+
+  if (entry.address && entry.address !== factoryAddress) {
+    return {
+      ok: false,
+      reason: "The configured factory address is not the audited factory for this network.",
+      expected: entry.address,
+      actual: factoryAddress,
+    };
+  }
+
+  if (entry.wasm_hash) {
+    const onChain = await getContractWasmHash(factoryAddress, config);
+    if (!onChain) {
+      return {
+        ok: false,
+        reason: "Could not read the factory's on-chain WASM hash.",
+        expected: entry.wasm_hash,
+      };
+    }
+    if (onChain.toLowerCase() !== entry.wasm_hash.toLowerCase()) {
+      return {
+        ok: false,
+        reason: "The factory's on-chain WASM hash does not match the audited build.",
+        expected: entry.wasm_hash,
+        actual: onChain,
+      };
+    }
+  }
+
+  return { ok: true, verified: true };
 }
 
 function encodeTopicSymbol(symbol: string): string {

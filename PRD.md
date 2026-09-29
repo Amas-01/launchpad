@@ -41,7 +41,7 @@ Build an open-source, full-stack launchpad that abstracts Soroban contract compl
 - Testnet and Mainnet support
 
 ### Out of Scope (v1.0)
-- DEX / swap integration
+- DEX / swap integration (SoroPad is a token deployer, not a market: no pool is seeded at launch; users trade via an external DEX)
 - Governance voting module
 - Multi-token management (single token per session)
 - NFT support

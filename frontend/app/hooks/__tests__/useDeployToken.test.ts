@@ -3,6 +3,7 @@ import { renderHook, act } from "@testing-library/react";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import * as tokenBindings from "@/lib/bindings/token/src/index";
 import * as walletModule from "../useWallet";
+import * as stellarLib from "@/lib/stellar";
 import { useDeployToken } from "../useDeployToken";
 
 type AnyModule = any;
@@ -97,6 +98,10 @@ jest.mock("@stellar/stellar-sdk", () => {
     nativeToScVal: jest.fn((v: any) => v),
   };
 });
+
+jest.mock("@/lib/stellar", () => ({
+  verifyFactory: jest.fn().mockResolvedValue({ ok: true, verified: true }),
+}));
 
 jest.mock("../useWallet", () => {
   const wallet: any = {
@@ -196,6 +201,24 @@ describe("useDeployToken (factory path)", () => {
     await expect(
       act(() => result.current.deployToken(baseParams)),
     ).rejects.toMatchObject({ type: "validation" });
+  });
+
+  it("refuses to deploy when the factory fails manifest verification", async () => {
+    (stellarLib.verifyFactory as jest.Mock).mockResolvedValueOnce({
+      ok: false,
+      reason: "The factory's on-chain WASM hash does not match the audited build.",
+      expected: "aa",
+      actual: "bb",
+    });
+    const result = render();
+
+    await expect(
+      act(() => result.current.deployToken(baseParams)),
+    ).rejects.toMatchObject({
+      type: "validation",
+      message: expect.stringContaining("Expected: aa. Found: bb."),
+    });
+    expect(sdk.__contractCalls.length).toBe(0);
   });
 
   it("calls deploy_token with a valid TokenConfig and returns the token address", async () => {
