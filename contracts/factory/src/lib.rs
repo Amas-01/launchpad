@@ -9,26 +9,52 @@ use soroban_sdk::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Soroban's network-enforced ceiling on how far into the future a ledger
-/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
-/// network config; 6,312,000 ledgers on mainnet). Passing a value above
-/// this fails the transaction.
-const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
-
-/// TTL extension applied to deployment records so a factory that has been
-/// idle for a while never silently loses its index.
+/// Desired lifetime for the ledger entries this contract keeps alive:
+/// about a year, assuming Stellar's ~5s ledger close time.
 ///
-/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
-/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
-/// will accept.
-const TTL_LEDGERS: u32 = {
-    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
-    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
-        YEAR_LEDGERS as u32
-    } else {
-        MAX_ENTRY_TTL_LEDGERS
-    }
-};
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers.
+///
+/// This is only a *request*. The effective window is whatever the network
+/// allows — `env.storage().max_ttl()`, read at call time — and every
+/// `extend_ttl` site clamps to it. On testnet and mainnet today
+/// `max_entry_ttl` is 3,110,400 ledgers (a network setting, changed by
+/// validator vote), so a deployment record actually lives **about 180
+/// days, not a year**. Each deployment refreshes the count key, but not
+/// records written earlier, so a factory idle that long loses its index.
+///
+/// Deliberately not compared against a hardcoded ceiling: the previous
+/// constant here (6,312,000) was the soroban-sdk *test harness* default
+/// (`soroban-sdk/src/env.rs`), not a network value, so the clamp it fed
+/// could never fire. The test environment still reports 6,312,000, which is
+/// why no test in this file asserts a specific network figure.
+const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
+
+/// Maximum lifetime for an admin transfer proposal before it becomes invalid.
+///
+/// This is a deadline in ledger numbers, not a storage TTL, so it is not
+/// clamped to `max_ttl()`. Note the instance entry holding the proposal is
+/// clamped, so on today's networks the entry's ~180-day window expires before
+/// this ~365-day deadline does; a proposal left untouched that long needs the
+/// instance kept alive by any other call. Every admin mutation below calls
+/// `_bump_instance`, which is what keeps that entry alive.
+const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
+
+/// Minimum delay between proposing a token WASM hash and it becoming
+/// acceptable to `accept_token_wasm_hash`.
+///
+/// Six hours of ledger time: 6h * 60m * 60s / 5s-per-ledger = 4,320
+/// ledgers. Long enough that the `wasm_chg` event announcing a rotation is
+/// seen — by a watcher on the other side of a timezone, by an indexer, by
+/// anyone with the factory bookmarked — before the swap can complete, and
+/// short enough that a legitimate token fix is not held up for days.
+///
+/// Like [`ADMIN_PROPOSAL_EXPIRY_LEDGERS`] this is a deadline in ledger
+/// numbers, not a storage TTL, so it is not clamped to `max_ttl()`. The
+/// pending proposal lives in instance storage, which
+/// `propose_token_wasm_hash` refreshes with `_bump_instance`, so the entry
+/// comfortably outlives the delay (today's networks clamp instance TTL to
+/// ~180 days — far longer than six hours).
+const TOKEN_WASM_CHANGE_DELAY_LEDGERS: u32 = 6 * 60 * 60 / 5;
 
 /// Largest page a caller may request from `get_deployments_paginated`.
 ///
@@ -48,10 +74,35 @@ const MAX_PAGE: u32 = 100;
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    /// The address allowed to configure the factory (`set_token_wasm_hash`).
+    /// The address allowed to configure the factory (`propose_admin`,
+    /// `propose_token_wasm_hash`). Removed by `revoke_admin`.
     Admin,
+    /// The address proposed by `propose_admin`, waiting on `accept_admin`.
+    PendingAdmin,
+    /// Ledger at which `PendingAdmin` lapses. Written alongside
+    /// `PendingAdmin`, cleared alongside it.
+    PendingAdminExpiry,
+    /// Set once on the first successful `initialize` and never removed.
+    /// Unlike `Admin` (which `revoke_admin` deletes), this is the sole
+    /// re-initialization guard, so revoking admin can never reopen
+    /// `initialize`.
+    Initialized,
+    /// Set to `true` by `revoke_admin`. Once set, no admin operation can
+    /// ever succeed again — the factory keeps deploying tokens against a
+    /// frozen code hash, but nothing about its configuration can change.
+    Locked,
+    /// Set by `pause`, removed by `unpause`. While present, `deploy_token`
+    /// and `accept_admin` are refused with [`FactoryError::Paused`].
+    IsPaused,
     /// WASM hash of the token contract this factory deploys.
     TokenWasmHash,
+    /// Replacement hash proposed by `propose_token_wasm_hash`, waiting on
+    /// `accept_token_wasm_hash`. Removed by `accept_token_wasm_hash`,
+    /// `cancel_token_wasm_proposal` and `revoke_admin`.
+    PendingTokenWasmHash,
+    /// Ledger from which `PendingTokenWasmHash` may be accepted. Written
+    /// alongside the proposal, cleared alongside it.
+    PendingTokenWasmEffective,
     /// Number of tokens deployed (used to derive `DeploymentAt` slots).
     DeploymentCount,
     /// Enumerated token address, index `0..DeploymentCount`.
@@ -93,6 +144,23 @@ pub enum FactoryError {
     AlreadyInitialized = 2,
     /// `deploy_token` was called before a token WASM hash was set.
     TokenWasmNotSet = 3,
+    /// The contract is permanently locked (`revoke_admin` was called).
+    Locked = 4,
+    /// The contract is paused.
+    Paused = 5,
+    /// `accept_admin` was called with no pending proposal.
+    NoPendingAdmin = 6,
+    /// `accept_admin` was called after the proposal's expiry ledger.
+    ProposalExpired = 7,
+    /// WASM hash supplied to `upgrade` is the all-zeros sentinel.
+    InvalidWasmHash = 8,
+    /// `propose_admin` was called with the address that is already admin.
+    InvalidAdmin = 9,
+    /// `accept_token_wasm_hash` was called with no pending proposal.
+    NoPendingWasmChange = 10,
+    /// `accept_token_wasm_hash` was called before the proposal's delay
+    /// ([`TOKEN_WASM_CHANGE_DELAY_LEDGERS`]) had elapsed.
+    WasmChangeNotDue = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,35 +188,342 @@ impl FactoryContract {
     /// `admin.require_auth()` is enforced so the caller must prove they
     /// control the admin address. Callable once.
     pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        // Both keys are checked: `Initialized` is the guard going forward,
+        // but a factory already initialized by an earlier build only has
+        // `Admin`, and `revoke_admin` deletes `Admin` — so testing either
+        // keeps a re-initialization path closed in both cases.
+        if env.storage().instance().has(&DataKey::Initialized)
+            || env.storage().instance().has(&DataKey::Admin)
+        {
             panic_with_error!(&env, FactoryError::AlreadyInitialized);
         }
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        let storage = env.storage().instance();
+        storage.set(&DataKey::Initialized, &true);
+        storage.set(&DataKey::Admin, &admin);
+        let ttl = Self::_ttl_ledgers(&env);
+        storage.extend_ttl(ttl, ttl);
         env.events().publish((symbol_short!("init"),), admin);
+    }
+
+    // ── Admin lifecycle ────────────────────────────────────────────────
+    //
+    // Deliberately the same surface as the token contract (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade, and an event for every one of
+    // them.
+
+    /// Propose a new admin. Must be called by the current admin.
+    /// The new admin must call `accept_admin` to finalize the transfer.
+    ///
+    /// The proposal lapses [`ADMIN_PROPOSAL_EXPIRY_LEDGERS`] ledgers after it
+    /// is made; `pending_admin()` stops reporting it from that ledger on.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::_require_admin(&env);
+        if new_admin == current_admin {
+            panic_with_error!(&env, FactoryError::InvalidAdmin);
+        }
+
+        let expiry_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminExpiry, &expiry_ledger);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("prop_adm"), current_admin, new_admin), ());
+    }
+
+    /// Cancel a pending admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("cncl_adm"),), ());
+    }
+
+    /// Accept the admin role. Must be called by the pending admin.
+    pub fn accept_admin(env: Env) {
+        Self::_require_not_locked(&env);
+        Self::_check_paused(&env);
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NoPendingAdmin));
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            panic_with_error!(&env, FactoryError::ProposalExpired);
+        }
+
+        pending.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NotInitialized));
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("set_admin"), old_admin, pending), ());
+    }
+
+    /// Permanently revoke the admin role and lock the contract.
+    ///
+    /// After this call:
+    /// - `propose_token_wasm_hash`, `accept_token_wasm_hash`,
+    ///   `cancel_token_wasm_proposal`, `propose_admin`, `accept_admin`,
+    ///   `pause`, `unpause` and `upgrade` can never succeed again.
+    /// - The `Admin` storage entry is removed and a `Locked` flag is set.
+    /// - Any pending token-WASM-hash proposal is dropped, so a rotation
+    ///   announced before the revoke cannot be accepted after it.
+    /// - `is_locked()` returns `true` from then on.
+    ///
+    /// `deploy_token` keeps working against whatever WASM hash is already
+    /// recorded — revoking freezes the factory's configuration, it does not
+    /// take the deployment service away from the people using it.
+    ///
+    /// **This action is irreversible.**
+    pub fn revoke_admin(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::Locked, &true);
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmHash);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmEffective);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("revoked"),), true);
+    }
+
+    /// Pause the factory. Admin only.
+    ///
+    /// While paused, `deploy_token` and `accept_admin` are refused with
+    /// [`FactoryError::Paused`]. Read-only getters keep working so the
+    /// deployment index stays inspectable.
+    pub fn pause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::IsPaused, &true);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("pause"),), ());
+    }
+
+    /// Unpause the factory. Admin only.
+    pub fn unpause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::IsPaused);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("unpause"),), ());
+    }
+
+    /// Upgrade this contract's WASM code hash in place. Admin only.
+    ///
+    /// Security note: this preserves existing storage and contract address,
+    /// so new WASM must remain storage-compatible with previous deployments.
+    /// This is the factory's own code — the token hash `deploy_token` uses is
+    /// changed separately with
+    /// [`propose_token_wasm_hash`](Self::propose_token_wasm_hash) /
+    /// [`accept_token_wasm_hash`](Self::accept_token_wasm_hash).
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::_require_admin(&env);
+        if new_wasm_hash == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, FactoryError::InvalidWasmHash);
+        }
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("upgrade"),), new_wasm_hash);
     }
 
     /// Return the configured admin address.
     pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NotInitialized))
+        Self::_admin(&env)
     }
 
-    /// Set (or replace) the WASM hash `deploy_token` deploys.
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no two-step transfer is in
+    /// progress. The entry is written by `propose_admin` and cleared by
+    /// `accept_admin`, `cancel_admin_proposal`, or `revoke_admin`; if the
+    /// proposal has expired it is also cleared so stale state does not linger.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            env.storage().instance().remove(&DataKey::PendingAdmin);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminExpiry);
+            return None;
+        }
+
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Returns `true` once `revoke_admin` has been called. Once locked, no
+    /// admin operation can ever succeed again.
+    pub fn is_locked(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the factory is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false)
+    }
+
+    // ── Token WASM hash ────────────────────────────────────────────────
+    //
+    // The hash `deploy_token` names is the factory's blast radius: every
+    // launch after a rotation deploys whatever code it points at, to users
+    // who recognise the factory's address but not the build behind it. So
+    // it changes the way the admin does — proposed, delayed, accepted —
+    // and the change is announced with both hashes in the event, before it
+    // can take effect.
+
+    /// Propose a new WASM hash for `deploy_token`. Must be called by the
+    /// current admin.
     ///
-    /// Admin-only. The WASM must already be installed on the network —
-    /// `set_token_wasm_hash` only records the hash.
-    pub fn set_token_wasm_hash(env: Env, wasm_hash: BytesN<32>) {
+    /// The currently recorded hash keeps deploying until
+    /// [`accept_token_wasm_hash`](Self::accept_token_wasm_hash) runs at
+    /// least [`TOKEN_WASM_CHANGE_DELAY_LEDGERS`] ledgers (six hours) later,
+    /// so a rotation cannot land in the same block it was decided in.
+    ///
+    /// The `wasm_chg` event carries the hash in force (`current` — the
+    /// all-zeros sentinel when the factory has never had one), the proposed
+    /// replacement, and the ledger from which it becomes acceptable. A third
+    /// party watching the factory therefore learns about every rotation
+    /// while there is still time to object, up to and including
+    /// [`cancel_token_wasm_proposal`](Self::cancel_token_wasm_proposal).
+    ///
+    /// The WASM must already be installed on the network — this only
+    /// records the hash. Proposing again replaces any pending proposal and
+    /// restarts the delay from the new proposal's ledger.
+    pub fn propose_token_wasm_hash(env: Env, wasm_hash: BytesN<32>) {
         Self::_require_admin(&env);
+        if wasm_hash == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, FactoryError::InvalidWasmHash);
+        }
+
+        // The hash still in force. All-zeros doubles as "unset": a real
+        // hash can never be zeros, because the guard above rejects them.
+        let current: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenWasmHash)
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0; 32]));
+        let effective_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
 
         env.storage()
             .instance()
-            .set(&DataKey::TokenWasmHash, &wasm_hash);
-        env.events()
-            .publish((symbol_short!("set_wasm"),), wasm_hash);
+            .set(&DataKey::PendingTokenWasmHash, &wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingTokenWasmEffective, &effective_ledger);
+
+        Self::_bump_instance(&env);
+        env.events().publish(
+            (symbol_short!("wasm_chg"), current, wasm_hash),
+            effective_ledger,
+        );
+    }
+
+    /// Cancel a pending token WASM hash proposal. Must be called by the
+    /// current admin. The factory keeps deploying the hash it already has.
+    ///
+    /// The lever the admin pulls when a `wasm_chg` watcher objects during
+    /// the delay window — the proposal dies, and nothing was ever deployed
+    /// from it.
+    pub fn cancel_token_wasm_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmHash);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmEffective);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("cncl_wasm"),), ());
+    }
+
+    /// Accept the pending token WASM hash. Must be called by the current
+    /// admin, and not before the delay the proposal was made with has
+    /// elapsed.
+    ///
+    /// From here on every `deploy_token` deploys the new hash; the
+    /// `set_wasm` event marks the ledger at which the change took effect.
+    pub fn accept_token_wasm_hash(env: Env) {
+        Self::_require_admin(&env);
+
+        let pending: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingTokenWasmHash)
+            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NoPendingWasmChange));
+        let effective_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingTokenWasmEffective)
+            .unwrap_or(0);
+        if env.ledger().sequence() < effective_ledger {
+            panic_with_error!(&env, FactoryError::WasmChangeNotDue);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenWasmHash, &pending);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmHash);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingTokenWasmEffective);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("set_wasm"),), pending);
     }
 
     /// Return the configured token WASM hash.
@@ -157,6 +532,20 @@ impl FactoryContract {
             .instance()
             .get(&DataKey::TokenWasmHash)
             .unwrap_or_else(|| panic_with_error!(&env, FactoryError::TokenWasmNotSet))
+    }
+
+    /// Returns the hash proposed via `propose_token_wasm_hash` together
+    /// with the ledger from which it may be accepted, or `None` when no
+    /// proposal is outstanding.
+    ///
+    /// Unlike `pending_admin` this proposal never lapses: it stays until it
+    /// is accepted, cancelled, or replaced, so the `effective_ledger` half
+    /// is what tells a caller whether it is due yet.
+    pub fn pending_token_wasm_hash(env: Env) -> Option<(BytesN<32>, u32)> {
+        let storage = env.storage().instance();
+        storage
+            .get(&DataKey::PendingTokenWasmHash)
+            .zip(storage.get(&DataKey::PendingTokenWasmEffective))
     }
 
     // ── Deployment ──────────────────────────────────────────────────────
@@ -183,12 +572,17 @@ impl FactoryContract {
     /// Token parameters ride in a single [`TokenConfig`] struct so the
     /// function stays at three host-visible arguments (the SDK caps contract
     /// functions at ten).
+    ///
+    /// The WASM this deploys is whatever `accept_token_wasm_hash` last
+    /// recorded — a rotation proposed but not yet accepted does not touch
+    /// what is deployed here, which is the point of the delay.
     pub fn deploy_token(
         env: Env,
         deployer: Address,
         salt: BytesN<32>,
         config: TokenConfig,
     ) -> Address {
+        Self::_check_paused(&env);
         deployer.require_auth();
 
         // Enforce that a token WASM hash is configured (error in
@@ -312,14 +706,55 @@ impl FactoryContract {
         );
     }
 
-    fn _require_admin(env: &Env) -> Address {
-        let admin: Address = env
-            .storage()
+    fn _admin(env: &Env) -> Address {
+        Self::_require_not_locked(env);
+        env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(env, FactoryError::NotInitialized));
+            .unwrap_or_else(|| panic_with_error!(env, FactoryError::NotInitialized))
+    }
+
+    /// Admin gate for every mutating admin operation: the contract must not
+    /// be locked, and the caller must be the current admin.
+    fn _require_admin(env: &Env) -> Address {
+        let admin = Self::_admin(env);
         admin.require_auth();
         admin
+    }
+
+    fn _require_not_locked(env: &Env) {
+        let locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false);
+        if locked {
+            panic_with_error!(env, FactoryError::Locked);
+        }
+    }
+
+    /// Circuit breaker. Gates `deploy_token` plus `accept_admin`, so an
+    /// in-flight admin transfer cannot complete while the contract is
+    /// halted. Policy setters (`propose_token_wasm_hash`,
+    /// `accept_token_wasm_hash`, `cancel_token_wasm_proposal`) and read-only
+    /// getters stay available.
+    fn _check_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::IsPaused)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, FactoryError::Paused);
+        }
+    }
+
+    /// Extend the instance entry's TTL so a proposal held in instance
+    /// storage — an admin transfer, or a token-WASM-hash rotation — is not
+    /// archived out from under itself.
+    fn _bump_instance(env: &Env) {
+        let ttl = Self::_ttl_ledgers(env);
+        env.storage().instance().extend_ttl(ttl, ttl);
     }
 
     fn _require_token_wasm(env: &Env) -> BytesN<32> {
@@ -336,6 +771,18 @@ impl FactoryContract {
             .unwrap_or(0)
     }
 
+    /// The TTL to request for a deployment record: our desired window, capped
+    /// at what the network will actually honour.
+    ///
+    /// `soroban-env-host` silently lowers an over-long `extend_ttl` on a
+    /// persistent entry rather than erroring, so an unclamped call is not a
+    /// hard failure — it just quietly gets you a shorter entry than the code
+    /// appears to ask for. Clamping here keeps the requested and effective
+    /// values the same, so the archival window is legible from the source.
+    fn _ttl_ledgers(env: &Env) -> u32 {
+        TTL_LEDGERS.min(env.storage().max_ttl())
+    }
+
     fn _record_deployment(env: &Env, token: &Address) {
         let count = Self::_deployment_count(env);
 
@@ -345,7 +792,7 @@ impl FactoryContract {
         let count_key = DataKey::DeploymentCount;
         env.storage().persistent().set(&count_key, &(count + 1));
 
-        let ttl_ledgers = TTL_LEDGERS;
+        let ttl_ledgers = Self::_ttl_ledgers(env);
         env.storage()
             .persistent()
             .extend_ttl(&key, ttl_ledgers, ttl_ledgers);
@@ -363,7 +810,7 @@ impl FactoryContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
         Env, IntoVal, Symbol, TryFromVal,
     };
 
@@ -371,10 +818,24 @@ mod test {
     //
     // The checked-in, single source of truth for every event topic-0 name
     // this contract emits. See the identical fixture in the token contract
-    // (issue #340) — `scripts/generate_events_doc.py --check` only scans the
-    // token and vesting contracts, but keeping the same self-verifying
-    // fixture here prevents topic drift the same way.
-    const EXPECTED_TOPICS: [&str; 3] = ["init", "set_wasm", "deploy"];
+    // (issue #340) — `scripts/generate_events_doc.py --check` re-derives this
+    // set from the contract source to keep `docs/events.json` honest, but
+    // keeping the same self-verifying fixture here catches drift without
+    // running the script.
+    const EXPECTED_TOPICS: [&str; 12] = [
+        "init",
+        "set_wasm",
+        "wasm_chg",
+        "cncl_wasm",
+        "deploy",
+        "prop_adm",
+        "cncl_adm",
+        "set_admin",
+        "revoked",
+        "pause",
+        "unpause",
+        "upgrade",
+    ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
     /// this file's production code exactly matches `EXPECTED_TOPICS` — the
@@ -435,10 +896,21 @@ mod test {
     }
 
     /// A dummy token WASM hash. The test host cannot upload real SDK-21
-    /// WASM, but `set_token_wasm_hash` only records an opaque 32-byte hash,
-    /// so any value works.
+    /// WASM, but the factory only records an opaque 32-byte hash, so any
+    /// value works. Non-zero, because that is the one value the contract
+    /// rejects outright.
     fn dummy_wasm_hash(env: &Env) -> BytesN<32> {
-        BytesN::from_array(env, &[0u8; 32])
+        BytesN::from_array(env, &[7u8; 32])
+    }
+
+    /// Drive the full two-step hash change — propose, sit out
+    /// [`TOKEN_WASM_CHANGE_DELAY_LEDGERS`], accept — so tests that only need
+    /// a configured factory do not each re-implement the delay.
+    fn set_token_wasm(env: &Env, client: &FactoryContractClient<'static>, hash: &BytesN<32>) {
+        client.propose_token_wasm_hash(hash);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
     }
 
     /// A `TokenConfig` with the values the rest of the tests assume (name
@@ -472,7 +944,7 @@ mod test {
 
     fn configured_factory(env: &Env) -> (FactoryContractClient<'static>, Address) {
         let (_, client, admin) = setup(env);
-        client.set_token_wasm_hash(&dummy_wasm_hash(env));
+        set_token_wasm(env, &client, &dummy_wasm_hash(env));
         (client, admin)
     }
 
@@ -528,19 +1000,60 @@ mod test {
         assert!(client.try_initialize(&admin).is_err());
     }
 
+    // ── Token WASM hash rotation ────────────────────────────────────────
+    //
+    // `deploy_token` deploys whatever hash the admin last *accepted*, and
+    // accepting is only possible after a delay that the `wasm_chg` event
+    // announced to everyone. Both halves matter: the delay is what makes a
+    // hostile rotation survivable, the event is what makes it visible.
+
     #[test]
-    fn test_set_token_wasm_hash_sets_hash() {
+    fn test_propose_and_accept_token_wasm_hash() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (_, client, _) = setup(&env);
 
-        let wasm = dummy_wasm_hash(&env);
-        client.set_token_wasm_hash(&wasm);
-        assert_eq!(client.get_token_wasm_hash(), wasm);
+        let first = dummy_wasm_hash(&env);
+        let second = BytesN::from_array(&env, &[9u8; 32]);
+
+        // Configuring the factory the first time goes through both steps.
+        client.propose_token_wasm_hash(&first);
+        // A proposal is not a change: nothing is deployed from it, and the
+        // hash is still unset...
+        assert!(client.try_get_token_wasm_hash().is_err());
+        assert_eq!(
+            client.pending_token_wasm_hash(),
+            Some((first.clone(), TOKEN_WASM_CHANGE_DELAY_LEDGERS))
+        );
+
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
+        assert_eq!(client.get_token_wasm_hash(), first);
+        assert_eq!(client.pending_token_wasm_hash(), None);
+
+        // Rotating: the hash in force keeps serving `deploy_token` for the
+        // whole delay...
+        client.propose_token_wasm_hash(&second);
+        assert_eq!(client.get_token_wasm_hash(), first);
+        assert_eq!(
+            client.pending_token_wasm_hash(),
+            Some((
+                second.clone(),
+                env.ledger().sequence() + TOKEN_WASM_CHANGE_DELAY_LEDGERS
+            ))
+        );
+
+        // ...and only the accept swaps it.
+        env.ledger()
+            .set_sequence_number(2 * TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
+        assert_eq!(client.get_token_wasm_hash(), second);
+        assert_eq!(client.pending_token_wasm_hash(), None);
     }
 
     #[test]
-    fn test_set_token_wasm_hash_requires_admin_auth() {
+    fn test_propose_token_wasm_hash_requires_admin_auth() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (contract_id, client, _admin) = setup(&env);
@@ -548,18 +1061,244 @@ mod test {
         let user = Address::generate(&env);
         let wasm = dummy_wasm_hash(&env);
 
-        // Only the user can auth — not the admin. `set_token_wasm_hash`
+        // Only the user can auth — not the admin. `propose_token_wasm_hash`
         // must reject the call.
         env.mock_auths(&[MockAuth {
             address: &user,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "set_token_wasm_hash",
+                fn_name: "propose_token_wasm_hash",
                 args: (wasm.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        assert!(client.try_set_token_wasm_hash(&wasm).is_err());
+        assert!(client.try_propose_token_wasm_hash(&wasm).is_err());
+        assert_eq!(client.pending_token_wasm_hash(), None);
+    }
+
+    #[test]
+    fn test_accept_token_wasm_hash_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let wasm = dummy_wasm_hash(&env);
+
+        client.propose_token_wasm_hash(&wasm);
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+
+        // Only the user can auth — not the admin. A failed accept leaves
+        // the proposal pending and the recorded hash untouched.
+        env.mock_auths(&[MockAuth {
+            address: &Address::generate(&env),
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_token_wasm_hash",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(client.try_accept_token_wasm_hash().is_err());
+        assert_eq!(
+            client.pending_token_wasm_hash(),
+            Some((wasm.clone(), TOKEN_WASM_CHANGE_DELAY_LEDGERS))
+        );
+        assert!(client.try_get_token_wasm_hash().is_err());
+    }
+
+    #[test]
+    fn test_accept_token_wasm_hash_rejects_before_the_delay() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let wasm = dummy_wasm_hash(&env);
+
+        client.propose_token_wasm_hash(&wasm);
+
+        // One ledger short of the delay: refused, and still refused on the
+        // last ledger before it — the delay is a floor, not a target.
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS - 1);
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::WasmChangeNotDue.into()))
+        );
+        assert!(client.try_get_token_wasm_hash().is_err());
+
+        // Exactly at the delay it goes through.
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
+        assert_eq!(client.get_token_wasm_hash(), wasm);
+    }
+
+    #[test]
+    fn test_accept_token_wasm_hash_without_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::NoPendingWasmChange.into()))
+        );
+    }
+
+    #[test]
+    fn test_propose_token_wasm_hash_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_propose_token_wasm_hash(&BytesN::from_array(&env, &[0u8; 32])),
+            Err(Ok(FactoryError::InvalidWasmHash.into()))
+        );
+        assert_eq!(client.pending_token_wasm_hash(), None);
+    }
+
+    /// The event a third party watches: the hash in force, the proposed
+    /// replacement, and the ledger from which it becomes acceptable. On a
+    /// factory that has never been configured the "hash in force" is the
+    /// all-zeros sentinel — a real hash can never be zeros.
+    #[test]
+    fn test_proposal_event_carries_current_proposed_and_effective_ledger() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        type Event = (
+            soroban_sdk::Address,
+            soroban_sdk::Vec<soroban_sdk::Val>,
+            soroban_sdk::Val,
+        );
+
+        /// The single most recent event, wrapped in a `Vec` so it compares
+        /// through `Vec`'s host-side `PartialEq` (`Val` itself has none).
+        fn last_event(env: &Env) -> soroban_sdk::Vec<Event> {
+            let events = env.events().all();
+            events.slice(events.len() - 1..)
+        }
+
+        let first = dummy_wasm_hash(&env);
+        client.propose_token_wasm_hash(&first);
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (
+                        symbol_short!("wasm_chg"),
+                        BytesN::from_array(&env, &[0u8; 32]),
+                        first.clone()
+                    )
+                        .into_val(&env),
+                    TOKEN_WASM_CHANGE_DELAY_LEDGERS.into_val(&env)
+                )
+            ]
+        );
+
+        // Once a hash is set, the next proposal names it as the one being
+        // replaced, and counts the delay from its own ledger.
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
+
+        let second = BytesN::from_array(&env, &[9u8; 32]);
+        client.propose_token_wasm_hash(&second);
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (symbol_short!("wasm_chg"), first, second).into_val(&env),
+                    (2 * TOKEN_WASM_CHANGE_DELAY_LEDGERS).into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_cancel_token_wasm_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let wasm = dummy_wasm_hash(&env);
+
+        client.propose_token_wasm_hash(&wasm);
+        assert_eq!(
+            client.pending_token_wasm_hash(),
+            Some((wasm.clone(), TOKEN_WASM_CHANGE_DELAY_LEDGERS))
+        );
+        client.cancel_token_wasm_proposal();
+        assert_eq!(client.pending_token_wasm_hash(), None);
+
+        // Nothing left to accept, and the factory still has no hash.
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::NoPendingWasmChange.into()))
+        );
+        assert!(client.try_get_token_wasm_hash().is_err());
+    }
+
+    /// Re-proposing restarts the clock: otherwise a hash proposed an hour
+    /// ago could be swept in by a second proposal made a minute before the
+    /// first one fell due.
+    #[test]
+    fn test_re_propose_token_wasm_hash_restarts_the_delay() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        let first = dummy_wasm_hash(&env);
+        let second = BytesN::from_array(&env, &[9u8; 32]);
+
+        client.propose_token_wasm_hash(&first);
+        env.ledger().set_sequence_number(100);
+        client.propose_token_wasm_hash(&second);
+        assert_eq!(
+            client.pending_token_wasm_hash(),
+            Some((second.clone(), 100 + TOKEN_WASM_CHANGE_DELAY_LEDGERS))
+        );
+
+        // The first proposal's deadline has passed; the second's has not.
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::WasmChangeNotDue.into()))
+        );
+
+        env.ledger()
+            .set_sequence_number(100 + TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        client.accept_token_wasm_hash();
+        assert_eq!(client.get_token_wasm_hash(), second);
+    }
+
+    /// Revoking freezes the configuration — including a rotation that was
+    /// announced but never accepted.
+    #[test]
+    fn test_revoke_admin_discards_pending_wasm_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let wasm = dummy_wasm_hash(&env);
+
+        client.propose_token_wasm_hash(&wasm);
+        client.revoke_admin();
+        assert_eq!(client.pending_token_wasm_hash(), None);
+
+        env.ledger()
+            .set_sequence_number(TOKEN_WASM_CHANGE_DELAY_LEDGERS);
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert!(client.try_get_token_wasm_hash().is_err());
     }
 
     // ── Deployment ──────────────────────────────────────────────────────
@@ -645,7 +1384,7 @@ mod test {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (contract_id, client, admin) = setup(&env);
-        client.set_token_wasm_hash(&dummy_wasm_hash(&env));
+        set_token_wasm(&env, &client, &dummy_wasm_hash(&env));
 
         let deployer = Address::generate(&env);
         let attacker = Address::generate(&env);
@@ -803,5 +1542,470 @@ mod test {
             })
             .sum();
         assert_eq!(all, count);
+    // ── Admin lifecycle ─────────────────────────────────────────────────
+    //
+    // Mirrors the token contract's admin suite (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade — each with its own event.
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        // The old admin keeps the role until the new one accepts.
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.pending_admin(), Some(next.clone()));
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), next);
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_propose_admin_overwrites_previous() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.propose_admin(&first);
+        client.propose_admin(&second);
+        assert_eq!(client.pending_admin(), Some(second.clone()));
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), second);
+    }
+
+    #[test]
+    fn test_propose_admin_rejects_current_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+
+        assert_eq!(
+            client.try_propose_admin(&admin),
+            Err(Ok(FactoryError::InvalidAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_clears_pending_state() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.propose_admin(&first);
+        client.propose_admin(&second);
+        client.cancel_admin_proposal();
+
+        assert_eq!(client.pending_admin(), None);
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_accept_admin_without_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::NoPendingAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_accept_admin_rejects_expired_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        // Exactly the expiry ledger: `>=` makes it lapsed, and one ledger
+        // further would archive the instance entry first (the entry's own
+        // TTL is the same constant), so this is the only observable edge.
+        env.ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::ProposalExpired.into()))
+        );
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    /// The getter clears a lapsed proposal rather than reporting an address
+    /// that `accept_admin` would then refuse — stale state must not linger.
+    #[test]
+    fn test_pending_admin_getter_clears_expired_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        env.ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+        assert_eq!(client.pending_admin(), None);
+
+        // Re-proposing works: expiry is a deadline, not a lockout.
+        env.ledger().set_sequence_number(0);
+        client.propose_admin(&next);
+        assert_eq!(client.pending_admin(), Some(next));
+    }
+
+    #[test]
+    fn test_old_admin_retains_role_until_accepted() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        assert_eq!(client.get_admin(), admin);
+        client.pause();
+        assert!(client.is_paused());
+        client.unpause();
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_accept_admin_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        client.pause();
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::Paused.into()))
+        );
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_propose_admin_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        let next = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (next.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_propose_admin(&next).is_err());
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_revoke_admin_sets_locked_flag() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        assert!(!client.is_locked());
+
+        client.revoke_admin();
+
+        assert!(client.is_locked());
+    }
+
+    #[test]
+    fn test_get_admin_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        client.revoke_admin();
+
+        assert_eq!(client.try_get_admin(), Err(Ok(FactoryError::Locked.into())));
+    }
+
+    /// Every admin operation must be permanently unreachable after revoke.
+    #[test]
+    fn test_admin_operations_after_revoke_fail() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let next = Address::generate(&env);
+        client.revoke_admin();
+
+        assert_eq!(
+            client.try_propose_admin(&next),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_propose_token_wasm_hash(&dummy_wasm_hash(&env)),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_cancel_token_wasm_proposal(),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_accept_token_wasm_hash(),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(client.try_pause(), Err(Ok(FactoryError::Locked.into())));
+        assert_eq!(
+            client.try_upgrade(&BytesN::from_array(&env, &[1u8; 32])),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+    }
+
+    /// `Initialized` is deliberately never cleared by `revoke_admin`, so
+    /// revoking cannot re-open `initialize`.
+    #[test]
+    fn test_initialize_after_revoke_still_fails() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        client.revoke_admin();
+
+        assert_eq!(
+            client.try_initialize(&admin),
+            Err(Ok(FactoryError::AlreadyInitialized.into()))
+        );
+    }
+
+    /// Revoking freezes the configuration, not the service: the recorded
+    /// WASM hash keeps deploying tokens.
+    #[test]
+    fn test_deploy_token_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = configured_factory(&env);
+
+        client.revoke_admin();
+
+        let deployer = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[9u8; 32]);
+        let token_address = deploy_token(&env, &client, &deployer, &salt, &admin);
+
+        assert_eq!(client.get_deployment_count(), 1);
+        let token_client = soroban_token::TokenContractClient::new(&env, &token_address);
+        assert_eq!(token_client.admin(), admin);
+    }
+
+    #[test]
+    fn test_pause_blocks_deploy_token() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = configured_factory(&env);
+
+        let deployer = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[6u8; 32]);
+        register_token_at(&env, &deployer, &salt);
+
+        client.pause();
+        assert!(client.is_paused());
+        assert!(client
+            .try_deploy_token(&deployer, &salt, &default_config(&env, &admin))
+            .is_err());
+        assert_eq!(client.get_deployment_count(), 0);
+
+        client.unpause();
+        assert!(!client.is_paused());
+        client.deploy_token(&deployer, &salt, &default_config(&env, &admin));
+        assert_eq!(client.get_deployment_count(), 1);
+    }
+
+    /// Policy setters and read-only getters stay available while paused —
+    /// a halted factory can still be re-pointed at a fixed build, it just
+    /// cannot deploy from one until it is unpaused.
+    #[test]
+    fn test_token_wasm_rotation_works_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+
+        client.pause();
+        let wasm = dummy_wasm_hash(&env);
+        set_token_wasm(&env, &client, &wasm);
+
+        assert_eq!(client.get_token_wasm_hash(), wasm);
+        assert!(client.is_paused());
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_deployment_count(), 0);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_pause().is_err());
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_upgrade() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_upgrade(&hash).is_err());
+    }
+
+    #[test]
+    fn test_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_upgrade(&BytesN::from_array(&env, &[0u8; 32])),
+            Err(Ok(FactoryError::InvalidWasmHash.into()))
+        );
+    }
+
+    /// The admin lifecycle emits one event per action, with the same topic-0
+    /// symbols the token contract uses so a shared dashboard admin panel can
+    /// render both.
+    #[test]
+    fn test_admin_lifecycle_emits_an_event_per_action() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+        let contract = client.address.clone();
+
+        type Event = (
+            soroban_sdk::Address,
+            soroban_sdk::Vec<soroban_sdk::Val>,
+            soroban_sdk::Val,
+        );
+
+        /// The single most recent event, wrapped in a `Vec` so it compares
+        /// through `Vec`'s host-side `PartialEq` (`Val` itself has none).
+        fn last_event(env: &Env) -> soroban_sdk::Vec<Event> {
+            let events = env.events().all();
+            events.slice(events.len() - 1..)
+        }
+
+        client.propose_admin(&next);
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("prop_adm"), admin.clone(), next.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.cancel_admin_proposal();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("cncl_adm"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.propose_admin(&next);
+        client.accept_admin();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("set_admin"), admin.clone(), next.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+        assert_eq!(client.get_admin(), next.clone());
+
+        client.pause();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("pause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("unpause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.revoke_admin();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract,
+                    (symbol_short!("revoked"),).into_val(&env),
+                    true.into_val(&env)
+                )
+            ]
+        );
     }
 }

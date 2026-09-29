@@ -232,58 +232,11 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "get_admin"
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "get_admin"
+                "symbol": "propose_token_wasm_hash"
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "initialize"
-              }
-            ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
             }
           }
         }
@@ -303,7 +256,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "contract": 8
                 }
               }
             ],
@@ -313,7 +266,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 2
+                  "u32": 8
                 }
               ]
             }
@@ -335,7 +288,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "contract": 8
                 }
               }
             ],
@@ -360,7 +313,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "contract": 8
                 }
               }
             ],
@@ -385,7 +338,7 @@
               },
               {
                 "error": {
-                  "contract": 2
+                  "contract": 8
                 }
               }
             ],
@@ -395,17 +348,62 @@
                   "string": "contract try_call failed"
                 },
                 {
-                  "symbol": "initialize"
+                  "symbol": "propose_token_wasm_hash"
                 },
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
                     }
                   ]
                 }
               ]
             }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "pending_token_wasm_hash"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "pending_token_wasm_hash"
+              }
+            ],
+            "data": "void"
           }
         }
       },
