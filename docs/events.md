@@ -98,7 +98,9 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | Function | Topic 0 | Topic 1 | Topic 2 | Data |
 |---|---|---|---|---|
 | `initialize` | `init` | — | — | admin: Address |
-| `set_token_wasm_hash` | `set_wasm` | — | — | wasm_hash: BytesN<32> |
+| `propose_token_wasm_hash` | `wasm_chg` | `current: BytesN<32>` | `proposed: BytesN<32>` | effective_ledger: u32 |
+| `cancel_token_wasm_proposal` | `cncl_wasm` | — | — | () |
+| `accept_token_wasm_hash` | `set_wasm` | — | — | wasm_hash: BytesN<32> |
 | `deploy_token` | `deploy` | `deployer: Address` | `salt: BytesN<32>` | token_address: Address |
 | `propose_admin` | `prop_adm` | `current_admin: Address` | `new_admin: Address` | () |
 | `cancel_admin_proposal` | `cncl_adm` | — | — | () |
@@ -107,6 +109,10 @@ fail CI if this ever drifts from the contract source again (see issue #340).
 | `pause` | `pause` | — | — | () |
 | `unpause` | `unpause` | — | — | () |
 | `upgrade` | `upgrade` | — | — | new_wasm_hash: BytesN<32> |
+
+> The change notification for the hash `deploy_token` uses: `current` is still in force (all-zeros when the factory has never had one), `proposed` is the replacement, and it becomes acceptable at ledger `effective_ledger` — `TOKEN_WASM_CHANGE_DELAY_LEDGERS` (six hours) after the proposal. A watcher seeing this knows a rotation is in flight and has the whole delay to object, up to `cancel_token_wasm_proposal`.
+
+> Emitted only once the delay has elapsed and the hash actually changed; from this point every `deploy_token` deploys `wasm_hash`.
 
 > Irreversible. `deploy_token` keeps working against the already-recorded WASM hash — revoking freezes the factory's configuration, not the deployment service.
 

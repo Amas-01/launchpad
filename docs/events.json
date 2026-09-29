@@ -267,9 +267,21 @@
         "data": "admin: Address"
       },
       {
-        "functions": ["set_token_wasm_hash"],
+        "functions": ["propose_token_wasm_hash"],
+        "topics": ["wasm_chg", "current: BytesN<32>", "proposed: BytesN<32>"],
+        "data": "effective_ledger: u32",
+        "note": "The change notification for the hash `deploy_token` uses: `current` is still in force (all-zeros when the factory has never had one), `proposed` is the replacement, and it becomes acceptable at ledger `effective_ledger` — `TOKEN_WASM_CHANGE_DELAY_LEDGERS` (six hours) after the proposal. A watcher seeing this knows a rotation is in flight and has the whole delay to object, up to `cancel_token_wasm_proposal`."
+      },
+      {
+        "functions": ["cancel_token_wasm_proposal"],
+        "topics": ["cncl_wasm"],
+        "data": "()"
+      },
+      {
+        "functions": ["accept_token_wasm_hash"],
         "topics": ["set_wasm"],
-        "data": "wasm_hash: BytesN<32>"
+        "data": "wasm_hash: BytesN<32>",
+        "note": "Emitted only once the delay has elapsed and the hash actually changed; from this point every `deploy_token` deploys `wasm_hash`."
       },
       {
         "functions": ["deploy_token"],
