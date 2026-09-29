@@ -116,10 +116,9 @@ export function TokenStatusBanner({
           <div>
             <AlertTitle>Immutable token</AlertTitle>
             <AlertDescription>
-              Admin control has been permanently revoked, so supply and
-              admin permissions can no longer change. The trade-off: any
-              whale-protection cap is also off, so a single holder can now
-              accumulate without a per-account limit.
+              The issuer has permanently renounced control. This token is
+              immutable: supply and admin permissions can no longer change.
+              Any whale-protection cap and other live admin policy are off.
             </AlertDescription>
           </div>
         </div>

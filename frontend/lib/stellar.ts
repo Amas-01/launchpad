@@ -559,7 +559,7 @@ async function _fetchTokenInfo(
     simulateCall(contractId, "name", config),
     simulateCall(contractId, "symbol", config),
     simulateCall(contractId, "decimals", config),
-    simulateCall(contractId, "admin", config).catch(() => null),
+    simulateCall(contractId, "admin_if_any", config),
   ]);
 
   const decimals = decodeU32(decimalsVal);
@@ -1153,6 +1153,7 @@ export function decodeActivityEvent(
   const base: TokenActivityInfo = {
     id: meta.id,
     pagingToken: meta.id,
+    ledger: meta.ledger,
     type: "other",
     amount: "-",
     from: "-",
@@ -1424,6 +1425,7 @@ export type TokenActivityType =
 export interface TokenActivityInfo {
   id: string;
   pagingToken: string;
+  ledger?: number;
   type: TokenActivityType;
   amount: string;
   from: string;

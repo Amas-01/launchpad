@@ -597,6 +597,9 @@ impl TokenContract {
     /// Returns `true` if this token requires holders to be authorized before
     /// receiving transfers.
     pub fn authorization_required(env: Env) -> bool {
+        if Self::is_locked(env.clone()) {
+            return false;
+        }
         env.storage()
             .instance()
             .get(&DataKey::AuthorizationRequired)
@@ -897,6 +900,16 @@ impl TokenContract {
             .unwrap_or_else(|| panic_with_error!(&env, TokenError::NotInitialized))
     }
 
+    /// Returns the current administrator without treating an intentionally
+    /// locked token as an error. `admin()` remains the strict compatibility
+    /// view for callers that require an active administrator.
+    pub fn admin_if_any(env: Env) -> Option<Address> {
+        if Self::is_locked(env.clone()) {
+            return None;
+        }
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
     /// Returns the address proposed via `propose_admin` that has not yet
     /// accepted the role, or `None` when no two-step transfer is in
     /// progress. The entry is written by `propose_admin` and cleared by
@@ -971,6 +984,8 @@ impl TokenContract {
             .unwrap_or(false)
     }
 
+    /// Returns the immutable supply ceiling recorded at initialization.
+    /// It remains useful after admin revocation as a historical token fact.
     pub fn max_supply(env: Env) -> Option<i128> {
         env.storage().instance().get(&DataKey::MaxSupply)
     }
@@ -1074,13 +1089,18 @@ impl TokenContract {
             .unwrap_or(false)
     }
 
-    /// Returns the contract metadata URI, if one has been configured.
+    /// Returns the contract metadata URI, if one has been configured. The URI
+    /// remains readable after locking because it is historical metadata, not
+    /// an active administrative policy.
     pub fn contract_uri(env: Env) -> Option<String> {
         env.storage().instance().get(&DataKey::ContractUri)
     }
 
     /// Returns the configured compliance node, if any.
     pub fn compliance_node(env: Env) -> Option<Address> {
+        if Self::is_locked(env.clone()) {
+            return None;
+        }
         env.storage()
             .instance()
             .get(&DataKey::ComplianceNode)
@@ -1090,6 +1110,9 @@ impl TokenContract {
     // ── Internal helpers ────────────────────────────────────────────────
 
     fn _check_authorized(env: &Env, holder: &Address) {
+        if Self::is_locked(env.clone()) {
+            return;
+        }
         let required: bool = env
             .storage()
             .instance()
@@ -1219,6 +1242,9 @@ impl TokenContract {
     /// | `clawback` | yes | forced holder-to-admin value movement |
     /// | `burn`, `burn_admin`, `burn_self` | no | destroys tokens; there is no recipient to gate, and gating burns would let a failing node trap holders' balances |
     fn _check_compliance(env: &Env, from: &Address, to: &Address) {
+        if Self::is_locked(env.clone()) {
+            return;
+        }
         let compliance_node: Option<Address> = env
             .storage()
             .instance()
@@ -1247,6 +1273,9 @@ impl TokenContract {
     /// answering via `can_trade(to, to)` instead, so existing deployments
     /// keep working without a redeploy.
     fn _check_compliance_issue(env: &Env, to: &Address) {
+        if Self::is_locked(env.clone()) {
+            return;
+        }
         let compliance_node: Option<Address> = env
             .storage()
             .instance()
@@ -2609,6 +2638,14 @@ mod test {
     }
 
     #[test]
+    fn test_admin_if_any_distinguishes_active_and_revoked_admin() {
+        let (_, client, admin, _) = setup();
+        assert_eq!(client.admin_if_any(), Some(admin));
+        client.revoke_admin();
+        assert_eq!(client.admin_if_any(), None);
+    }
+
+    #[test]
     fn test_mint_after_revoke_panics() {
         let (_, client, _, user) = setup();
         client.revoke_admin();
@@ -3107,6 +3144,15 @@ mod test {
     }
 
     #[test]
+    fn test_authorization_required_is_masked_after_revoke() {
+        let (_, client, admin, user) = setup_with_auth_required();
+        client.revoke_admin();
+        assert!(!client.authorization_required());
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
+    }
+
+    #[test]
     fn test_authorization_flags_false_by_default() {
         let (_, client, _, _) = setup();
         assert!(!client.authorization_required());
@@ -3445,6 +3491,18 @@ mod test {
 
         client.set_compliance_node(&None);
         assert_eq!(client.compliance_node(), None);
+    }
+
+    #[test]
+    fn test_compliance_node_is_masked_after_revoke() {
+        let (env, client, admin, user) = setup();
+        let node = register_good_node(&env);
+        MockComplianceNodeClient::new(&env, &node).deny(&user);
+        client.set_compliance_node(&Some(node));
+        client.revoke_admin();
+        assert_eq!(client.compliance_node(), None);
+        client.transfer(&admin, &user, &1_000i128);
+        assert_eq!(client.balance(&user), 1_000i128);
     }
 
     #[test]
