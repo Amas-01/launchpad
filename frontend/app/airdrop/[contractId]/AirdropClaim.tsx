@@ -19,6 +19,7 @@ import {
   type AirdropInfo,
   type ClaimStatus,
 } from "@/lib/airdrop";
+import { AirdropAdminPanel } from "./AirdropAdminPanel";
 
 interface Props {
   contractId: string;
@@ -285,6 +286,14 @@ export function AirdropClaim({ contractId }: Props) {
         </Alert>
       )}
 
+      {/* Claims are refused outright while the admin has halted the contract. */}
+      {info.isPaused && (
+        <Alert variant="warning">
+          <AlertTitle>{t("claimPausedTitle")}</AlertTitle>
+          <AlertDescription>{t("claimPausedMessage")}</AlertDescription>
+        </Alert>
+      )}
+
       {/* Claim */}
       <section className="rounded-2xl border border-stellar-500/10 bg-void-800/40 p-6">
         <h2 className="mb-1 text-lg font-semibold text-white">
@@ -387,6 +396,7 @@ export function AirdropClaim({ contractId }: Props) {
                   isLoading={claiming}
                   disabled={
                     closed ||
+                    info.isPaused ||
                     !locallyValid ||
                     status?.claimed === true ||
                     status?.eligible === false
@@ -403,6 +413,13 @@ export function AirdropClaim({ contractId }: Props) {
           </div>
         )}
       </section>
+
+      <AirdropAdminPanel
+        contractId={contractId}
+        info={info}
+        decimals={decimals}
+        onChanged={() => void loadInfo()}
+      />
     </div>
   );
 }

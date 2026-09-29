@@ -23,6 +23,7 @@
         }
       ]
     ],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -30,12 +31,8 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "set_token_wasm_hash",
-              "args": [
-                {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
-                }
-              ]
+              "function_name": "revoke_admin",
+              "args": []
             }
           },
           "sub_invocations": []
@@ -81,18 +78,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Admin"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Initialized"
                             }
                           ]
@@ -105,12 +90,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "TokenWasmHash"
+                              "symbol": "Locked"
                             }
                           ]
                         },
                         "val": {
-                          "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                          "bool": true
                         }
                       }
                     ]
@@ -295,12 +280,57 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "set_token_wasm_hash"
+                "symbol": "is_locked"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "is_locked"
               }
             ],
             "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+              "bool": false
             }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "revoke_admin"
+              }
+            ],
+            "data": "void"
           }
         }
       },
@@ -315,11 +345,11 @@
           "v0": {
             "topics": [
               {
-                "symbol": "set_wasm"
+                "symbol": "revoked"
               }
             ],
             "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+              "bool": true
             }
           }
         }
@@ -338,7 +368,7 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "set_token_wasm_hash"
+                "symbol": "revoke_admin"
               }
             ],
             "data": "void"
@@ -362,7 +392,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "get_token_wasm_hash"
+                "symbol": "is_locked"
               }
             ],
             "data": "void"
@@ -383,11 +413,11 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "get_token_wasm_hash"
+                "symbol": "is_locked"
               }
             ],
             "data": {
-              "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+              "bool": true
             }
           }
         }

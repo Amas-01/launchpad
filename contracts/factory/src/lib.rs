@@ -29,6 +29,16 @@ use soroban_sdk::{
 /// why no test in this file asserts a specific network figure.
 const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
+/// Maximum lifetime for an admin transfer proposal before it becomes invalid.
+///
+/// This is a deadline in ledger numbers, not a storage TTL, so it is not
+/// clamped to `max_ttl()`. Note the instance entry holding the proposal is
+/// clamped, so on today's networks the entry's ~180-day window expires before
+/// this ~365-day deadline does; a proposal left untouched that long needs the
+/// instance kept alive by any other call. Every admin mutation below calls
+/// `_bump_instance`, which is what keeps that entry alive.
+const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -37,7 +47,25 @@ const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 #[contracttype]
 pub enum DataKey {
     /// The address allowed to configure the factory (`set_token_wasm_hash`).
+    /// Removed by `revoke_admin`.
     Admin,
+    /// The address proposed by `propose_admin`, waiting on `accept_admin`.
+    PendingAdmin,
+    /// Ledger at which `PendingAdmin` lapses. Written alongside
+    /// `PendingAdmin`, cleared alongside it.
+    PendingAdminExpiry,
+    /// Set once on the first successful `initialize` and never removed.
+    /// Unlike `Admin` (which `revoke_admin` deletes), this is the sole
+    /// re-initialization guard, so revoking admin can never reopen
+    /// `initialize`.
+    Initialized,
+    /// Set to `true` by `revoke_admin`. Once set, no admin operation can
+    /// ever succeed again — the factory keeps deploying tokens against a
+    /// frozen code hash, but nothing about its configuration can change.
+    Locked,
+    /// Set by `pause`, removed by `unpause`. While present, `deploy_token`
+    /// and `accept_admin` are refused with [`FactoryError::Paused`].
+    IsPaused,
     /// WASM hash of the token contract this factory deploys.
     TokenWasmHash,
     /// Number of tokens deployed (used to derive `DeploymentAt` slots).
@@ -81,6 +109,18 @@ pub enum FactoryError {
     AlreadyInitialized = 2,
     /// `deploy_token` was called before a token WASM hash was set.
     TokenWasmNotSet = 3,
+    /// The contract is permanently locked (`revoke_admin` was called).
+    Locked = 4,
+    /// The contract is paused.
+    Paused = 5,
+    /// `accept_admin` was called with no pending proposal.
+    NoPendingAdmin = 6,
+    /// `accept_admin` was called after the proposal's expiry ledger.
+    ProposalExpired = 7,
+    /// WASM hash supplied to `upgrade` is the all-zeros sentinel.
+    InvalidWasmHash = 8,
+    /// `propose_admin` was called with the address that is already admin.
+    InvalidAdmin = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,21 +148,216 @@ impl FactoryContract {
     /// `admin.require_auth()` is enforced so the caller must prove they
     /// control the admin address. Callable once.
     pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        // Both keys are checked: `Initialized` is the guard going forward,
+        // but a factory already initialized by an earlier build only has
+        // `Admin`, and `revoke_admin` deletes `Admin` — so testing either
+        // keeps a re-initialization path closed in both cases.
+        if env.storage().instance().has(&DataKey::Initialized)
+            || env.storage().instance().has(&DataKey::Admin)
+        {
             panic_with_error!(&env, FactoryError::AlreadyInitialized);
         }
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        let storage = env.storage().instance();
+        storage.set(&DataKey::Initialized, &true);
+        storage.set(&DataKey::Admin, &admin);
+        let ttl = Self::_ttl_ledgers(&env);
+        storage.extend_ttl(ttl, ttl);
         env.events().publish((symbol_short!("init"),), admin);
+    }
+
+    // ── Admin lifecycle ────────────────────────────────────────────────
+    //
+    // Deliberately the same surface as the token contract (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade, and an event for every one of
+    // them.
+
+    /// Propose a new admin. Must be called by the current admin.
+    /// The new admin must call `accept_admin` to finalize the transfer.
+    ///
+    /// The proposal lapses [`ADMIN_PROPOSAL_EXPIRY_LEDGERS`] ledgers after it
+    /// is made; `pending_admin()` stops reporting it from that ledger on.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::_require_admin(&env);
+        if new_admin == current_admin {
+            panic_with_error!(&env, FactoryError::InvalidAdmin);
+        }
+
+        let expiry_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminExpiry, &expiry_ledger);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("prop_adm"), current_admin, new_admin), ());
+    }
+
+    /// Cancel a pending admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("cncl_adm"),), ());
+    }
+
+    /// Accept the admin role. Must be called by the pending admin.
+    pub fn accept_admin(env: Env) {
+        Self::_require_not_locked(&env);
+        Self::_check_paused(&env);
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NoPendingAdmin));
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            panic_with_error!(&env, FactoryError::ProposalExpired);
+        }
+
+        pending.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NotInitialized));
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("set_admin"), old_admin, pending), ());
+    }
+
+    /// Permanently revoke the admin role and lock the contract.
+    ///
+    /// After this call:
+    /// - `set_token_wasm_hash`, `propose_admin`, `accept_admin`, `pause`,
+    ///   `unpause` and `upgrade` can never succeed again.
+    /// - The `Admin` storage entry is removed and a `Locked` flag is set.
+    /// - `is_locked()` returns `true` from then on.
+    ///
+    /// `deploy_token` keeps working against whatever WASM hash is already
+    /// recorded — revoking freezes the factory's configuration, it does not
+    /// take the deployment service away from the people using it.
+    ///
+    /// **This action is irreversible.**
+    pub fn revoke_admin(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::Locked, &true);
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("revoked"),), true);
+    }
+
+    /// Pause the factory. Admin only.
+    ///
+    /// While paused, `deploy_token` and `accept_admin` are refused with
+    /// [`FactoryError::Paused`]. Read-only getters keep working so the
+    /// deployment index stays inspectable.
+    pub fn pause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::IsPaused, &true);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("pause"),), ());
+    }
+
+    /// Unpause the factory. Admin only.
+    pub fn unpause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::IsPaused);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("unpause"),), ());
+    }
+
+    /// Upgrade this contract's WASM code hash in place. Admin only.
+    ///
+    /// Security note: this preserves existing storage and contract address,
+    /// so new WASM must remain storage-compatible with previous deployments.
+    /// This is the factory's own code — the token hash `deploy_token` uses is
+    /// changed separately with [`set_token_wasm_hash`](Self::set_token_wasm_hash).
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::_require_admin(&env);
+        if new_wasm_hash == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, FactoryError::InvalidWasmHash);
+        }
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("upgrade"),), new_wasm_hash);
     }
 
     /// Return the configured admin address.
     pub fn get_admin(env: Env) -> Address {
+        Self::_admin(&env)
+    }
+
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no two-step transfer is in
+    /// progress. The entry is written by `propose_admin` and cleared by
+    /// `accept_admin`, `cancel_admin_proposal`, or `revoke_admin`; if the
+    /// proposal has expired it is also cleared so stale state does not linger.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            env.storage().instance().remove(&DataKey::PendingAdmin);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminExpiry);
+            return None;
+        }
+
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Returns `true` once `revoke_admin` has been called. Once locked, no
+    /// admin operation can ever succeed again.
+    pub fn is_locked(env: Env) -> bool {
         env.storage()
             .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, FactoryError::NotInitialized))
+            .get(&DataKey::Locked)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the factory is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false)
     }
 
     /// Set (or replace) the WASM hash `deploy_token` deploys.
@@ -135,6 +370,7 @@ impl FactoryContract {
         env.storage()
             .instance()
             .set(&DataKey::TokenWasmHash, &wasm_hash);
+        Self::_bump_instance(&env);
         env.events()
             .publish((symbol_short!("set_wasm"),), wasm_hash);
     }
@@ -177,6 +413,7 @@ impl FactoryContract {
         salt: BytesN<32>,
         config: TokenConfig,
     ) -> Address {
+        Self::_check_paused(&env);
         deployer.require_auth();
 
         // Enforce that a token WASM hash is configured (error in
@@ -297,14 +534,53 @@ impl FactoryContract {
         );
     }
 
-    fn _require_admin(env: &Env) -> Address {
-        let admin: Address = env
-            .storage()
+    fn _admin(env: &Env) -> Address {
+        Self::_require_not_locked(env);
+        env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(env, FactoryError::NotInitialized));
+            .unwrap_or_else(|| panic_with_error!(env, FactoryError::NotInitialized))
+    }
+
+    /// Admin gate for every mutating admin operation: the contract must not
+    /// be locked, and the caller must be the current admin.
+    fn _require_admin(env: &Env) -> Address {
+        let admin = Self::_admin(env);
         admin.require_auth();
         admin
+    }
+
+    fn _require_not_locked(env: &Env) {
+        let locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false);
+        if locked {
+            panic_with_error!(env, FactoryError::Locked);
+        }
+    }
+
+    /// Circuit breaker. Gates `deploy_token` plus `accept_admin`, so an
+    /// in-flight admin transfer cannot complete while the contract is
+    /// halted. Policy setters (`set_token_wasm_hash`) and read-only getters
+    /// stay available.
+    fn _check_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::IsPaused)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, FactoryError::Paused);
+        }
+    }
+
+    /// Extend the instance entry's TTL so an admin transfer proposal — which
+    /// lives in instance storage — is not archived out from under itself.
+    fn _bump_instance(env: &Env) {
+        let ttl = Self::_ttl_ledgers(env);
+        env.storage().instance().extend_ttl(ttl, ttl);
     }
 
     fn _require_token_wasm(env: &Env) -> BytesN<32> {
@@ -360,7 +636,7 @@ impl FactoryContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
         Env, IntoVal, Symbol, TryFromVal,
     };
 
@@ -371,7 +647,18 @@ mod test {
     // (issue #340) — `scripts/generate_events_doc.py --check` only scans the
     // token and vesting contracts, but keeping the same self-verifying
     // fixture here prevents topic drift the same way.
-    const EXPECTED_TOPICS: [&str; 3] = ["init", "set_wasm", "deploy"];
+    const EXPECTED_TOPICS: [&str; 10] = [
+        "init",
+        "set_wasm",
+        "deploy",
+        "prop_adm",
+        "cncl_adm",
+        "set_admin",
+        "revoked",
+        "pause",
+        "unpause",
+        "upgrade",
+    ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
     /// this file's production code exactly matches `EXPECTED_TOPICS` — the
@@ -739,5 +1026,462 @@ mod test {
         // Out-of-range and empty pages.
         assert_eq!(client.get_deployments_paginated(&3u32, &2u32).len(), 0);
         assert_eq!(client.get_deployments_paginated(&0u32, &0u32).len(), 0);
+    }
+
+    // ── Admin lifecycle ─────────────────────────────────────────────────
+    //
+    // Mirrors the token contract's admin suite (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade — each with its own event.
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        // The old admin keeps the role until the new one accepts.
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.pending_admin(), Some(next.clone()));
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), next);
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_propose_admin_overwrites_previous() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.propose_admin(&first);
+        client.propose_admin(&second);
+        assert_eq!(client.pending_admin(), Some(second.clone()));
+
+        client.accept_admin();
+        assert_eq!(client.get_admin(), second);
+    }
+
+    #[test]
+    fn test_propose_admin_rejects_current_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+
+        assert_eq!(
+            client.try_propose_admin(&admin),
+            Err(Ok(FactoryError::InvalidAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_clears_pending_state() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.propose_admin(&first);
+        client.propose_admin(&second);
+        client.cancel_admin_proposal();
+
+        assert_eq!(client.pending_admin(), None);
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_accept_admin_without_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::NoPendingAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_accept_admin_rejects_expired_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        // Exactly the expiry ledger: `>=` makes it lapsed, and one ledger
+        // further would archive the instance entry first (the entry's own
+        // TTL is the same constant), so this is the only observable edge.
+        env.ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::ProposalExpired.into()))
+        );
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    /// The getter clears a lapsed proposal rather than reporting an address
+    /// that `accept_admin` would then refuse — stale state must not linger.
+    #[test]
+    fn test_pending_admin_getter_clears_expired_proposal() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        env.ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+        assert_eq!(client.pending_admin(), None);
+
+        // Re-proposing works: expiry is a deadline, not a lockout.
+        env.ledger().set_sequence_number(0);
+        client.propose_admin(&next);
+        assert_eq!(client.pending_admin(), Some(next));
+    }
+
+    #[test]
+    fn test_old_admin_retains_role_until_accepted() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        assert_eq!(client.get_admin(), admin);
+        client.pause();
+        assert!(client.is_paused());
+        client.unpause();
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_accept_admin_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+
+        client.propose_admin(&next);
+        client.pause();
+
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::Paused.into()))
+        );
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_propose_admin_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        let next = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (next.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_propose_admin(&next).is_err());
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_revoke_admin_sets_locked_flag() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        assert!(!client.is_locked());
+
+        client.revoke_admin();
+
+        assert!(client.is_locked());
+    }
+
+    #[test]
+    fn test_get_admin_after_revoke_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        client.revoke_admin();
+
+        assert_eq!(client.try_get_admin(), Err(Ok(FactoryError::Locked.into())));
+    }
+
+    /// Every admin operation must be permanently unreachable after revoke.
+    #[test]
+    fn test_admin_operations_after_revoke_fail() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+        let next = Address::generate(&env);
+        client.revoke_admin();
+
+        assert_eq!(
+            client.try_propose_admin(&next),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_set_token_wasm_hash(&dummy_wasm_hash(&env)),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(client.try_pause(), Err(Ok(FactoryError::Locked.into())));
+        assert_eq!(
+            client.try_upgrade(&BytesN::from_array(&env, &[1u8; 32])),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(FactoryError::Locked.into()))
+        );
+    }
+
+    /// `Initialized` is deliberately never cleared by `revoke_admin`, so
+    /// revoking cannot re-open `initialize`.
+    #[test]
+    fn test_initialize_after_revoke_still_fails() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        client.revoke_admin();
+
+        assert_eq!(
+            client.try_initialize(&admin),
+            Err(Ok(FactoryError::AlreadyInitialized.into()))
+        );
+    }
+
+    /// Revoking freezes the configuration, not the service: the recorded
+    /// WASM hash keeps deploying tokens.
+    #[test]
+    fn test_deploy_token_still_works_after_revoke() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = configured_factory(&env);
+
+        client.revoke_admin();
+
+        let deployer = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[9u8; 32]);
+        let token_address = deploy_token(&env, &client, &deployer, &salt, &admin);
+
+        assert_eq!(client.get_deployment_count(), 1);
+        let token_client = soroban_token::TokenContractClient::new(&env, &token_address);
+        assert_eq!(token_client.admin(), admin);
+    }
+
+    #[test]
+    fn test_pause_blocks_deploy_token() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = configured_factory(&env);
+
+        let deployer = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[6u8; 32]);
+        register_token_at(&env, &deployer, &salt);
+
+        client.pause();
+        assert!(client.is_paused());
+        assert!(client
+            .try_deploy_token(&deployer, &salt, &default_config(&env, &admin))
+            .is_err());
+        assert_eq!(client.get_deployment_count(), 0);
+
+        client.unpause();
+        assert!(!client.is_paused());
+        client.deploy_token(&deployer, &salt, &default_config(&env, &admin));
+        assert_eq!(client.get_deployment_count(), 1);
+    }
+
+    /// Policy setters and read-only getters stay available while paused.
+    #[test]
+    fn test_set_wasm_and_getters_work_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+
+        client.pause();
+        let wasm = dummy_wasm_hash(&env);
+        client.set_token_wasm_hash(&wasm);
+
+        assert_eq!(client.get_token_wasm_hash(), wasm);
+        assert!(client.is_paused());
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_deployment_count(), 0);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_pause().is_err());
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_upgrade() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (contract_id, client, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_upgrade(&hash).is_err());
+    }
+
+    #[test]
+    fn test_upgrade_rejects_zero_hash() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, _) = setup(&env);
+
+        assert_eq!(
+            client.try_upgrade(&BytesN::from_array(&env, &[0u8; 32])),
+            Err(Ok(FactoryError::InvalidWasmHash.into()))
+        );
+    }
+
+    /// The admin lifecycle emits one event per action, with the same topic-0
+    /// symbols the token contract uses so a shared dashboard admin panel can
+    /// render both.
+    #[test]
+    fn test_admin_lifecycle_emits_an_event_per_action() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_, client, admin) = setup(&env);
+        let next = Address::generate(&env);
+        let contract = client.address.clone();
+
+        type Event = (
+            soroban_sdk::Address,
+            soroban_sdk::Vec<soroban_sdk::Val>,
+            soroban_sdk::Val,
+        );
+
+        /// The single most recent event, wrapped in a `Vec` so it compares
+        /// through `Vec`'s host-side `PartialEq` (`Val` itself has none).
+        fn last_event(env: &Env) -> soroban_sdk::Vec<Event> {
+            let events = env.events().all();
+            events.slice(events.len() - 1..)
+        }
+
+        client.propose_admin(&next);
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("prop_adm"), admin.clone(), next.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.cancel_admin_proposal();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("cncl_adm"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.propose_admin(&next);
+        client.accept_admin();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("set_admin"), admin.clone(), next.clone()).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+        assert_eq!(client.get_admin(), next.clone());
+
+        client.pause();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("pause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract.clone(),
+                    (symbol_short!("unpause"),).into_val(&env),
+                    ().into_val(&env)
+                )
+            ]
+        );
+
+        client.revoke_admin();
+        assert_eq!(
+            last_event(&env),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract,
+                    (symbol_short!("revoked"),).into_val(&env),
+                    true.into_val(&env)
+                )
+            ]
+        );
     }
 }

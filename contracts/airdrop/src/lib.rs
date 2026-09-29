@@ -62,6 +62,16 @@ const MAX_STRKEY_LEN: usize = 64;
 /// become a decade.
 const DEADLINE_EXTENSION_FACTOR: u32 = 2;
 
+/// Maximum lifetime for an admin transfer proposal before it becomes invalid.
+///
+/// This is a deadline in ledger numbers, not a storage TTL, so it is not
+/// clamped to `max_ttl()`. Note the instance entry holding the proposal is
+/// clamped, so on today's networks the entry's ~180-day window expires before
+/// this ~365-day deadline does; a proposal left untouched that long needs the
+/// instance kept alive by any other call. Every admin mutation below calls
+/// `_bump_instance`, which is what keeps that entry alive.
+const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -104,6 +114,18 @@ pub enum AirdropError {
     /// (the current ledger plus [`DEADLINE_EXTENSION_FACTOR`] × the original
     /// claim horizon).
     DeadlineTooFar = 14,
+    /// The contract is permanently locked (`revoke_admin` was called).
+    Locked = 15,
+    /// The contract is paused.
+    Paused = 16,
+    /// `accept_admin` was called with no pending proposal.
+    NoPendingAdmin = 17,
+    /// `accept_admin` was called after the proposal's expiry ledger.
+    ProposalExpired = 18,
+    /// WASM hash supplied to `upgrade` is the all-zeros sentinel.
+    InvalidWasmHash = 19,
+    /// `propose_admin` was called with the address that is already admin.
+    InvalidAdmin = 20,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +135,14 @@ pub enum AirdropError {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
+    /// The address that funds, extends, reclaims and reconfigures this
+    /// airdrop. Removed by `revoke_admin`.
     Admin,
+    /// The address proposed by `propose_admin`, waiting on `accept_admin`.
+    PendingAdmin,
+    /// Ledger at which `PendingAdmin` lapses. Written alongside
+    /// `PendingAdmin`, cleared alongside it.
+    PendingAdminExpiry,
     Token,
     MerkleRoot,
     DeadlineLedger,
@@ -125,6 +154,14 @@ pub enum DataKey {
     Initialized,
     /// Set to `true` by `reclaim_unclaimed`, making the sweep single-shot.
     Reclaimed,
+    /// Set to `true` by `revoke_admin`, making the loss of admin permanent.
+    /// Unlike `Admin` (which `revoke_admin` deletes), this is never cleared,
+    /// so revoking admin can never re-open an admin operation.
+    Locked,
+    /// Set by `pause`, removed by `unpause`. While present, value-moving
+    /// operations (`fund`, `claim`, `reclaim_unclaimed`) and `accept_admin`
+    /// are refused with [`AirdropError::Paused`].
+    IsPaused,
     TotalClaimed,
     /// Persistent per-recipient claim marker holding the claimed amount.
     /// Its presence is what prevents a second claim.
@@ -207,6 +244,162 @@ impl AirdropContract {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Administration
+    //
+    // Deliberately the same surface as the token contract (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade, and an event for every one of
+    // them.
+    // -----------------------------------------------------------------------
+
+    /// Propose a new admin. Must be called by the current admin.
+    /// The new admin must call `accept_admin` to finalize the transfer.
+    ///
+    /// The proposal lapses [`ADMIN_PROPOSAL_EXPIRY_LEDGERS`] ledgers after it
+    /// is made; `pending_admin()` stops reporting it from that ledger on.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::_require_admin(&env);
+        if new_admin == current_admin {
+            panic_with_error!(&env, AirdropError::InvalidAdmin);
+        }
+
+        let expiry_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdminExpiry, &expiry_ledger);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("prop_adm"), current_admin, new_admin), ());
+    }
+
+    /// Cancel a pending admin transfer. Must be called by the current admin.
+    pub fn cancel_admin_proposal(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("cncl_adm"),), ());
+    }
+
+    /// Accept the admin role. Must be called by the pending admin.
+    pub fn accept_admin(env: Env) {
+        Self::_require_not_locked(&env);
+        Self::_check_paused(&env);
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, AirdropError::NoPendingAdmin));
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            panic_with_error!(&env, AirdropError::ProposalExpired);
+        }
+
+        pending.require_auth();
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, AirdropError::NotInitialized));
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("set_admin"), old_admin, pending), ());
+    }
+
+    /// Permanently revoke the admin role and lock the contract.
+    ///
+    /// After this call:
+    /// - `fund`, `claim`, `reclaim_unclaimed`, `extend_deadline`,
+    ///   `propose_admin`, `accept_admin`, `pause`, `unpause` and `upgrade`
+    ///   can never succeed again.
+    /// - The `Admin` storage entry is removed and a `Locked` flag is set.
+    /// - `is_locked()` returns `true` from then on.
+    ///
+    /// Recipients can still `claim` up to the deadline, and the contract can
+    /// no longer be reconfigured by anyone.
+    ///
+    /// **Ordering matters here, more than on the token:** `reclaim_unclaimed`
+    /// is the only way the unclaimed remainder leaves this contract, and it
+    /// needs an admin to sweep to. Call `reclaim_unclaimed` *first*, let the
+    /// airdrop close, and only then revoke — revoking first strands whatever
+    /// is still unclaimed, permanently and irreversibly.
+    ///
+    /// **This action is irreversible.**
+    pub fn revoke_admin(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::Locked, &true);
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingAdminExpiry);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("revoked"),), true);
+    }
+
+    /// Pause the airdrop. Admin only.
+    ///
+    /// While paused, `fund`, `claim` and `reclaim_unclaimed` are refused with
+    /// [`AirdropError::Paused`], as is `accept_admin` — an in-flight transfer
+    /// cannot complete while the contract is halted. Read-only getters and
+    /// `extend_deadline` keep working so the state stays inspectable.
+    pub fn pause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().set(&DataKey::IsPaused, &true);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("pause"),), ());
+    }
+
+    /// Unpause the airdrop. Admin only.
+    pub fn unpause(env: Env) {
+        Self::_require_admin(&env);
+        env.storage().instance().remove(&DataKey::IsPaused);
+
+        Self::_bump_instance(&env);
+        env.events().publish((symbol_short!("unpause"),), ());
+    }
+
+    /// Upgrade this contract's WASM code hash in place. Admin only.
+    ///
+    /// Security note: this preserves existing storage and contract address, so
+    /// new WASM must remain storage-compatible with previous deployments.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::_require_admin(&env);
+        if new_wasm_hash == BytesN::from_array(&env, &[0; 32]) {
+            panic_with_error!(&env, AirdropError::InvalidWasmHash);
+        }
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+
+        Self::_bump_instance(&env);
+        env.events()
+            .publish((symbol_short!("upgrade"),), new_wasm_hash);
+    }
+
     /// Move `amount` tokens from `from` into this contract so recipients have
     /// something to claim against.
     ///
@@ -218,10 +411,11 @@ impl AirdropContract {
     /// Refused once `reclaim_unclaimed` has closed the airdrop, with
     /// [`AirdropError::AlreadyReclaimed`]: a reclaimed contract can move
     /// nothing out of itself any more, so every token accepted here would be
-    /// stuck until an upgrade this contract does not have. A closed airdrop
+    /// stuck until an admin `upgrade` replaces the logic. A closed airdrop
     /// needs a fresh deployment instead.
     pub fn fund(env: Env, from: Address, amount: i128) {
         Self::_require_initialized(&env);
+        Self::_check_paused(&env);
         from.require_auth();
 
         if amount <= 0 {
@@ -249,6 +443,7 @@ impl AirdropContract {
     /// with [`AirdropError::AlreadyClaimed`] even if the proof is still valid.
     pub fn claim(env: Env, recipient: Address, amount: i128, proof: Vec<BytesN<32>>) {
         Self::_require_initialized(&env);
+        Self::_check_paused(&env);
         recipient.require_auth();
 
         if amount <= 0 {
@@ -307,8 +502,8 @@ impl AirdropContract {
     /// to a balance this contract can no longer sweep out.
     pub fn reclaim_unclaimed(env: Env) -> i128 {
         Self::_require_initialized(&env);
-        let admin = Self::_admin(&env);
-        admin.require_auth();
+        Self::_check_paused(&env);
+        let admin = Self::_require_admin(&env);
 
         if env.ledger().sequence() <= Self::_deadline(&env) {
             panic_with_error!(&env, AirdropError::DeadlineNotReached);
@@ -349,8 +544,7 @@ impl AirdropContract {
     /// into a decade; going further needs a new deployment.
     pub fn extend_deadline(env: Env, deadline_ledger: u32) {
         Self::_require_initialized(&env);
-        let admin = Self::_admin(&env);
-        admin.require_auth();
+        let admin = Self::_require_admin(&env);
 
         if Self::_is_reclaimed(&env) {
             panic_with_error!(&env, AirdropError::AlreadyReclaimed);
@@ -385,6 +579,45 @@ impl AirdropContract {
 
     pub fn get_admin(env: Env) -> Address {
         Self::_admin(&env)
+    }
+
+    /// Returns the address proposed via `propose_admin` that has not yet
+    /// accepted the role, or `None` when no two-step transfer is in
+    /// progress. The entry is written by `propose_admin` and cleared by
+    /// `accept_admin`, `cancel_admin_proposal`, or `revoke_admin`; if the
+    /// proposal has expired it is also cleared so stale state does not linger.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        let expiry_ledger: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdminExpiry)
+            .unwrap_or(0);
+        if env.ledger().sequence() >= expiry_ledger {
+            env.storage().instance().remove(&DataKey::PendingAdmin);
+            env.storage()
+                .instance()
+                .remove(&DataKey::PendingAdminExpiry);
+            return None;
+        }
+
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Returns `true` once `revoke_admin` has been called. Once locked, no
+    /// admin operation can ever succeed again.
+    pub fn is_locked(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the airdrop is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false)
     }
 
     pub fn get_token(env: Env) -> Address {
@@ -468,10 +701,45 @@ impl AirdropContract {
     }
 
     fn _admin(env: &Env) -> Address {
+        Self::_require_not_locked(env);
         env.storage()
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(env, AirdropError::NotInitialized))
+    }
+
+    /// Admin gate for every mutating admin operation: the contract must not
+    /// be locked, and the caller must be the current admin.
+    fn _require_admin(env: &Env) -> Address {
+        let admin = Self::_admin(env);
+        admin.require_auth();
+        admin
+    }
+
+    fn _require_not_locked(env: &Env) {
+        let locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Locked)
+            .unwrap_or(false);
+        if locked {
+            panic_with_error!(env, AirdropError::Locked);
+        }
+    }
+
+    /// Circuit breaker. Gates the value-moving operations — `fund`, `claim`,
+    /// `reclaim_unclaimed` — plus `accept_admin`, so an in-flight admin
+    /// transfer cannot complete while the contract is halted. Policy setters
+    /// (`extend_deadline`) and read-only getters stay available.
+    fn _check_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::IsPaused)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, AirdropError::Paused);
+        }
     }
 
     fn _token(env: &Env) -> Address {
@@ -594,6 +862,7 @@ mod test {
     use super::*;
     use soroban_sdk::{
         testutils::Address as _,
+        testutils::Events as _,
         testutils::Ledger as _,
         testutils::{MockAuth, MockAuthInvoke},
         token::StellarAssetClient,
@@ -1230,6 +1499,454 @@ mod test {
         assert_eq!(a.client.get_deadline_ledger(), DEADLINE);
     }
 
+    // ── Administration ──────────────────────────────────────────────────
+    //
+    // Mirrors the token contract's admin suite (see
+    // docs/admin-capability-matrix.md): two-step transfer with an expiry,
+    // revoke_admin, pause/unpause, upgrade — each with its own event.
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+
+        a.client.propose_admin(&next);
+        // The old admin keeps the role until the new one accepts.
+        assert_eq!(a.client.get_admin(), a.admin);
+        assert_eq!(a.client.pending_admin(), Some(next.clone()));
+
+        a.client.accept_admin();
+        assert_eq!(a.client.get_admin(), next);
+        assert_eq!(a.client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_propose_admin_overwrites_previous() {
+        let a = setup(2);
+        let first = Address::generate(&a.env);
+        let second = Address::generate(&a.env);
+
+        a.client.propose_admin(&first);
+        a.client.propose_admin(&second);
+        assert_eq!(a.client.pending_admin(), Some(second.clone()));
+
+        a.client.accept_admin();
+        assert_eq!(a.client.get_admin(), second);
+    }
+
+    #[test]
+    fn test_propose_admin_rejects_current_admin() {
+        let a = setup(2);
+        assert_eq!(
+            a.client.try_propose_admin(&a.admin.clone()),
+            Err(Ok(AirdropError::InvalidAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_clears_pending_state() {
+        let a = setup(2);
+        let first = Address::generate(&a.env);
+        let second = Address::generate(&a.env);
+
+        a.client.propose_admin(&first);
+        a.client.propose_admin(&second);
+        a.client.cancel_admin_proposal();
+
+        assert_eq!(a.client.pending_admin(), None);
+        assert_eq!(a.client.get_admin(), a.admin);
+    }
+
+    #[test]
+    fn test_accept_admin_without_proposal() {
+        let a = setup(2);
+        assert_eq!(
+            a.client.try_accept_admin(),
+            Err(Ok(AirdropError::NoPendingAdmin.into()))
+        );
+    }
+
+    #[test]
+    fn test_accept_admin_rejects_expired_proposal() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+
+        a.client.propose_admin(&next);
+        // Exactly the expiry ledger: `>=` makes it lapsed, and one ledger
+        // further would archive the instance entry first (the entry's own
+        // TTL is the same constant), so this is the only observable edge.
+        a.env
+            .ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+
+        assert_eq!(
+            a.client.try_accept_admin(),
+            Err(Ok(AirdropError::ProposalExpired.into()))
+        );
+        assert_eq!(a.client.get_admin(), a.admin);
+    }
+
+    /// The getter clears a lapsed proposal rather than reporting an address
+    /// that `accept_admin` would then refuse — stale state must not linger.
+    #[test]
+    fn test_pending_admin_getter_clears_expired_proposal() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+
+        a.client.propose_admin(&next);
+        a.env
+            .ledger()
+            .set_sequence_number(ADMIN_PROPOSAL_EXPIRY_LEDGERS);
+
+        assert_eq!(a.client.pending_admin(), None);
+        // Re-proposing works: expiry is a deadline, not a lockout.
+        a.env.ledger().set_sequence_number(0);
+        a.client.propose_admin(&next);
+        assert_eq!(a.client.pending_admin(), Some(next));
+    }
+
+    #[test]
+    fn test_old_admin_retains_role_until_accepted() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+
+        a.client.propose_admin(&next);
+        // Still the admin — and still able to act as one.
+        assert_eq!(a.client.get_admin(), a.admin);
+        a.client.pause();
+        assert!(a.client.is_paused());
+        a.client.unpause();
+        assert_eq!(a.client.get_admin(), a.admin);
+    }
+
+    #[test]
+    fn test_accept_admin_blocked_when_paused() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+
+        a.client.propose_admin(&next);
+        a.client.pause();
+
+        assert_eq!(
+            a.client.try_accept_admin(),
+            Err(Ok(AirdropError::Paused.into()))
+        );
+        assert_eq!(a.client.get_admin(), a.admin);
+    }
+
+    #[test]
+    fn test_propose_admin_requires_admin_auth() {
+        let a = setup(2);
+        let stranger = Address::generate(&a.env);
+        let next = Address::generate(&a.env);
+
+        a.env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &a.client.address,
+                fn_name: "propose_admin",
+                args: (next.clone(),).into_val(&a.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(a.client.try_propose_admin(&next).is_err());
+        assert_eq!(a.client.pending_admin(), None);
+    }
+
+    #[test]
+    fn test_revoke_admin_sets_locked_flag() {
+        let a = setup(2);
+        assert!(!a.client.is_locked());
+
+        a.client.revoke_admin();
+
+        assert!(a.client.is_locked());
+    }
+
+    #[test]
+    fn test_get_admin_after_revoke_panics() {
+        let a = setup(2);
+        a.client.revoke_admin();
+        assert_eq!(
+            a.client.try_get_admin(),
+            Err(Ok(AirdropError::Locked.into()))
+        );
+    }
+
+    /// Every admin operation must be permanently unreachable after revoke —
+    /// this is the row the whole matrix turns on.
+    #[test]
+    fn test_admin_operations_after_revoke_fail() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+        a.client.revoke_admin();
+
+        assert_eq!(
+            a.client.try_propose_admin(&next),
+            Err(Ok(AirdropError::Locked.into()))
+        );
+        assert_eq!(
+            a.client.try_extend_deadline(&(DEADLINE + 100)),
+            Err(Ok(AirdropError::Locked.into()))
+        );
+        assert_eq!(a.client.try_pause(), Err(Ok(AirdropError::Locked.into())));
+        assert_eq!(
+            a.client
+                .try_upgrade(&BytesN::from_array(&a.env, &[1u8; 32])),
+            Err(Ok(AirdropError::Locked.into()))
+        );
+    }
+
+    #[test]
+    fn test_reclaim_after_revoke_fails() {
+        let a = setup(2);
+        a.client.revoke_admin();
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+
+        assert_eq!(
+            a.client.try_reclaim_unclaimed(),
+            Err(Ok(AirdropError::Locked.into()))
+        );
+    }
+
+    /// Recipients are unaffected by the admin giving up the role: claims
+    /// keep working up to the deadline.
+    #[test]
+    fn test_claim_still_works_after_revoke() {
+        let a = setup(2);
+        a.client.revoke_admin();
+
+        let who = a.recipients.get(0).unwrap();
+        let amount = a.amounts.get(0).unwrap();
+        let proof = proof_for(&a.env, &a.leaves, 0);
+
+        a.client.claim(&who, &amount, &proof);
+        assert_eq!(balance_of(&a.env, &a.token, &who), amount);
+    }
+
+    /// `Initialized` is deliberately never cleared by `revoke_admin`, so
+    /// revoking cannot re-open `initialize` (issue #322, token side).
+    #[test]
+    fn test_initialize_after_revoke_still_fails() {
+        let a = setup(2);
+        a.client.revoke_admin();
+
+        let root = root_of(&a.env, &a.leaves);
+        assert_eq!(
+            a.client
+                .try_initialize(&a.token, &a.admin, &root, &DEADLINE),
+            Err(Ok(AirdropError::AlreadyInitialized.into()))
+        );
+    }
+
+    #[test]
+    fn test_pause_blocks_value_moving_operations() {
+        let a = setup(2);
+        assert!(!a.client.is_paused());
+        a.client.pause();
+        assert!(a.client.is_paused());
+
+        let who = a.recipients.get(0).unwrap();
+        let amount = a.amounts.get(0).unwrap();
+        let proof = proof_for(&a.env, &a.leaves, 0);
+
+        assert_eq!(
+            a.client.try_claim(&who, &amount, &proof),
+            Err(Ok(AirdropError::Paused.into()))
+        );
+        assert_eq!(
+            a.client.try_fund(&a.admin.clone(), &1i128),
+            Err(Ok(AirdropError::Paused.into()))
+        );
+
+        a.client.unpause();
+        assert!(!a.client.is_paused());
+        a.client.claim(&who, &amount, &proof);
+        assert_eq!(balance_of(&a.env, &a.token, &who), amount);
+    }
+
+    #[test]
+    fn test_pause_blocks_reclaim() {
+        let a = setup(2);
+        a.env.ledger().set_sequence_number(DEADLINE + 1);
+        a.client.pause();
+
+        assert_eq!(
+            a.client.try_reclaim_unclaimed(),
+            Err(Ok(AirdropError::Paused.into()))
+        );
+    }
+
+    /// Policy setters and read-only getters stay available while paused so
+    /// the state remains inspectable and the deadline can still be managed.
+    #[test]
+    fn test_extend_deadline_and_getters_work_while_paused() {
+        let a = setup(2);
+        a.client.pause();
+
+        a.client.extend_deadline(&(DEADLINE + 100));
+        assert_eq!(a.client.get_deadline_ledger(), DEADLINE + 100);
+
+        assert!(a.client.is_paused());
+        assert_eq!(a.client.get_admin(), a.admin);
+        assert_eq!(a.client.get_token(), a.token);
+        assert_eq!(a.client.total_claimed(), 0);
+        assert!(a.client.remaining_balance() > 0);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let a = setup(2);
+        let stranger = Address::generate(&a.env);
+
+        a.env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &a.client.address,
+                fn_name: "pause",
+                args: ().into_val(&a.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(a.client.try_pause().is_err());
+        assert!(!a.client.is_paused());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_upgrade() {
+        let a = setup(2);
+        let stranger = Address::generate(&a.env);
+        let hash = BytesN::from_array(&a.env, &[1u8; 32]);
+
+        a.env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &a.client.address,
+                fn_name: "upgrade",
+                args: (hash.clone(),).into_val(&a.env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(a.client.try_upgrade(&hash).is_err());
+    }
+
+    #[test]
+    fn test_upgrade_rejects_zero_hash() {
+        let a = setup(2);
+        assert_eq!(
+            a.client
+                .try_upgrade(&BytesN::from_array(&a.env, &[0u8; 32])),
+            Err(Ok(AirdropError::InvalidWasmHash.into()))
+        );
+    }
+
+    /// The admin lifecycle emits one event per action, with the same topic-0
+    /// symbols the token contract uses so a shared dashboard admin panel can
+    /// render both.
+    #[test]
+    fn test_admin_lifecycle_emits_an_event_per_action() {
+        let a = setup(2);
+        let next = Address::generate(&a.env);
+        let old_admin = a.admin.clone();
+        let contract = a.client.address.clone();
+
+        type Event = (
+            soroban_sdk::Address,
+            soroban_sdk::Vec<soroban_sdk::Val>,
+            soroban_sdk::Val,
+        );
+
+        /// The single most recent event, wrapped in a `Vec` so it compares
+        /// through `Vec`'s host-side `PartialEq` (`Val` itself has none).
+        fn last_event(a: &Airdrop) -> soroban_sdk::Vec<Event> {
+            let events = a.env.events().all();
+            events.slice(events.len() - 1..)
+        }
+
+        a.client.propose_admin(&next);
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract.clone(),
+                    (symbol_short!("prop_adm"), old_admin.clone(), next.clone()).into_val(&a.env),
+                    ().into_val(&a.env)
+                )
+            ]
+        );
+
+        a.client.cancel_admin_proposal();
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract.clone(),
+                    (symbol_short!("cncl_adm"),).into_val(&a.env),
+                    ().into_val(&a.env)
+                )
+            ]
+        );
+
+        a.client.propose_admin(&next);
+        a.client.accept_admin();
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract.clone(),
+                    (symbol_short!("set_admin"), old_admin.clone(), next.clone()).into_val(&a.env),
+                    ().into_val(&a.env)
+                )
+            ]
+        );
+        assert_eq!(a.client.get_admin(), next.clone());
+
+        a.client.pause();
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract.clone(),
+                    (symbol_short!("pause"),).into_val(&a.env),
+                    ().into_val(&a.env)
+                )
+            ]
+        );
+
+        a.client.unpause();
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract.clone(),
+                    (symbol_short!("unpause"),).into_val(&a.env),
+                    ().into_val(&a.env)
+                )
+            ]
+        );
+
+        a.client.revoke_admin();
+        assert_eq!(
+            last_event(&a),
+            soroban_sdk::vec![
+                &a.env,
+                (
+                    contract,
+                    (symbol_short!("revoked"),).into_val(&a.env),
+                    true.into_val(&a.env)
+                )
+            ]
+        );
+    }
+
     // ── Read-only helpers ───────────────────────────────────────────────
 
     #[test]
@@ -1342,7 +2059,20 @@ mod test {
 
     // ── Event schema ────────────────────────────────────────────────────
 
-    const EXPECTED_TOPICS: [&str; 5] = ["init", "fund", "claim", "reclaim", "extend"];
+    const EXPECTED_TOPICS: [&str; 12] = [
+        "init",
+        "prop_adm",
+        "cncl_adm",
+        "set_admin",
+        "revoked",
+        "pause",
+        "unpause",
+        "upgrade",
+        "fund",
+        "claim",
+        "reclaim",
+        "extend",
+    ];
 
     /// Asserts the set of `symbol_short!("...")` topic-0 literals used in
     /// this file's production code (everything before the test module)
