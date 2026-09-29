@@ -56,6 +56,17 @@ const ADMIN_PROPOSAL_EXPIRY_LEDGERS: u32 = TTL_LEDGERS;
 /// ~180 days — far longer than six hours).
 const TOKEN_WASM_CHANGE_DELAY_LEDGERS: u32 = 6 * 60 * 60 / 5;
 
+/// Largest page a caller may request from `get_deployments_paginated`.
+///
+/// `limit` is caller-supplied, so with no ceiling a single read can ask the
+/// host to build and serialise an arbitrarily large vector — burning the
+/// invocation's compute budget and resource fee on a read that returns
+/// nothing the caller did not already have (issue #469). Stellar's guidance
+/// is that a function which reads storage in a loop must bound its
+/// iterations, and that a caller-chosen page size is clamped in-contract
+/// rather than trusted.
+const MAX_PAGE: u32 = 100;
+
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
@@ -630,7 +641,10 @@ impl FactoryContract {
     /// Return a paginated list of deployed token addresses.
     ///
     /// `start` — zero-based offset into the deployment list.
-    /// `limit` — maximum number of addresses to return.
+    /// `limit` — maximum number of addresses to return, **clamped to
+    /// `MAX_PAGE` (100)**. A larger request is served as a 100-entry page
+    /// rather than rejected, so an over-eager client still makes progress
+    /// instead of getting nothing back (#469).
     pub fn get_deployments_paginated(env: Env, start: u32, limit: u32) -> Vec<Address> {
         let total = Self::_deployment_count(&env);
 
@@ -638,7 +652,7 @@ impl FactoryContract {
             return Vec::new(&env);
         }
 
-        let end = start.saturating_add(limit).min(total);
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(total);
 
         let mut paginated = Vec::new(&env);
         let mut i = start;
@@ -1469,6 +1483,65 @@ mod test {
         assert_eq!(client.get_deployments_paginated(&0u32, &0u32).len(), 0);
     }
 
+    // ── MAX_PAGE on get_deployments_paginated (#469) ─────────────────────
+
+    #[test]
+    fn test_get_deployments_paginated_clamps_an_oversized_limit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = configured_factory(&env);
+
+        // More deployments than one page can hold, so the clamp is observable
+        // rather than masked by a short list. Recorded straight into the index
+        // rather than by deploying 110 real tokens: the point here is what the
+        // getter does with the caller's `limit`, and that must not be
+        // contingent on the cost of populating the list.
+        let contract_id = client.address.clone();
+        let count = MAX_PAGE + 5;
+        let mut recorded = soroban_sdk::Vec::new(&env);
+        for _ in 0..count {
+            let token = Address::generate(&env);
+            recorded.push_back(token.clone());
+            env.as_contract(&contract_id, || {
+                FactoryContract::_record_deployment(&env, &token);
+            });
+        }
+        assert_eq!(client.get_deployment_count(), count);
+
+        // The oversized request is served as a MAX_PAGE-sized page rather than
+        // rejected or honoured — this is the fix: `limit` is the caller's, and
+        // it must not decide how much the host allocates.
+        let clamped = client.get_deployments_paginated(&0u32, &4_000_000_000u32);
+        assert_eq!(clamped.len(), MAX_PAGE);
+        for i in 0..MAX_PAGE {
+            assert_eq!(clamped.get(i).unwrap(), recorded.get(i).unwrap());
+        }
+
+        // An explicit `MAX_PAGE` request behaves identically — the clamp is not
+        // a special case, it is the same value.
+        assert_eq!(
+            client.get_deployments_paginated(&0u32, &MAX_PAGE).len(),
+            MAX_PAGE
+        );
+
+        // A limit below the ceiling is honoured as-is, so the clamp only ever
+        // lowers the page size, never raises it.
+        assert_eq!(client.get_deployments_paginated(&0u32, &7u32).len(), 7);
+
+        // The remainder is still reachable, so clamping costs a caller nothing
+        // but one extra call — nothing is dropped.
+        let rest = client.get_deployments_paginated(&MAX_PAGE, &MAX_PAGE);
+        assert_eq!(rest.len(), 5);
+        assert_eq!(rest.get(0).unwrap(), recorded.get(MAX_PAGE).unwrap());
+
+        let all: u32 = (0..=1)
+            .map(|p| {
+                client
+                    .get_deployments_paginated(&(p * MAX_PAGE), &u32::MAX)
+                    .len()
+            })
+            .sum();
+        assert_eq!(all, count);
     // ── Admin lifecycle ─────────────────────────────────────────────────
     //
     // Mirrors the token contract's admin suite (see

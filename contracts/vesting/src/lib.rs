@@ -48,6 +48,8 @@ pub enum VestingError {
     CliffAfterEnd = 16,
     /// `prune_recipient` called for a recipient that is not tracked.
     RecipientNotTracked = 17,
+    /// A recipient already holds the maximum number of stored schedules.
+    TooManySchedules = 18,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +82,47 @@ const MAX_VESTING_AMOUNT: i128 = i128::MAX / u32::MAX as i128;
 /// could never fire. The test environment still reports 6,312,000, which is
 /// why no test in this file asserts a specific network figure.
 const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
+
+/// Largest page a caller may request from a paginated getter.
+///
+/// `limit` is caller-supplied, so with no ceiling a single read can ask the
+/// host to build and serialise an arbitrarily large vector — burning the
+/// invocation's compute budget and resource fee on a read that returns
+/// nothing the caller did not already have (issue #469). Stellar's guidance
+/// is that a function which reads storage in a loop must bound its
+/// iterations, and that a caller-chosen page size is clamped in-contract
+/// rather than trusted.
+///
+/// 100 is comfortably above the page size the launchpad frontend actually
+/// asks for (20, see `useVestingDashboard`), so the clamp is invisible to it
+/// while leaving other clients a generous window.
+const MAX_PAGE: u32 = 100;
+
+/// Most schedules a single recipient may hold at once.
+///
+/// `total_vested`, `total_released`, `total_releasable`, `get_all_schedules`
+/// and `release_all` each walk a recipient's entire schedule range, and that
+/// range is bounded only by how many times the admin is willing to call
+/// `create_schedule` / `create_schedules_batch`. Past a few hundred entries
+/// those getters exceed the compute budget and become permanently uncallable
+/// — and they break *before* `release` does, so `total_releasable` and
+/// `release_all` go down together: a holder can neither claim nor find out
+/// what they are owed. A single well-meaning second grant for a recipient who
+/// already has fifty is enough to start down that path (issue #466).
+///
+/// Enforcing the bound at the writer is what makes those five loops safe by
+/// construction, rather than each reader defending itself separately and any
+/// one of them being missed.
+///
+/// 50 matches `create_schedules_batch`'s own per-call cap, so a recipient can
+/// be brought to the ceiling by one batch and then not exceeded, and it sits
+/// ~2 orders of magnitude below where the aggregate loops start failing.
+///
+/// Note this is a lifetime cap, not a concurrent one: `prune_recipient` only
+/// clears the recipient's *enumeration* slot and never decrements
+/// `ScheduleCount`, so it does not free capacity. Revoking a schedule frees
+/// the tokens but not the slot.
+const MAX_SCHEDULES_PER_RECIPIENT: u32 = 50;
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -201,6 +244,11 @@ impl VestingContract {
     /// This function atomically transfers `total_amount` tokens from the admin
     /// to this contract's address using transfer, ensuring the contract
     /// is properly funded in the same transaction.
+    ///
+    /// **Maximum schedules per recipient: `MAX_SCHEDULES_PER_RECIPIENT` (50).**
+    /// Exceeding it fails with `TooManySchedules` rather than being stored,
+    /// so the aggregate getters that walk a recipient's full schedule range
+    /// stay inside the compute budget (issue #466).
     pub fn create_schedule(
         env: Env,
         recipient: Address,
@@ -222,6 +270,9 @@ impl VestingContract {
         );
 
         let schedule_index = Self::_schedule_count(&env, &recipient);
+        if schedule_index >= MAX_SCHEDULES_PER_RECIPIENT {
+            panic_with_error!(&env, VestingError::TooManySchedules);
+        }
         let key = Self::_schedule_key(&recipient, schedule_index);
 
         // Get the token contract address
@@ -271,6 +322,13 @@ impl VestingContract {
     /// **Maximum batch size: 50 recipients.** Larger batches risk exceeding
     /// Soroban's per-transaction compute budget and will be rejected up front
     /// with a clear error rather than an opaque resource failure.
+    ///
+    /// **Maximum schedules per recipient: `MAX_SCHEDULES_PER_RECIPIENT` (50)**
+    /// — the same invariant `create_schedule` enforces, and for the same
+    /// reason (issue #466). The check below counts this batch's own earlier
+    /// entries too, so a batch can bring a recipient *to* the ceiling but
+    /// never past it. A batch that would push any recipient over fails
+    /// entirely, like every other validation error here.
     pub fn create_schedules_batch(env: Env, schedules: Vec<ScheduleInput>) -> u32 {
         Self::_check_paused(&env);
         let admin = Self::_require_admin(&env);
@@ -306,6 +364,13 @@ impl VestingContract {
             let schedule_index = next_indexes
                 .get(input.recipient.clone())
                 .unwrap_or(Self::_schedule_count(&env, &input.recipient));
+            // Bound the writer so the aggregate readers stay affordable. The
+            // index is this recipient's *next* slot, so a recipient already
+            // at the ceiling and a recipient who reaches it part-way through
+            // this batch are rejected by the same comparison.
+            if schedule_index >= MAX_SCHEDULES_PER_RECIPIENT {
+                panic_with_error!(&env, VestingError::TooManySchedules);
+            }
             next_indexes.set(input.recipient.clone(), schedule_index + 1);
             assigned_indexes.push_back(schedule_index);
 
@@ -677,10 +742,16 @@ impl VestingContract {
     /// Return paginated list of recipients with vesting schedules.
     ///
     /// `start` — zero-based offset into the recipients list.
-    /// `limit` — maximum number of recipients to return.
+    /// `limit` — maximum number of recipients to return, **clamped to
+    /// `MAX_PAGE` (100)**. A larger request is served as a 100-entry page
+    /// rather than rejected, so an over-eager client still makes progress
+    /// instead of getting nothing back (#469).
     ///
     /// Pruned slots (see `prune_recipient`) are omitted from the result, so
-    /// a page may contain fewer than `limit` entries even if more remain.
+    /// a page may contain fewer than `limit` entries even if more remain —
+    /// which is also why a short page is not, on its own, proof that the
+    /// list is exhausted. Callers should keep paging while the returned
+    /// page is non-empty, as `useVestingDashboard` does.
     pub fn get_recipients_paginated(env: Env, start: u32, limit: u32) -> Vec<Address> {
         let total = Self::_recipient_count(&env);
 
@@ -688,7 +759,7 @@ impl VestingContract {
             return Vec::new(&env);
         }
 
-        let end = start.saturating_add(limit).min(total);
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(total);
 
         let mut paginated = Vec::new(&env);
         let mut i = start;
@@ -732,6 +803,10 @@ impl VestingContract {
     }
 
     /// Sum vested amount across all non-revoked schedules for a recipient.
+    ///
+    /// Bounded by `MAX_SCHEDULES_PER_RECIPIENT`: the writer refuses to store
+    /// a 51st schedule, so this loop cannot outgrow the compute budget
+    /// (issue #466).
     pub fn total_vested(env: Env, recipient: Address) -> i128 {
         let count = Self::_schedule_count(&env, &recipient);
         let mut total: i128 = 0;
@@ -751,6 +826,8 @@ impl VestingContract {
     }
 
     /// Sum released amount across all schedules for a recipient.
+    ///
+    /// Bounded by `MAX_SCHEDULES_PER_RECIPIENT` (see `total_vested`).
     pub fn total_released(env: Env, recipient: Address) -> i128 {
         let count = Self::_schedule_count(&env, &recipient);
         let mut total: i128 = 0;
@@ -768,6 +845,8 @@ impl VestingContract {
     }
 
     /// Sum releasable (vested minus released) across all non-revoked schedules.
+    ///
+    /// Bounded by `MAX_SCHEDULES_PER_RECIPIENT` (see `total_vested`).
     pub fn total_releasable(env: Env, recipient: Address) -> i128 {
         let count = Self::_schedule_count(&env, &recipient);
         let mut total: i128 = 0;
@@ -788,6 +867,11 @@ impl VestingContract {
     }
 
     /// Return all schedule objects for a recipient in a single call.
+    ///
+    /// Safe to call for any recipient the cap admits, because that is what
+    /// bounds the loop: at most `MAX_SCHEDULES_PER_RECIPIENT` entries are ever
+    /// stored (issue #466). `get_schedules_paginated` is the incremental
+    /// alternative for a client that would rather bound its own work.
     pub fn get_all_schedules(env: Env, recipient: Address) -> Vec<VestingSchedule> {
         let count = Self::_schedule_count(&env, &recipient);
         let mut schedules: Vec<VestingSchedule> = Vec::new(&env);
@@ -804,8 +888,57 @@ impl VestingContract {
         schedules
     }
 
+    /// Return one page of a recipient's schedules.
+    ///
+    /// `start` — zero-based index into the recipient's schedule range.
+    /// `limit` — maximum number of schedules to return, **clamped to
+    /// `MAX_PAGE` (100)**; a larger request is served as a 100-entry page
+    /// rather than rejected (#469).
+    ///
+    /// The same `get_recipients_paginated` contract applies: a page may come
+    /// back short even when more entries remain, so a caller paging through
+    /// everything should stop on an empty page rather than on a short one.
+    /// `get_schedule_count` reports how many slots exist in total.
+    ///
+    /// Added alongside `get_all_schedules`, not in place of it: the cap is
+    /// what makes the single-call form safe, and this lets a client render
+    /// grants incrementally without paying for the whole set up front
+    /// (issue #466).
+    pub fn get_schedules_paginated(
+        env: Env,
+        recipient: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<VestingSchedule> {
+        let count = Self::_schedule_count(&env, &recipient);
+        let mut schedules: Vec<VestingSchedule> = Vec::new(&env);
+
+        if start >= count {
+            return schedules;
+        }
+
+        let end = start.saturating_add(limit.min(MAX_PAGE)).min(count);
+        let mut i = start;
+        while i < end {
+            let key = Self::_schedule_key(&recipient, i);
+            if let Some(schedule) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, VestingSchedule>(&key)
+            {
+                schedules.push_back(schedule);
+            }
+            i += 1;
+        }
+        schedules
+    }
+
     /// Release all releasable tokens across all non-revoked schedules
     /// in a single token transfer.
+    ///
+    /// Bounded by `MAX_SCHEDULES_PER_RECIPIENT` (see `total_vested`): this
+    /// loop used to be the one place a holder could be left unable to claim
+    /// at all, because it walks the same uncapped range as the getters.
     pub fn release_all(env: Env, recipient: Address) {
         Self::_check_paused(&env);
         recipient.require_auth();
@@ -2994,5 +3127,349 @@ mod test {
 
         let all = client.get_all_schedules(&recipient);
         assert_eq!(all.len(), 0);
+    }
+
+    // ── Per-recipient schedule cap (#466) ─────────────────────────────────
+    //
+    // `total_vested`, `total_released`, `total_releasable`, `get_all_schedules`
+    // and `release_all` each walk a recipient's whole schedule range. Unbounded,
+    // a well-meaning second grant eventually pushes that walk past the compute
+    // budget and the aggregate getters become permanently uncallable — so a
+    // holder can neither see what they are owed nor claim it. The invariant is
+    // therefore enforced where the entries are written, and these tests hold
+    // both writers to it.
+
+    /// A vested-and-funded contract, with a fixed generous float so tests can
+    /// park a few large schedules without the *token* contract — not the code
+    /// under test — being the thing that runs out.
+    fn setup_for_cap(env: &Env) -> VestingContractClient<'static> {
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(env, &contract_id);
+
+        let admin = Address::generate(env);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_client = soroban_sdk::token::StellarAssetClient::new(env, &token_addr);
+        token_client.mint(&admin, &100_000_000i128);
+
+        client.initialize(&admin, &token_addr);
+        client
+    }
+
+    /// A batch of `count` single-token schedules for one recipient.
+    fn single_recipient_batch(env: &Env, recipient: &Address, count: u32) -> Vec<ScheduleInput> {
+        let mut batch = Vec::new(env);
+        for _ in 0..count {
+            batch.push_back(ScheduleInput {
+                recipient: recipient.clone(),
+                total_amount: 1,
+                cliff_ledger: 100,
+                end_ledger: 200,
+            });
+        }
+        batch
+    }
+
+    #[test]
+    fn test_create_schedule_rejects_beyond_the_per_recipient_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let client = setup_for_cap(&env);
+        let recipient = Address::generate(&env);
+
+        // Fill to exactly the cap, one call at a time, so this also proves the
+        // boundary is inclusive: the 50th schedule is stored.
+        for _ in 0..MAX_SCHEDULES_PER_RECIPIENT {
+            client.create_schedule(&recipient, &1, &100, &200);
+        }
+        assert_eq!(
+            client.get_schedule_count(&recipient),
+            MAX_SCHEDULES_PER_RECIPIENT
+        );
+        let committed = client.total_committed();
+        assert!(committed > 0);
+
+        // The 51st is refused rather than stored, and refusing it rolls the
+        // whole call back — no schedule, no committed bump, no token moved.
+        assert_eq!(
+            client.try_create_schedule(&recipient, &1i128, &100u32, &200u32),
+            Err(Ok(VestingError::TooManySchedules.into()))
+        );
+        assert_eq!(
+            client.get_schedule_count(&recipient),
+            MAX_SCHEDULES_PER_RECIPIENT
+        );
+        assert_eq!(client.total_committed(), committed);
+        assert_eq!(client.get_all_schedules(&recipient).len(), 50);
+
+        // The cap is per recipient, not global: someone else is unaffected.
+        let other = Address::generate(&env);
+        client.create_schedule(&other, &1, &100, &200);
+        assert_eq!(client.get_schedule_count(&other), 1);
+
+        // ...and the aggregates that depend on the cap all still answer at
+        // the ceiling, which is the whole point of holding the writer to it.
+        let _ = client.total_vested(&recipient);
+        let _ = client.total_released(&recipient);
+        let _ = client.total_releasable(&recipient);
+    }
+
+    #[test]
+    fn test_create_schedules_batch_rejects_beyond_the_per_recipient_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let client = setup_for_cap(&env);
+        let recipient = Address::generate(&env);
+
+        // 49 by one, leaving exactly one slot, then a batch of two: the batch
+        // is what pushes past the ceiling, and it must be rejected whole even
+        // though its first entry would have fitted.
+        for _ in 0..MAX_SCHEDULES_PER_RECIPIENT - 1 {
+            client.create_schedule(&recipient, &1, &100, &200);
+        }
+        assert_eq!(
+            client.get_schedule_count(&recipient),
+            MAX_SCHEDULES_PER_RECIPIENT - 1
+        );
+
+        let mut batch = Vec::new(&env);
+        for _ in 0..2 {
+            batch.push_back(ScheduleInput {
+                recipient: recipient.clone(),
+                total_amount: 1,
+                cliff_ledger: 100,
+                end_ledger: 200,
+            });
+        }
+
+        assert_eq!(
+            client.try_create_schedules_batch(&batch),
+            Err(Ok(VestingError::TooManySchedules.into()))
+        );
+        // Rolled back entirely: the slot that *could* have been used is still
+        // free, and no committed amount leaked.
+        assert_eq!(
+            client.get_schedule_count(&recipient),
+            MAX_SCHEDULES_PER_RECIPIENT - 1
+        );
+        assert_eq!(client.total_committed(), 49);
+
+        // A single-entry batch that fits is accepted, so the boundary is
+        // inclusive from both sides.
+        let mut fits = Vec::new(&env);
+        fits.push_back(ScheduleInput {
+            recipient: recipient.clone(),
+            total_amount: 1,
+            cliff_ledger: 100,
+            end_ledger: 200,
+        });
+        assert_eq!(client.create_schedules_batch(&fits), 1);
+        assert_eq!(
+            client.get_schedule_count(&recipient),
+            MAX_SCHEDULES_PER_RECIPIENT
+        );
+    }
+
+    #[test]
+    fn test_create_schedules_batch_cannot_use_a_full_batch_to_bypass_the_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // This is the case the cap is easy to get wrong: the batch size limit
+        // and the per-recipient cap are both 50, so a recipient who already
+        // has even one schedule can be handed 50 more in a single call and
+        // quietly end up over the ceiling. Each entry is checked against the
+        // index the batch has itself already used up, so entry 50 is the one
+        // that trips — not entry 51, which can never exist.
+        let client = setup_for_cap(&env);
+        let recipient = Address::generate(&env);
+        client.create_schedule(&recipient, &1, &100, &200);
+
+        let batch = single_recipient_batch(&env, &recipient, MAX_SCHEDULES_PER_RECIPIENT);
+        assert_eq!(
+            client.try_create_schedules_batch(&batch),
+            Err(Ok(VestingError::TooManySchedules.into()))
+        );
+
+        // Nothing from the rejected batch landed: not the 49 entries that
+        // would individually have fitted, and no committed amount.
+        assert_eq!(client.get_schedule_count(&recipient), 1);
+        assert_eq!(client.total_committed(), 1);
+        assert_eq!(client.get_all_schedules(&recipient).len(), 1);
+
+        // A fresh recipient with a full 50-entry batch is still accepted, so
+        // the cap is exactly `MAX_SCHEDULES_PER_RECIPIENT` and not one short.
+        let other = Address::generate(&env);
+        let full = single_recipient_batch(&env, &other, MAX_SCHEDULES_PER_RECIPIENT);
+        assert_eq!(client.create_schedules_batch(&full), 50);
+        assert_eq!(
+            client.get_schedule_count(&other),
+            MAX_SCHEDULES_PER_RECIPIENT
+        );
+
+        // And 49 more would be refused, with the single remaining slot unused.
+        let more = single_recipient_batch(&env, &other, 1);
+        assert_eq!(
+            client.try_create_schedules_batch(&more),
+            Err(Ok(VestingError::TooManySchedules.into()))
+        );
+        assert_eq!(
+            client.get_schedule_count(&other),
+            MAX_SCHEDULES_PER_RECIPIENT
+        );
+    }
+
+    // ── get_schedules_paginated (#466) ───────────────────────────────────
+
+    #[test]
+    fn test_get_schedules_paginated_walks_the_whole_range() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let client = setup_for_cap(&env);
+        let recipient = Address::generate(&env);
+        client.create_schedule(&recipient, &1000, &100, &200);
+        client.create_schedule(&recipient, &2000, &150, &250);
+        client.create_schedule(&recipient, &3000, &200, &300);
+
+        // Page size 2, three entries: a short page, then a full one, then an
+        // empty one. Matches how a client should walk it.
+        let page0 = client.get_schedules_paginated(&recipient, &0u32, &2u32);
+        assert_eq!(page0.len(), 2);
+        assert_eq!(page0.get(0).unwrap().total_amount, 1000);
+        assert_eq!(page0.get(1).unwrap().total_amount, 2000);
+
+        let page1 = client.get_schedules_paginated(&recipient, &2u32, &2u32);
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page1.get(0).unwrap().total_amount, 3000);
+
+        // Past the end is empty, not an error.
+        assert_eq!(
+            client
+                .get_schedules_paginated(&recipient, &3u32, &2u32)
+                .len(),
+            0
+        );
+        assert_eq!(
+            client
+                .get_schedules_paginated(&recipient, &u32::MAX, &2u32)
+                .len(),
+            0
+        );
+
+        // Overlapping reads are consistent with the single-call getter.
+        let all = client.get_all_schedules(&recipient);
+        let mut paged: u32 = 0;
+        let mut seen = 0;
+        while paged < 3 {
+            seen += client
+                .get_schedules_paginated(&recipient, &paged, &1u32)
+                .len();
+            paged += 1;
+        }
+        assert_eq!(seen, all.len());
+    }
+
+    #[test]
+    fn test_get_schedules_paginated_clamps_an_oversized_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let client = setup_for_cap(&env);
+        let recipient = Address::generate(&env);
+        for i in 0..3i128 {
+            let amount = 1000 + i;
+            client.create_schedule(&recipient, &amount, &100, &200);
+        }
+
+        // A caller-supplied limit must not be able to size the host's vector
+        // (#469). The clamp cannot show up here because the recipient has only
+        // three schedules, so this asserts the limit is harmless; the
+        // `MAX_PAGE` ceiling itself is asserted on the recipients getter below,
+        // where a large enough population exists to hit it.
+        let page = client.get_schedules_paginated(&recipient, &0u32, &4_000_000_000u32);
+        assert_eq!(page.len(), 3);
+    }
+
+    // ── MAX_PAGE on get_recipients_paginated (#469) ──────────────────────
+
+    /// Register `count` distinct recipients, one single-token schedule each,
+    /// returning them in registration order.
+    ///
+    /// Batched rather than looped: 110 sequential `create_schedule` calls blow
+    /// the test budget, which says nothing useful about the getter under test.
+    fn register_recipients(env: &Env, client: &VestingContractClient, count: u32) -> Vec<Address> {
+        let mut recipients: Vec<Address> = Vec::new(env);
+        let mut remaining = count;
+        while remaining > 0 {
+            let size = remaining.min(50);
+            let mut batch: Vec<ScheduleInput> = Vec::new(env);
+            for _ in 0..size {
+                let recipient = Address::generate(env);
+                recipients.push_back(recipient.clone());
+                batch.push_back(ScheduleInput {
+                    recipient,
+                    total_amount: 1,
+                    cliff_ledger: 100,
+                    end_ledger: 200,
+                });
+            }
+            client.create_schedules_batch(&batch);
+            remaining -= size;
+        }
+        recipients
+    }
+
+    #[test]
+    fn test_get_recipients_paginated_clamps_an_oversized_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let client = setup_for_cap(&env);
+
+        // More recipients than one page can hold, so the clamp is observable
+        // rather than masked by a short list.
+        let count = MAX_PAGE + 10;
+        let recipients = register_recipients(&env, &client, count);
+        assert_eq!(client.get_recipient_count(), count);
+
+        // The oversized request is served as a MAX_PAGE-sized page rather than
+        // rejected or honoured — this is the fix: `limit` is the caller's, and
+        // it must not decide how much the host allocates.
+        let clamped = client.get_recipients_paginated(&0u32, &4_000_000_000u32);
+        assert_eq!(clamped.len(), MAX_PAGE);
+        for i in 0..MAX_PAGE {
+            assert_eq!(clamped.get(i).unwrap(), recipients.get(i).unwrap());
+        }
+
+        // An explicit `MAX_PAGE` request behaves identically — the clamp is not
+        // a special case, it is the same value.
+        assert_eq!(
+            client.get_recipients_paginated(&0u32, &MAX_PAGE).len(),
+            MAX_PAGE
+        );
+
+        // And the remainder is still reachable by paging, so the clamp costs a
+        // caller nothing but one extra call. The two pages together account for
+        // every recipient, so nothing is dropped by clamping.
+        let rest = client.get_recipients_paginated(&MAX_PAGE, &MAX_PAGE);
+        assert_eq!(rest.len(), 10);
+        assert_eq!(rest.get(0).unwrap(), recipients.get(MAX_PAGE).unwrap());
+
+        let all: u32 = (0..=1)
+            .map(|p| {
+                client
+                    .get_recipients_paginated(&(p * MAX_PAGE), &u32::MAX)
+                    .len()
+            })
+            .sum();
+        assert_eq!(all, count);
+
+        // A limit below the ceiling is honoured as-is, so the clamp only ever
+        // lowers the page size, never raises it.
+        assert_eq!(client.get_recipients_paginated(&0u32, &7u32).len(), 7);
     }
 }
