@@ -41,6 +41,7 @@
     "no": "No"
   },
   "navigation": {
+    "explore": "Explorar",
     "deploy": "Desplegar",
     "dashboard": "Panel",
     "allowances": "Asignaciones",

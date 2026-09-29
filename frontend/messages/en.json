@@ -41,6 +41,7 @@
     "no": "No"
   },
   "navigation": {
+    "explore": "Explore",
     "deploy": "Deploy",
     "dashboard": "Dashboard",
     "allowances": "Allowances",

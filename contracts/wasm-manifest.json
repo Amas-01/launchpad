@@ -43,5 +43,17 @@
       "rust_version": "stable",
       "profile": "release"
     }
+  },
+  "factory": {
+    "deployments": {
+      "testnet": {
+        "address": "",
+        "wasm_hash": ""
+      },
+      "mainnet": {
+        "address": "",
+        "wasm_hash": ""
+      }
+    }
   }
 }

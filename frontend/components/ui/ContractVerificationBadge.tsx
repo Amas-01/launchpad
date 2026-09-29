@@ -12,6 +12,8 @@ interface ContractVerificationBadgeProps {
   networkConfig: NetworkConfig;
   isLocked?: boolean;
   compact?: boolean;
+  /** "factory" compares against the manifest's per-network factory entry. */
+  kind?: "token" | "factory";
 }
 
 function shortenHash(hash: string): string {
@@ -23,6 +25,7 @@ export function ContractVerificationBadge({
   networkConfig,
   isLocked,
   compact,
+  kind = "token",
 }: ContractVerificationBadgeProps) {
   const [status, setStatus] = useState<VerificationStatus>("loading");
   const [deployedHash, setDeployedHash] = useState<string | null>(null);
@@ -56,14 +59,29 @@ export function ContractVerificationBadge({
           return;
         }
 
-        const tokenEntry = mfst.token;
-        const latestVersion = tokenEntry?.latest;
-        const versionData = latestVersion ? tokenEntry.versions[latestVersion] : null;
+        let referenceWasmHash: string | undefined;
+        let latestVersion: string | undefined;
+        if (kind === "factory") {
+          const entry = mfst.factory?.deployments?.[networkConfig.network];
+          if (entry?.address && entry.address !== contractId) {
+            if (mountedRef.current) setStatus("modified");
+            return;
+          }
+          referenceWasmHash = entry?.wasm_hash;
+          latestVersion = "factory";
+        } else {
+          const tokenEntry = mfst.token;
+          latestVersion = tokenEntry?.latest;
+          referenceWasmHash = latestVersion
+            ? tokenEntry.versions[latestVersion]?.wasm_hash
+            : undefined;
+        }
 
-        if (!versionData || !versionData.wasm_hash) {
+        if (!referenceWasmHash || !latestVersion) {
           if (mountedRef.current) setStatus("unknown");
           return;
         }
+        const versionData = { wasm_hash: referenceWasmHash };
 
         if (mountedRef.current) {
           setReferenceHash(versionData.wasm_hash);
@@ -86,7 +104,7 @@ export function ContractVerificationBadge({
       cancelled = true;
       mountedRef.current = false;
     };
-  }, [contractId, networkConfig]);
+  }, [contractId, networkConfig, kind]);
 
   if (status === "loading") {
     if (compact) return null;
@@ -112,7 +130,7 @@ export function ContractVerificationBadge({
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-400">
         <ShieldCheck className="h-3 w-3" />
-        {compact ? "Verified" : `Verified (v${referenceVersion})`}
+        {compact ? "Verified" : (kind === "factory" ? "Verified factory" : `Verified (v${referenceVersion})`)}
         {isLocked && (
           <Lock className="ml-0.5 h-2.5 w-2.5 text-green-300/70" />
         )}

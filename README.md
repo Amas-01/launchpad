@@ -4,6 +4,8 @@ An open-source, full-stack platform for deploying and managing SEP-41 compliant 
 
 Built for founders, DAOs, and developers who need a clean interface to launch tokens with vesting schedules, mint/burn controls, and treasury management.
 
+> **Scope:** SoroPad deploys and manages tokens. It does not create a market for them — there is no liquidity pool, swap, or price quote. To trade a token you launch, list it on a Stellar DEX or AMM of your choice. See [PRD.md](PRD.md) §4.
+
 ---
 
 ## ✨ Features
