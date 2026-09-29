@@ -9,26 +9,25 @@ use soroban_sdk::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Soroban's network-enforced ceiling on how far into the future a ledger
-/// entry's TTL can be extended in a single call (`max_entry_ttl` in the
-/// network config; 6,312,000 ledgers on mainnet). Passing a value above
-/// this to `extend_ttl` fails the transaction.
-const MAX_ENTRY_TTL_LEDGERS: u32 = 6_312_000;
-
-/// Fallback TTL extension used when the deadline doesn't give us a more
-/// precise target (e.g. it has already passed): about a year.
+/// Desired lifetime for the ledger entries this contract keeps alive:
+/// about a year, assuming Stellar's ~5s ledger close time.
 ///
-/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers, clamped
-/// to `MAX_ENTRY_TTL_LEDGERS` so this can never exceed what the network
-/// will accept even if the formula above or the network parameter changes.
-const TTL_LEDGERS: u32 = {
-    const YEAR_LEDGERS: u64 = 365 * 24 * 60 * 60 / 5;
-    if YEAR_LEDGERS < MAX_ENTRY_TTL_LEDGERS as u64 {
-        YEAR_LEDGERS as u32
-    } else {
-        MAX_ENTRY_TTL_LEDGERS
-    }
-};
+/// 365 days * 24h * 60m * 60s / 5s-per-ledger = 6,307,200 ledgers.
+///
+/// This is only a *request*. The effective window is whatever the network
+/// allows — `env.storage().max_ttl()`, read at call time — and every
+/// `extend_ttl` site clamps to it. On testnet and mainnet today
+/// `max_entry_ttl` is 3,110,400 ledgers (a network setting, changed by
+/// validator vote), so entries actually live **about 180 days, not a year**.
+/// Anyone relying on an entry outliving that window has to interact with
+/// the contract at least once per window.
+///
+/// Deliberately not compared against a hardcoded ceiling: the previous
+/// constant here (6,312,000) was the soroban-sdk *test harness* default
+/// (`soroban-sdk/src/env.rs`), not a network value, so the clamp it fed
+/// could never fire. The test environment still reports 6,312,000, which is
+/// why no test in this file asserts a specific network figure.
+const TTL_LEDGERS: u32 = 365 * 24 * 60 * 60 / 5;
 
 /// Upper bound on the length of a submitted Merkle proof.
 ///
@@ -175,7 +174,8 @@ impl AirdropContract {
         storage.set(&DataKey::DeadlineLedger, &deadline_ledger);
         storage.set(&DataKey::TotalClaimed, &0i128);
         storage.set(&DataKey::Reclaimed, &false);
-        storage.extend_ttl(TTL_LEDGERS, TTL_LEDGERS);
+        let ttl = Self::_ttl_ledgers(&env);
+        storage.extend_ttl(ttl, ttl);
 
         env.events().publish(
             (symbol_short!("init"), admin),
@@ -415,21 +415,36 @@ impl AirdropContract {
     }
 
     fn _bump_instance(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_LEDGERS, TTL_LEDGERS);
+        let ttl = Self::_ttl_ledgers(env);
+        env.storage().instance().extend_ttl(ttl, ttl);
+    }
+
+    /// The TTL to request for this contract's instance entry: our desired
+    /// window, capped at what the network will actually honour.
+    ///
+    /// `soroban-env-host` silently lowers an over-long `extend_ttl` on an
+    /// instance or persistent entry rather than erroring, so an unclamped
+    /// call is not a hard failure — it just quietly gets you a shorter entry
+    /// than the code appears to ask for. Clamping here keeps the requested
+    /// and effective values the same, so the archival window is legible from
+    /// the source.
+    fn _ttl_ledgers(env: &Env) -> u32 {
+        TTL_LEDGERS.min(env.storage().max_ttl())
     }
 
     /// TTL for a claim marker: far enough out that it still exists when
     /// `reclaim_unclaimed` closes the airdrop, so an archived marker can
     /// never be the reason a second claim succeeds.
+    ///
+    /// Ledgers left until the deadline are the target when they exceed the
+    /// default horizon; `TTL_LEDGERS` is the floor when they do not. Either
+    /// way the result is capped at `env.storage().max_ttl()`, because the
+    /// host silently lowers anything above the network's `max_entry_ttl`.
     fn _claim_ttl(env: &Env) -> u32 {
         let deadline = Self::_deadline(env);
         let current = env.ledger().sequence();
         let remaining = deadline.saturating_sub(current);
-        // Always keep at least the default horizon, and never exceed what the
-        // network will accept in a single extend_ttl call.
-        remaining.clamp(TTL_LEDGERS, MAX_ENTRY_TTL_LEDGERS)
+        remaining.max(TTL_LEDGERS).min(env.storage().max_ttl())
     }
 
     /// `keccak256(0x00 || ascii(strkey(recipient)) || be_i128(amount))`.
@@ -1044,11 +1059,12 @@ mod test {
     #[test]
     fn test_ttl_ledgers_is_about_one_year() {
         assert_eq!(TTL_LEDGERS, 6_307_200);
-        const { assert!(TTL_LEDGERS <= MAX_ENTRY_TTL_LEDGERS) };
     }
 
-    #[test]
-    fn test_claim_ttl_never_exceeds_network_maximum() {
+    /// Initializes a throwaway airdrop with `deadline`, then reports
+    /// `_claim_ttl` next to the inputs that should determine it: the
+    /// network's ceiling and the ledgers still to run before the deadline.
+    fn claim_ttl_for(deadline: u32) -> (u32, u32, u32) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1059,16 +1075,39 @@ mod test {
         let contract_id = env.register_contract(None, AirdropContract);
         let client = AirdropContractClient::new(&env, &contract_id);
         let root = BytesN::from_array(&env, &[1u8; 32]);
+        client.initialize(&token, &admin, &root, &deadline);
 
-        // A deadline far past the network's TTL ceiling must still clamp.
-        client.initialize(&token, &admin, &root, &u32::MAX);
         env.as_contract(&contract_id, || {
-            assert_eq!(
-                AirdropContract::_claim_ttl(&env),
-                MAX_ENTRY_TTL_LEDGERS,
-                "claim TTL must be clamped to the network maximum"
-            );
-        });
+            let ttl = AirdropContract::_claim_ttl(&env);
+            let max_ttl = env.storage().max_ttl();
+            let remaining = deadline.saturating_sub(env.ledger().sequence());
+            (ttl, max_ttl, remaining)
+        })
+    }
+
+    #[test]
+    fn test_claim_ttl_never_exceeds_network_maximum() {
+        // A deadline far past the network's TTL ceiling must still clamp.
+        let (ttl, max_ttl, remaining) = claim_ttl_for(u32::MAX);
+        assert!(remaining > max_ttl);
+        assert_eq!(
+            ttl, max_ttl,
+            "claim TTL must be clamped to the network maximum"
+        );
+    }
+
+    #[test]
+    fn test_claim_ttl_tracks_the_deadline_it_is_asked_about() {
+        // Past the default horizon, the marker's TTL is the remaining
+        // ledgers — not the default horizon for every input.
+        let (ttl, max_ttl, remaining) = claim_ttl_for(TTL_LEDGERS + 4_000);
+        assert!(remaining > TTL_LEDGERS && remaining <= max_ttl);
+        assert_eq!(ttl, remaining);
+
+        // Before it, the default horizon is the floor.
+        let (ttl, max_ttl, remaining) = claim_ttl_for(500);
+        assert!(remaining < TTL_LEDGERS);
+        assert_eq!(ttl, TTL_LEDGERS.min(max_ttl));
     }
 
     // ── Event schema ────────────────────────────────────────────────────
