@@ -458,6 +458,84 @@ function toU32ScVal(value: number): StellarSdk.xdr.ScVal {
  * This function attempts to call the required SEP-41 methods to verify
  * that the contract is a valid token contract.
  */
+/**
+ * Result of probing a contract for a SEP-41 token interface.
+ *
+ * Three states, not two: a well-formed contract ID can point at an account
+ * (not a contract at all), at a contract that simply does not export the
+ * token interface, or at a real token. Collapsing the middle state into
+ * either of the others is what made every well-formed `C...` address render
+ * as an empty token dashboard.
+ */
+export type TokenContractProbe =
+  | { status: "token" }
+  | { status: "not-a-contract"; error: string }
+  | { status: "no-token-interface"; error: string }
+  | { status: "unreachable"; error: string };
+
+/**
+ * Distinguish "this contract has no `name()` export" from "the RPC call
+ * itself failed".
+ *
+ * `simulateTransaction` reports a missing export as a simulation error whose
+ * text names the missing function, while a transport failure rejects the
+ * promise outright. That difference is the whole probe: it is the same
+ * pattern `set_compliance_node` uses on the contract side to decide whether
+ * an optional getter exists.
+ */
+function isMissingExportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /missing\s+(value|function|method|export)/i.test(message) ||
+    /function\s+['"`]?[a-z_][a-z0-9_]*['"`]?\s+(not\s+found|does\s+not\s+exist)/i.test(
+      message,
+    ) ||
+    /has\s+no\s+member/i.test(message) ||
+    /not\s+found\s+in\s+contract/i.test(message)
+  );
+}
+
+/**
+ * Probe a contract once and report which of the three states it is in.
+ *
+ * Runs a single `name()` simulation: a success means the contract exports the
+ * token interface, a missing-export simulation error means it is a contract
+ * without one, and anything else (transport, bad ID) is reported as
+ * unreachable so the caller can keep showing the transport-failure copy.
+ */
+export async function probeTokenContract(
+  contractId: string,
+  config: NetworkConfig,
+): Promise<TokenContractProbe> {
+  try {
+    const nameVal = await simulateCall(contractId, "name", config);
+    try {
+      decodeString(nameVal);
+    } catch {
+      return {
+        status: "no-token-interface",
+        error: "Contract does not implement a decodable 'name()' method",
+      };
+    }
+    return { status: "token" };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown validation error";
+
+    if (isMissingExportError(error)) {
+      return { status: "no-token-interface", error: message };
+    }
+
+    // A contract ID that does not resolve to a deployed contract surfaces as
+    // a ledger-entry lookup failure rather than a missing export.
+    if (/contract\s+(not\s+found|does\s+not\s+exist)/i.test(message)) {
+      return { status: "not-a-contract", error: message };
+    }
+
+    return { status: "unreachable", error: message };
+  }
+}
+
 export async function validateTokenContract(
   contractId: string,
   config: NetworkConfig,
